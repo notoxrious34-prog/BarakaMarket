@@ -26,6 +26,43 @@ for seed in [(0, 0), (im.width - 1, 0), (0, im.height - 1), (im.width - 1, im.he
     ImageDraw.floodfill(bg, seed, 128, thresh=0)
 bgmask = bg.point(lambda v: 255 if v == 128 else 0)
 
+# Through-hole knockout (ta-marbuta counter + enclosed bg pockets): interior
+# dark blobs >= 300px (@1/4 scale) are negative space and become transparent.
+# Smaller top-band details (camera lens, speaker, sensor) stay opaque.
+from collections import deque
+sw, sh = im.width // 4, im.height // 4
+small = dark.resize((sw, sh), Image.BILINEAR).point(lambda v: 255 if v > 128 else 0)
+sbg = small.copy()
+for seed in [(0, 0), (sw - 1, 0), (0, sh - 1), (sw - 1, sh - 1)]:
+    ImageDraw.floodfill(sbg, seed, 128, thresh=0)
+interior = ImageChops.darker(small, sbg.point(lambda v: 0 if v == 128 else 255))
+data = bytearray(interior.tobytes())
+kept = bytearray(sw * sh)
+for i in range(sw * sh):
+    if data[i] == 0:
+        continue
+    q = deque([i])
+    data[i] = 0
+    members = [i]
+    while q:
+        p = q.popleft()
+        x, y = p % sw, p // sw
+        if x > 0 and data[p - 1]:
+            data[p - 1] = 0; q.append(p - 1); members.append(p - 1)
+        if x < sw - 1 and data[p + 1]:
+            data[p + 1] = 0; q.append(p + 1); members.append(p + 1)
+        if y > 0 and data[p - sw]:
+            data[p - sw] = 0; q.append(p - sw); members.append(p - sw)
+        if y < sh - 1 and data[p + sw]:
+            data[p + sw] = 0; q.append(p + sw); members.append(p + sw)
+    if len(members) >= 300:
+        for m in members:
+            kept[m] = 255
+holes = Image.frombytes('L', (sw, sh), bytes(kept)).resize(im.size, Image.NEAREST)
+holes = ImageChops.darker(holes, dark)  # crisp edges: only truly-dark cores
+bgmask = ImageChops.lighter(bgmask, holes)
+print('HOLES_REMOVED')
+
 alpha = bgmask.point(lambda v: 0 if v > 0 else 255)
 alpha = alpha.filter(ImageFilter.MinFilter(3))  # trim 1px halo fringe
 im.putalpha(alpha)
