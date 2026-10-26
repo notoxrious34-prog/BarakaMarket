@@ -10,3 +10,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
+setup/
+*.nsis.exe
+releases/
