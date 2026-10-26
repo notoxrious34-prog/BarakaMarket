@@ -93,7 +93,7 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
   return { app, baraka };
 }
 
-if (process.argv[1]?.endsWith('server/index.ts')) {
+if (process.argv[1]?.replace(/\\/g, '/').endsWith('server/index.ts')) {
   const port = parseInt(process.env.PORT ?? '3100', 10);
   const dbPath = process.env.BARAKA_DB ?? 'data/baraka.db';
   const { app } = createApp(dbPath);
