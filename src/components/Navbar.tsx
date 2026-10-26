@@ -85,7 +85,7 @@ export const Navbar: React.FC = () => {
           <img
             src="/brand/baraka-emblem-256.png"
             alt="Baraka — بركة"
-            className="w-9 h-9 rounded-[10px] object-cover ring-1 ring-white/10 shadow-lg shadow-black/40"
+            className="w-9 h-9 rounded-xl object-contain ring-1 ring-amber-400/25 drop-shadow-[0_0_8px_rgba(212,160,23,0.45)]"
             draggable={false}
           />
           <span className="font-bold text-lg text-white tracking-tight group-hover:text-emerald-400 transition-colors whitespace-nowrap">
@@ -97,86 +97,89 @@ export const Navbar: React.FC = () => {
         <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar">
           <button
             onClick={() => setActiveView('pos')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'pos'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
             <ShoppingCart className="w-4 h-4" />
-            <span>{isAr ? 'نقطة البيع (F1)' : 'Caisse POS (F1)'}</span>
+            <span>{isAr ? 'الكاشير (F1)' : 'Caisse (F1)'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('products')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'products'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
             <Package className="w-4 h-4" />
-            <span>{isAr ? 'المخزون والمنتجات' : 'Stock & Produits'}</span>
+            <span>{isAr ? 'المخزون' : 'Stock'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('suppliers')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            title={isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats'}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'suppliers'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
             <Truck className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats'}</span>
+            <span>{isAr ? 'الموردون' : 'Fournisseurs'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('clients')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            title={isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)'}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'clients'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
             <BookOpen className="w-4 h-4" />
-            <span>{isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)'}</span>
+            <span>{isAr ? 'الديون (F9)' : 'Dettes (F9)'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('accounting')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            title={isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF'}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'accounting'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
             <PieChart className="w-4 h-4 text-emerald-400" />
-            <span>{isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF'}</span>
+            <span>{isAr ? 'المحاسبة' : 'Compta'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('reports')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'reports'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>{isAr ? 'الإغلاق الضريبي (Rapport Z)' : 'Rapport Z'}</span>
+            <span>{isAr ? 'تقرير Z' : 'Rapport Z'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('license')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
               activeView === 'license'
                 ? 'bg-amber-600 text-white shadow-md shadow-amber-900/40'
                 : 'text-amber-400/90 hover:bg-[#162030] hover:text-amber-300'
             }`}
           >
             <KeyRound className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'الرخصة (5000 دج)' : 'Licence'}</span>
+            <span>{isAr ? 'الرخصة' : 'Licence'}</span>
           </button>
 
           <button
@@ -220,7 +223,7 @@ export const Navbar: React.FC = () => {
               title={isAr ? 'الفواتير المعلقة (F5)' : 'Paniers en attente (F5)'}
             >
               <Clock className="w-3.5 h-3.5 text-amber-400" />
-              <span>{isAr ? 'المعلق' : 'En Attente'}</span>
+              <span className="hidden xl:inline">{isAr ? 'المعلق' : 'En Attente'}</span>
               <span className="w-5 h-5 rounded-full bg-amber-500/20 text-amber-300 text-[11px] font-bold flex items-center justify-center border border-amber-500/30">
                 {heldCarts.length}
               </span>
