@@ -82,9 +82,9 @@ CREATE TABLE IF NOT EXISTS suppliers (
   category       TEXT    NOT NULL DEFAULT ''
 );
 
--- Atomic invoice/ticket counters. Bump via single UPDATE..RETURNING (one statement = atomic).
+-- Atomic invoice/ticket/quittance counters. Bump via single UPDATE..RETURNING (one statement = atomic).
 CREATE TABLE IF NOT EXISTS seq (
-  kind   TEXT    NOT NULL CHECK (kind IN ('FACT', 'T')),
+  kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z')),
   year   INTEGER NOT NULL,
   last_n INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (kind, year)
@@ -147,8 +147,21 @@ CREATE TABLE IF NOT EXISTS client_settlements (
   client_name    TEXT    NOT NULL DEFAULT '',
   amount_ct      INTEGER NOT NULL CHECK (amount_ct > 0),
   payment_method TEXT    NOT NULL CHECK (payment_method IN ('ESPECES', 'CIB', 'DAHABIYA', 'CREDIT')),
+  timbre_ct      INTEGER NOT NULL DEFAULT 0,
+  total_collected_ct INTEGER NOT NULL DEFAULT 0,
+  receipt_number TEXT    UNIQUE,
   date           TEXT    NOT NULL,
   note           TEXT
+);
+
+-- ACID ephemeral cart draft (EXEC-DIR-2023-001 TASK 4).
+-- Keyed by session_id (default 'MAIN_POS'); survives power-cut cache flush.
+CREATE TABLE IF NOT EXISTS active_cart_draft (
+  session_id   TEXT    PRIMARY KEY DEFAULT 'MAIN_POS',
+  payload_json TEXT    NOT NULL DEFAULT '[]',
+  item_count   INTEGER NOT NULL DEFAULT 0,
+  total_ttc_ct INTEGER NOT NULL DEFAULT 0,
+  updated_at   TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS purchases (
@@ -194,23 +207,28 @@ CREATE TABLE IF NOT EXISTS supplier_payments (
 );
 
 CREATE TABLE IF NOT EXISTS z_reports (
-  report_number      TEXT    PRIMARY KEY,
-  date               TEXT    NOT NULL,
-  closed_at          TEXT    NOT NULL,
-  sales_count        INTEGER NOT NULL DEFAULT 0,
+  report_number      TEXT    PRIMARY KEY, -- Z-YYYY-XXXXXX (monotonic, hash-chained)
+  day                TEXT    NOT NULL,    -- business date YYYY-MM-DD
+  opening_time       TEXT    NOT NULL,
+  closing_time       TEXT    NOT NULL,
+  total_sales_count  INTEGER NOT NULL DEFAULT 0,
   total_ht_ct        INTEGER NOT NULL DEFAULT 0,
-  total_tva_ct       INTEGER NOT NULL DEFAULT 0,
-  total_timbre_ct    INTEGER NOT NULL DEFAULT 0,
-  total_ttc_ct       INTEGER NOT NULL DEFAULT 0,
   tva0_base_ct       INTEGER NOT NULL DEFAULT 0,
   tva9_base_ct       INTEGER NOT NULL DEFAULT 0,
   tva9_amt_ct        INTEGER NOT NULL DEFAULT 0,
   tva19_base_ct      INTEGER NOT NULL DEFAULT 0,
   tva19_amt_ct       INTEGER NOT NULL DEFAULT 0,
-  total_especes_ct   INTEGER NOT NULL DEFAULT 0,
-  total_bank_ct      INTEGER NOT NULL DEFAULT 0,
-  total_credit_granted_ct INTEGER NOT NULL DEFAULT 0,
-  total_credit_settled_ct INTEGER NOT NULL DEFAULT 0,
+  total_tva_ct       INTEGER NOT NULL DEFAULT 0,
+  total_timbre_ct    INTEGER NOT NULL DEFAULT 0,
+  total_ttc_ct       INTEGER NOT NULL DEFAULT 0,
+  especes_gross_ct   INTEGER NOT NULL DEFAULT 0,
+  cib_total_ct       INTEGER NOT NULL DEFAULT 0,
+  dahabiya_total_ct  INTEGER NOT NULL DEFAULT 0,
+  credit_granted_ct  INTEGER NOT NULL DEFAULT 0,
+  credit_collected_ct INTEGER NOT NULL DEFAULT 0,
+  first_invoice_number TEXT  NOT NULL DEFAULT '',
+  last_invoice_number  TEXT  NOT NULL DEFAULT '',
+  prev_hash          TEXT    NOT NULL DEFAULT '',
   hash               TEXT    NOT NULL,
   finalized          INTEGER NOT NULL DEFAULT 1
 );
@@ -230,4 +248,4 @@ CREATE INDEX IF NOT EXISTS idx_products_scale ON products (scale_item_code);
 CREATE INDEX IF NOT EXISTS idx_sales_created ON sales (created_at);
 CREATE INDEX IF NOT EXISTS idx_sales_status ON sales (status);
 CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items (sale_id);
-CREATE INDEX IF NOT EXISTS idx_z_date ON z_reports (date);
+CREATE INDEX IF NOT EXISTS idx_z_day ON z_reports (day);

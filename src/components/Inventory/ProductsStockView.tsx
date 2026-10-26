@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, TVARate } from '../../types';
-import { formatDZD } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
 import {
   Package,
   Plus,

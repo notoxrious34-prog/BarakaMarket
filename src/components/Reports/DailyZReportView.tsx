@@ -1,26 +1,106 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { formatDZD } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
+import { dzdToCentimes } from '../../core/money';
+import { computeZHash, GENESIS_PREV_HASH } from '../../core/zreport';
 import {
   FileText,
   Printer,
-  CheckCircle,
   Calendar,
   DollarSign,
   CreditCard,
   BookOpen,
   ArrowDownLeft,
   Percent,
+  Lock,
 } from 'lucide-react';
 
 export const DailyZReportView: React.FC = () => {
-  const { generateDailyZReport, storeProfile, language } = useApp();
+  const { generateDailyZReport, sales, storeProfile, language } = useApp();
   const isAr = language === 'ar';
 
   const [zReport] = useState(() => generateDailyZReport());
+  const [format, setFormat] = useState<'80mm' | 'A4'>('80mm');
+  const [prevHash, setPrevHash] = useState<string>(GENESIS_PREV_HASH);
+  const [closure, setClosure] = useState<{ report_number: string; hash: string } | null>(null);
+  const [closing, setClosing] = useState(false);
+  const [closeNote, setCloseNote] = useState('');
+
+  // Gate-03 TASK 1: chain head from the SQLite loopback (genesis if offline).
+  useEffect(() => {
+    let alive = true;
+    fetch('http://127.0.0.1:3100/api/z/latest-hash')
+      .then(r => (r.ok ? r.json() : null))
+      .then((j: { prev_hash?: string } | null) => {
+        if (alive && j?.prev_hash) setPrevHash(j.prev_hash);
+      })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const ct = useMemo(() => ({
+    ht: dzdToCentimes(zReport.total_ht),
+    tva: dzdToCentimes(zReport.total_tva),
+    timbre: dzdToCentimes(zReport.total_timbre),
+    ttc: dzdToCentimes(zReport.total_ttc),
+    b0: dzdToCentimes(zReport.tva_0_base),
+    b9: dzdToCentimes(zReport.tva_9_base),
+    a9: dzdToCentimes(zReport.tva_9_amount),
+    b19: dzdToCentimes(zReport.tva_19_base),
+    a19: dzdToCentimes(zReport.tva_19_amount),
+    esp: dzdToCentimes(zReport.total_especes),
+    cib: dzdToCentimes(zReport.total_cib_dahabiya),
+    cred: dzdToCentimes(zReport.total_credit_granted),
+    coll: dzdToCentimes(zReport.total_credit_settled),
+  }), [zReport]);
+
+  const todayInvoices = useMemo(() => sales
+    .filter(s => s.created_at.startsWith(zReport.date) && s.status === 'COMPLETED')
+    .map(s => s.invoice_number)
+    .sort(), [sales, zReport.date]);
+  const firstInvoice = todayInvoices[0] ?? '—';
+  const lastInvoice = todayInvoices[todayInvoices.length - 1] ?? '—';
+
+  const chainHash = closure?.hash ?? computeZHash(prevHash, zReport.report_number, zReport.date, ct.ttc, ct.timbre);
+  const shortHash = (h: string) => `${h.slice(0, 10)}…${h.slice(-6)}`;
 
   const handlePrintZ = () => {
     window.print();
+  };
+
+  /** Finalize the closure: authoritative SQLite lane, provisional fallback. */
+  const handleClose = async () => {
+    setClosing(true);
+    setCloseNote('');
+    try {
+      const r = await fetch('http://127.0.0.1:3100/api/z/close', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          day: zReport.date,
+          openingTime: '08:00',
+          closingTime: new Date().toLocaleTimeString('fr-FR'),
+          totals: {
+            salesCount: zReport.sales_count, totalHtCt: ct.ht, tva0BaseCt: ct.b0,
+            tva9BaseCt: ct.b9, tva9AmtCt: ct.a9, tva19BaseCt: ct.b19, tva19AmtCt: ct.a19,
+            totalTvaCt: ct.tva, totalTimbreCt: ct.timbre, totalTtcCt: ct.ttc,
+            especesGrossCt: ct.esp, cibTotalCt: ct.cib, dahabiyaTotalCt: 0,
+            creditGrantedCt: ct.cred, creditCollectedCt: ct.coll,
+            firstInvoice, lastInvoice,
+          },
+        }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const out = (await r.json()) as { report_number: string; hash: string };
+      setClosure(out);
+      setPrevHash(out.hash);
+      setCloseNote(isAr ? 'تم الإغلاق والتوقيع في SQLite' : 'Clôturé et signé en SQLite');
+    } catch {
+      setClosure({ report_number: `${zReport.report_number}-P`, hash: chainHash });
+      setCloseNote(isAr ? 'وضع مؤقت: لا يوجد اتصال بقاعدة البيانات' : 'Provisoire: loopback injoignable');
+    } finally {
+      setClosing(false);
+    }
   };
 
   return (
@@ -41,6 +121,20 @@ export const DailyZReportView: React.FC = () => {
             </p>
           </div>
 
+          <div className="flex items-center gap-2">
+          <div className="flex rounded-lg overflow-hidden border border-[#2b3a4f] text-[11px]">
+            {(['80mm', 'A4'] as const).map(f => (
+              <button key={f} onClick={() => setFormat(f)} className={`px-2.5 py-1.5 cursor-pointer ${format === f ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400'}`}>{f}</button>
+            ))}
+          </div>
+          <button
+            onClick={handleClose}
+            disabled={closing || !!closure}
+            className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 cursor-pointer"
+          >
+            <Lock className="w-4 h-4" />
+            <span>{closure ? (isAr ? 'مغلق ✓' : 'Clôturé ✓') : closing ? '…' : (isAr ? 'إغلاق Z' : 'Clôturer Z')}</span>
+          </button>
           <button
             onClick={handlePrintZ}
             className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-950/40 cursor-pointer"
@@ -48,6 +142,7 @@ export const DailyZReportView: React.FC = () => {
             <Printer className="w-4 h-4" />
             <span>{isAr ? 'طباعة تقرير Z' : 'Imprimer Ticket Z'}</span>
           </button>
+          </div>
         </div>
 
         {/* Global Financial Cards */}
@@ -160,12 +255,59 @@ export const DailyZReportView: React.FC = () => {
         </div>
       </div>
 
-      {/* Right: Thermal Z-Ticket Preview for 80mm ESC/POS */}
-      <div className="w-full lg:w-80 flex flex-col items-center">
+      {/* Right: print preview — 80mm ESC/POS ticket or A4 audit sheet */}
+      <div className={`w-full ${format === 'A4' ? 'lg:flex-1' : 'lg:w-80'} flex flex-col items-center`}>
         <span className="text-xs font-semibold text-slate-400 mb-2">
-          {isAr ? 'معاينة وصل الإغلاق (Ticket Z 80mm)' : 'Ticket Z ESC/POS 80mm'}
+          {format === 'A4'
+            ? (isAr ? 'ورقة التدقيق A4' : 'Feuille d\'audit A4')
+            : (isAr ? 'معاينة وصل الإغلاق (Ticket Z 80mm)' : 'Ticket Z ESC/POS 80mm')}
         </span>
 
+        {format === 'A4' ? (
+        <div
+          id="printable-receipt"
+          dir="ltr"
+          className="w-full max-w-[640px] bg-white text-black p-8 font-mono text-xs leading-relaxed shadow-2xl border border-slate-300 select-text text-start"
+          style={{ fontFamily: "'Courier New', Courier, monospace" }}
+        >
+          <div className="text-center border-b-2 border-black pb-3">
+            <div className="font-bold text-lg uppercase">{storeProfile.store_name}</div>
+            <div className="text-xs">{storeProfile.company_owner} — {storeProfile.address}</div>
+            <div className="text-[11px]">RC: {storeProfile.rc_number} | NIF: {storeProfile.nif_number} | NIS: {storeProfile.nis_number} | AI: {storeProfile.ai_number}</div>
+            <div className="font-bold mt-2">RAPPORT Z DE CLÔTURE — {closure ? closure.report_number : zReport.report_number}{closure && ' (FINALISÉ)'}</div>
+            <div className="text-[11px]">Date: {zReport.date} — Clôture: {zReport.closed_at} — Ventes: {zReport.sales_count}</div>
+            <div className="text-[11px]">Factures: {firstInvoice} → {lastInvoice}</div>
+          </div>
+          <table className="w-full my-3 text-[11px]">
+            <tbody>
+              <tr className="border-b border-black"><td>Total HT</td><td className="text-end">{ct.ht / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>TVA 0% — base</td><td className="text-end">{ct.b0 / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>TVA 9% — base / montant</td><td className="text-end">{ct.b9 / 100} / {ct.a9 / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>TVA 19% — base / montant</td><td className="text-end">{ct.b19 / 100} / {ct.a19 / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>Total TVA</td><td className="text-end">{ct.tva / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>Timbre fiscal (Art. 136)</td><td className="text-end">{ct.timbre / 100} DZD</td></tr>
+              <tr className="font-bold"><td>TOTAL TTC</td><td className="text-end">{ct.ttc / 100} DZD</td></tr>
+            </tbody>
+          </table>
+          <table className="w-full my-3 text-[11px]">
+            <tbody>
+              <tr className="border-b border-black"><td>Espèces (timbre inclus)</td><td className="text-end">{ct.esp / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>CIB / Dahabiya</td><td className="text-end">{ct.cib / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>Crédit accordé</td><td className="text-end">{ct.cred / 100} DZD</td></tr>
+              <tr className="border-b border-black"><td>Crédit recouvré</td><td className="text-end">{ct.coll / 100} DZD</td></tr>
+            </tbody>
+          </table>
+          <div className="text-[10px] break-all border-t border-black pt-2">
+            <div>prev_hash: {prevHash}</div>
+            <div className="font-bold">hash: {chainHash}</div>
+            {closeNote && <div>{closeNote}</div>}
+          </div>
+          <div className="grid grid-cols-2 gap-8 mt-8 text-[11px]">
+            <div className="border-t border-black pt-1 text-center">Signature caissier</div>
+            <div className="border-t border-black pt-1 text-center">Signature gérant + cachet</div>
+          </div>
+        </div>
+        ) : (
         <div
           id="printable-receipt"
           dir="ltr"
@@ -184,11 +326,15 @@ export const DailyZReportView: React.FC = () => {
             <div className="font-bold text-sm uppercase">*** RAPPORT Z DE CAISSE ***</div>
             <div className="text-[10px]">CLÔTURE JOURNALIÈRE FISCALE</div>
             <div className="text-[10px] pt-1">
-              Rapport N°: {zReport.report_number}
+              {closure ? closure.report_number : zReport.report_number}{closure && ' — FINALISÉ'}
             </div>
             <div className="text-[10px]">
               Date: {zReport.date} - Heure: {zReport.closed_at}
             </div>
+            <div className="text-[9px] break-words">
+              {firstInvoice} → {lastInvoice}
+            </div>
+            {closeNote && <div className="text-[9px] font-bold">{closeNote}</div>}
           </div>
 
           <div className="py-2 border-b border-black space-y-1 text-[10px]">
@@ -238,11 +384,18 @@ export const DailyZReportView: React.FC = () => {
             </div>
           </div>
 
+          <div className="py-2 border-b border-black space-y-1 text-[10px]">
+            <div className="font-bold uppercase pb-0.5">Chaîne Fiscale (SHA-256):</div>
+            <div className="break-all">prev: {shortHash(prevHash)}</div>
+            <div className="break-all font-bold">hash: {shortHash(chainHash)}</div>
+          </div>
+
           <div className="text-center pt-2 space-y-0.5 text-[9px] text-slate-700">
             <div>Signé par le Caissier & Gérant</div>
             <div className="font-semibold text-slate-500 pt-1">Baraka Market v1.0 by BarakaDEV</div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState, useMemo } from 'react';
 import {
   AccountingSummary,
   Client,
@@ -25,7 +25,9 @@ import {
   initialSuppliers,
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals } from '../core/cart-bridge';
-import { parseScaleBarcode } from '../utils/fiscal';
+import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
+import { probeFiscalAuthority, postSaleToLoopback, type AuthorityStatus } from '../core/fiscal-authority';
+import { centimesToDzd, dzdToCentimes } from '../core/money';
 import { calculateAccountingSummary, calculateNewPMP } from '../utils/accounting';
 
 interface AppContextType {
@@ -48,6 +50,15 @@ interface AppContextType {
   isHardwareScaleActive: boolean;
   scaleWeightGrams: number;
   accountingSummary: AccountingSummary;
+  /**
+   * Gate-02 TASK 1: dynamic authority. FISCAL_SQLITE when the native shell
+   * (Tauri invoke db_status) or the local loopback WAL lane answers;
+   * PROVISIONAL (amber banner) otherwise. Green badge renders while fiscal.
+   */
+  authority: AuthorityStatus;
+  isFiscalMode: boolean;
+  /** Last debt settlement with Art.136 timbre — auto-opens quittance print. */
+  lastSettlementQuittance: (DebtSettlement & { prev_balance: number; new_balance: number }) | null;
 
   // Actions
   setActiveView: (view: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings') => void;
@@ -68,6 +79,16 @@ interface AppContextType {
     amountPaid: number,
     isFactureReglementaire?: boolean
   ) => Sale;
+  /**
+   * Gate-02 TASK 1: authoritative checkout. In FISCAL mode POSTs the
+   * centimes payload to the SQLite loopback and returns the sale stamped
+   * with monotonic FACT/T numbers; falls back to provisional on failure.
+   */
+  completeSaleFiscal: (
+    paymentMethod: PaymentMethod,
+    amountPaid: number,
+    isFactureReglementaire?: boolean
+  ) => Promise<Sale>;
   settleClientDebt: (
     clientId: number,
     amount: number,
@@ -101,8 +122,15 @@ interface AppContextType {
   addClient: (client: Omit<Client, 'id' | 'credit_balance'>) => Client;
   updateClient: (id: number, client: Partial<Client>) => void;
   updateStoreProfile: (profile: Partial<StoreProfile>) => void;
+  /** Gate-03 TASK 4: first-run provisioning — true until the shop identity locks in. */
+  needsStoreSetup: boolean;
+  completeStoreSetup: (profile: { store_name: string; rc_number: string; nif_number: string; nis_number?: string; ai_number?: string; address?: string; phone?: string }) => void;
+  /** Gate-03 TASK 3: license snapshot for the Navbar trial badge. */
+  licenseActivated: boolean;
+  trialRemaining: { sales: number; days: number };
   openPrintModal: (sale: Sale, type: 'ticket' | 'facture') => void;
   closePrintModal: () => void;
+  closeSettlementQuittance: () => void;
   generateDailyZReport: () => DailyZReport;
   setHardwareScaleActive: (active: boolean) => void;
   setScaleWeightGrams: (grams: number) => void;
@@ -123,7 +151,33 @@ const STORAGE_KEYS = {
   ACTIVE_DRAFT: 'baraka_active_draft_cart_v2',
   LANG: 'baraka_lang_v2',
   THEME: 'baraka_theme_v2',
+  SEQ_FACT_PREFIX: 'baraka_seq_FACT_',
+  SEQ_TICKET_PREFIX: 'baraka_seq_T_',
+  SEQ_QUITTANCE_PREFIX: 'baraka_seq_Q_',
 };
+
+/**
+ * EXEC-DIR-2023-001 INVARIANT 2 — browser-lane monotonic sequencer.
+ * Survives deletes/voids/reloads (localStorage-backed, per-year).
+ * ALWAYS 6-digit zero-padded. NEVER sales.length-based.
+ * These numbers are PROVISIONAL — the SQLite seq is authoritative.
+ */
+function nextBrowserSeq(kind: 'FACT' | 'T' | 'Q', year: number): number {
+  const prefix =
+    kind === 'FACT' ? STORAGE_KEYS.SEQ_FACT_PREFIX
+    : kind === 'T' ? STORAGE_KEYS.SEQ_TICKET_PREFIX
+    : STORAGE_KEYS.SEQ_QUITTANCE_PREFIX;
+  const key = `${prefix}${year}`;
+  let last = 0;
+  try {
+    last = parseInt(localStorage.getItem(key) ?? '0', 10) || 0;
+  } catch { last = 0; }
+  const next = last + 1;
+  try { localStorage.setItem(key, String(next)); } catch { /* storage full — still monotonic in-memory */ }
+  return next;
+}
+
+const pad6 = (n: number) => String(n).padStart(6, '0');
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [products, setProducts] = useState<Product[]>(() => {
@@ -220,6 +274,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeView, setActiveView] = useState<'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings'>('pos');
   const [currentPrintSale, setCurrentPrintSale] = useState<Sale | null>(null);
   const [printModalType, setPrintModalType] = useState<'ticket' | 'facture' | null>(null);
+  const [lastSettlementQuittance, setLastSettlementQuittance] = useState<
+    (DebtSettlement & { prev_balance: number; new_balance: number }) | null
+  >(null);
+  // Browser/localStorage lane is NEVER the fiscal authority (SQLite seq is).
+  const [authority, setAuthority] = useState<AuthorityStatus>('PROVISIONAL');
+  const isFiscalMode = authority === 'FISCAL_SQLITE';
+  const authorityRef = useRef<AuthorityStatus>('PROVISIONAL');
+  authorityRef.current = authority;
+
+  // Gate-02 TASK 1: probe native shell / loopback once on mount.
+  useEffect(() => {
+    let alive = true;
+    probeFiscalAuthority().then(s => {
+      if (alive) setAuthority(s);
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
 
   const [language, setLanguage] = useState<'ar' | 'fr'>(() => {
     try {
@@ -508,11 +579,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
     const dateNow = new Date();
     const year = dateNow.getFullYear();
-    const count = sales.length + 1;
-    const padded = String(count).padStart(4, '0');
-
-    const invoiceNumber = `FACT-${year}-${padded}`;
-    const ticketNumber = `T-${year}-${padded}`;
+    // INVARIANT 2: monotonic 6-digit provisional numbers (SQLite seq is authoritative).
+    // NEVER sales.length-based. Browser lane is marked provisional + NON-FISCAL banner.
+    const invoiceNumber = `FACT-${year}-${pad6(nextBrowserSeq('FACT', year))}`;
+    const ticketNumber = `T-${year}-${pad6(nextBrowserSeq('T', year))}`;
     const returned = Math.max(0, Math.round(amountPaid - totals.total_ttc));
 
     const newSale: Sale = {
@@ -540,6 +610,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'COMPLETED',
       created_at: dateNow.toISOString(),
       is_facture_reglementaire: isFactureReglementaire,
+      is_provisional: true,
     };
 
     // Deduct stock quantities
@@ -576,6 +647,126 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newSale;
   };
 
+  /**
+   * Gate-02 TASK 1 — authoritative checkout. Recomputes the cart through the
+   * integer engine, POSTs to the SQLite loopback, and stamps the returned
+   * monotonic FACT/T numbers. Falls back to provisional on any failure.
+   */
+  const completeSaleFiscal = async (
+    paymentMethod: PaymentMethod,
+    amountPaid: number,
+    isFactureReglementaire = false,
+  ): Promise<Sale> => {
+    if (authorityRef.current !== 'FISCAL_SQLITE' || currentCart.length === 0) {
+      return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
+    }
+    try {
+      const ctItems = currentCart.map(it => {
+        const l = calculateLineTotalsCt(
+          dzdToCentimes(it.unit_price_ttc), it.quantity, it.tva_rate, it.discount_percent,
+        );
+        return {
+          tva_rate: it.tva_rate,
+          total_line_ht_ct: l.total_line_ht_ct,
+          total_line_tva_ct: l.total_line_tva_ct,
+          total_line_ttc_ct: l.total_line_ttc_ct,
+        };
+      });
+      const t = calculateSaleTotalsCt(ctItems, paymentMethod, {
+        timbre_rate: storeProfile.timbre_rate,
+        timbre_min: storeProfile.timbre_min,
+        timbre_max: storeProfile.timbre_max,
+      });
+      const createdAt = new Date().toISOString();
+      const payloadItems = currentCart.map((it, i) => ({
+        product_id: it.product_id,
+        barcode: it.barcode,
+        name_fr: it.name_fr,
+        name_ar: it.name_ar,
+        unit_price_ct: dzdToCentimes(it.unit_price_ttc),
+        qty_milli: Math.round(it.quantity * 1000),
+        unit: it.unit,
+        tva_rate: it.tva_rate,
+        discount_bp: Math.round((it.discount_percent || 0) * 100),
+        line_ht_ct: ctItems[i].total_line_ht_ct,
+        line_tva_ct: ctItems[i].total_line_tva_ct,
+        line_ttc_ct: ctItems[i].total_line_ttc_ct,
+      }));
+      const out = await postSaleToLoopback(
+        {
+          cashier_id: 'C-01',
+          cashier_name: 'Amine',
+          client_id: selectedClient.id,
+          client_name: selectedClient.name,
+          payment_method: paymentMethod,
+          amount_paid_ct: dzdToCentimes(amountPaid),
+          amount_returned_ct: Math.max(0, dzdToCentimes(amountPaid) - t.total_ttc_ct),
+          totals: {
+            total_ht_ct: t.total_ht_ct,
+            total_tva_ct: t.total_tva_ct,
+            timbre_ct: t.timbre_ct,
+            total_ttc_ct: t.total_ttc_ct,
+            tva_breakdown: {
+              0: { base_ht_ct: t.tva_breakdown[0].base_ht_ct, tva_amount_ct: t.tva_breakdown[0].tva_amount_ct, total_ttc_ct: t.tva_breakdown[0].total_ttc_ct },
+              9: { base_ht_ct: t.tva_breakdown[9].base_ht_ct, tva_amount_ct: t.tva_breakdown[9].tva_amount_ct, total_ttc_ct: t.tva_breakdown[9].total_ttc_ct },
+              19: { base_ht_ct: t.tva_breakdown[19].base_ht_ct, tva_amount_ct: t.tva_breakdown[19].tva_amount_ct, total_ttc_ct: t.tva_breakdown[19].total_ttc_ct },
+            },
+          },
+          is_facture: isFactureReglementaire ? 1 : 0,
+          created_at: createdAt,
+        },
+        payloadItems,
+      );
+      if (!out) return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
+      const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
+      const authoritative: Sale = {
+        id: out.id,
+        invoice_number: out.invoice_number,
+        ticket_number: out.ticket_number,
+        cashier_id: 'C-01',
+        cashier_name: 'Amine',
+        client_id: selectedClient.id,
+        client_name: selectedClient.name,
+        items: [...currentCart],
+        total_ht: totals.total_ht,
+        tva_breakdown: totals.tva_breakdown,
+        total_tva: totals.total_tva,
+        timbre_fiscal: totals.timbre_fiscal,
+        total_ttc: totals.total_ttc,
+        payment_method: paymentMethod,
+        amount_paid: amountPaid,
+        amount_returned: Math.max(0, Math.round(amountPaid - totals.total_ttc)),
+        status: 'COMPLETED',
+        created_at: createdAt,
+        is_facture_reglementaire: isFactureReglementaire,
+        is_provisional: false,
+      };
+      setProducts(prev =>
+        prev.map(p => {
+          const itemSold = currentCart.find(i => i.product_id === p.id);
+          if (itemSold) {
+            const newQty = Math.max(0, Math.round((p.stock_qty - itemSold.quantity) * 100) / 100);
+            return { ...p, stock_qty: newQty };
+          }
+          return p;
+        }),
+      );
+      if (paymentMethod === 'CREDIT' && selectedClient.id) {
+        setClients(prev =>
+          prev.map(c => (c.id === selectedClient.id
+            ? { ...c, credit_balance: Math.round((c.credit_balance + totals.total_ttc) * 100) / 100 }
+            : c)),
+        );
+      }
+      setSales(prev => [authoritative, ...prev]);
+      clearCart();
+      openPrintModal(authoritative, isFactureReglementaire ? 'facture' : 'ticket');
+      return authoritative;
+    } catch {
+      return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
+    }
+  };
+
   const settleClientDebt = (
     clientId: number,
     amount: number,
@@ -584,6 +775,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): DebtSettlement => {
     const client = clients.find(c => c.id === clientId);
     const clientName = client ? client.name : `Client #${clientId}`;
+    const prevBalance = client ? client.credit_balance : amount;
+
+    // INVARIANT 3 (Art. 136): ESPECES settlements >= 50 DZD carry timbre.
+    // Principal reduces the debt; timbre is collected ON TOP for the Treasury.
+    const amountCt = dzdToCentimes(amount);
+    const timbreCt = calculateTimbreFiscalCt(amountCt, paymentMethod, {
+      timbre_rate: storeProfile.timbre_rate,
+      timbre_min: storeProfile.timbre_min,
+      timbre_max: storeProfile.timbre_max,
+    });
+    const timbre = centimesToDzd(timbreCt);
+    const totalCollected = Math.round((amount + timbre) * 100) / 100;
+    const receiptYear = new Date().getFullYear();
+    const receipt_number = `Q-${receiptYear}-${pad6(nextBrowserSeq('Q', receiptYear))}`;
 
     const settlement: DebtSettlement = {
       id: `SETTLE-${Date.now()}`,
@@ -593,6 +798,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       payment_method: paymentMethod,
       date: new Date().toISOString(),
       note,
+      timbre_fiscal: timbre,
+      total_collected: totalCollected,
+      receipt_number,
     };
 
     setClients(prev =>
@@ -606,6 +814,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     setSettlements(prev => [settlement, ...prev]);
+    const newBalance = Math.max(0, Math.round((prevBalance - amount) * 100) / 100);
+    setLastSettlementQuittance({ ...settlement, prev_balance: prevBalance, new_balance: newBalance });
     return settlement;
   };
 
@@ -809,6 +1019,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setStoreProfile(prev => ({ ...prev, ...profileData }));
   };
 
+  // Gate-03 TASK 4: fresh installs (no setup flag) must provision identity first.
+  const [needsStoreSetup, setNeedsStoreSetup] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('baraka_store_setup_done') !== '1';
+    } catch {
+      return false;
+    }
+  });
+  const completeStoreSetup = (profile: { store_name: string; rc_number: string; nif_number: string; nis_number?: string; ai_number?: string; address?: string; phone?: string }) => {
+    setStoreProfile(prev => ({ ...prev, ...profile }));
+    try { localStorage.setItem('baraka_store_setup_done', '1'); } catch { /* private mode */ }
+    setNeedsStoreSetup(false);
+  };
+
+  // Gate-03 TASK 3: trial badge data (recomputed from stored license + sales).
+  const licenseSnapshot = useMemo(() => {
+    try {
+      const raw = localStorage.getItem('baraka_license_v1');
+      if (raw && (JSON.parse(raw) as { status?: string }).status === 'ACTIVATED') {
+        return { activated: true, sales: Number.POSITIVE_INFINITY, days: Number.POSITIVE_INFINITY };
+      }
+    } catch { /* fall through to trial */ }
+    const completed = sales.filter(s => s.status === 'COMPLETED').length;
+    let days = 14;
+    try {
+      const inst = parseInt(localStorage.getItem('baraka_installed_at') ?? '', 10);
+      if (Number.isFinite(inst)) days = Math.max(0, 14 - Math.floor((Date.now() - inst) / 86400000));
+    } catch { /* keep default */ }
+    return { activated: false, sales: Math.max(0, 50 - completed), days };
+  }, [sales]);
+
   const openPrintModal = (sale: Sale, type: 'ticket' | 'facture') => {
     setCurrentPrintSale(sale);
     setPrintModalType(type);
@@ -817,6 +1058,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const closePrintModal = () => {
     setCurrentPrintSale(null);
     setPrintModalType(null);
+  };
+
+  const closeSettlementQuittance = () => {
+    setLastSettlementQuittance(null);
   };
 
   const generateDailyZReport = (): DailyZReport => {
@@ -913,6 +1158,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isHardwareScaleActive,
         scaleWeightGrams,
         accountingSummary,
+        isFiscalMode,
+        authority,
+        lastSettlementQuittance,
         setActiveView,
         toggleLanguage,
         toggleTheme,
@@ -927,6 +1175,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteHeldCart,
         scanBarcode,
         completeSale,
+        completeSaleFiscal,
         settleClientDebt,
         addSupplier,
         updateSupplier,
@@ -939,8 +1188,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addClient,
         updateClient,
         updateStoreProfile,
+        needsStoreSetup,
+        completeStoreSetup,
+        licenseActivated: licenseSnapshot.activated,
+        trialRemaining: { sales: licenseSnapshot.sales, days: licenseSnapshot.days },
         openPrintModal,
         closePrintModal,
+        closeSettlementQuittance,
         generateDailyZReport,
         setHardwareScaleActive,
         setScaleWeightGrams,

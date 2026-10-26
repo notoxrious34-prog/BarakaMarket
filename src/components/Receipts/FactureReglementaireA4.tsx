@@ -1,7 +1,8 @@
 import React from 'react';
 import { useApp } from '../../context/AppContext';
 import { Sale } from '../../types';
-import { formatDZD, numberToWordsAR, numberToWordsFR } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
+import { numberToWordsAR, numberToWordsFR } from '../../core/legal';
 import { Printer, X, FileText, CheckCircle2 } from 'lucide-react';
 
 interface FactureReglementaireProps {

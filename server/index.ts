@@ -6,6 +6,7 @@
  * invoice sequencing, voids journal and Z summaries.
  */
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { openBarakaDb, type BarakaDb } from '../src/db/sqlite.js';
 
@@ -80,11 +81,102 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     });
   });
 
+  // Gate-03 TASK 1 — finalized Z-report closures (hash-chained, immutable).
+  app.post('/api/z/close', (req, res) => {
+    try {
+      const out = baraka.finalizeZReport(req.body as never);
+      res.status(201).json(out);
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/z/list', (_req, res) => {
+    res.json(baraka.listZReports());
+  });
+
+  app.get('/api/z/latest-hash', (_req, res) => {
+    res.json({ prev_hash: baraka.getLatestZHash() });
+  });
+
+  // Gate-03 TASK 3 — license + machine seed meta lane.
+  app.get('/api/meta/:key', (req, res) => {
+    res.json({ key: req.params.key, value: baraka.getMeta(req.params.key) });
+  });
+
+  app.post('/api/meta/:key', (req, res) => {
+    try {
+      const { value } = req.body as { value?: unknown };
+      if (typeof value !== 'string' || value.length > 512) { res.status(400).json({ error: 'body must be {value: string<=512}' }); return; }
+      baraka.setMeta(req.params.key, value);
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   app.post('/api/backup', (req, res) => {
     try {
       const dest = String((req.body as { dest?: string }).dest ?? `data/backup-${new Date().toISOString().slice(0, 10)}.db`);
       baraka.backupTo(dest);
       res.json({ ok: true, dest: path.resolve(dest) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // TASK 4 — ACID ephemeral cart draft (power-cut resilience, session MAIN_POS).
+  app.post('/api/cart-draft', (req, res) => {
+    try {
+      const { session_id, payload_json, item_count, total_ttc_ct } = req.body as {
+        session_id?: string; payload_json?: string; item_count?: number; total_ttc_ct?: number;
+      };
+      if (!session_id || typeof payload_json !== 'string' || typeof item_count !== 'number' || typeof total_ttc_ct !== 'number') {
+        res.status(400).json({ error: 'body must be {session_id, payload_json, item_count, total_ttc_ct}' }); return;
+      }
+      baraka.saveCartDraft(session_id, payload_json, item_count, total_ttc_ct);
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/cart-draft/:session_id', (req, res) => {
+    const row = baraka.loadCartDraft(req.params.session_id);
+    if (!row) { res.status(404).json({ error: 'no draft' }); return; }
+    res.json(row);
+  });
+
+  app.delete('/api/cart-draft/:session_id', (req, res) => {
+    baraka.clearCartDraft(req.params.session_id);
+    res.json({ ok: true });
+  });
+
+  // TASK 3 — fiscal debt settlement with Art.136 timbre + Q-XXXXXX quittance.
+  app.post('/api/settlements', (req, res) => {
+    try {
+      const out = baraka.recordSettlement(req.body as never);
+      res.status(201).json(out);
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // Gate-02 TASK 2 Lane A — raw ESC/POS spool. Accepts {hex} byte stream
+  // (drawer kicks, ticket buffers) and appends to a local spool file that a
+  // USB/COM forwarder drains. Zero hardware in the test lane: file exists
+  // and byte counts reconcile.
+  app.post('/api/raw-print', (req, res) => {
+    try {
+      const { hex, label } = req.body as { hex?: string; label?: string };
+      if (!hex || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0 || hex.length > 200000) {
+        res.status(400).json({ error: 'body must be {hex: even-length hex string <=100KB}' }); return;
+      }
+      const buf = Buffer.from(hex, 'hex');
+      const dir = path.resolve('data');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, 'raw-print-spool.bin'), buf);
+      res.json({ ok: true, bytes: buf.length, label: label ?? 'raw' });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

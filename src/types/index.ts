@@ -91,6 +91,12 @@ export interface Sale {
   status: 'COMPLETED' | 'CANCELLED';
   created_at: string;
   is_facture_reglementaire?: boolean;
+  /**
+   * EXEC-DIR-2023-001 INVARIANT 2: browser-lane numbers are PROVISIONAL.
+   * Authoritative fiscal numbers come from SQLite seq (FACT-YYYY-XXXXXX).
+   * UI must render the NON-FISCAL banner while this flag is true.
+   */
+  is_provisional?: boolean;
 }
 
 export interface Client {
@@ -115,6 +121,12 @@ export interface DebtSettlement {
   payment_method: PaymentMethod;
   date: string;
   note?: string;
+  /** Art.136 timbre computed on ESPECES settlements >= 50 DZD (DZD float, display). */
+  timbre_fiscal?: number;
+  /** Cash actually collected = amount + timbre (ESPECES) or amount (other methods). */
+  total_collected?: number;
+  /** Thermal quittance number: Q-YYYY-XXXXXX (monotonic, 6 digits). */
+  receipt_number?: string;
 }
 
 export interface HeldCart {

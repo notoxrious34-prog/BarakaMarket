@@ -29,12 +29,25 @@ fn provision_db() -> Result<PathBuf, String> {
     Ok(db)
 }
 
+/// Gate-02 TASK 1: native authority probe. The frontend calls this via
+/// `invoke('db_status')`; success flips the POS into MODE FISCAL ACTIF.
+#[tauri::command]
+fn db_status() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    let journal: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "db": db.to_string_lossy(), "journal_mode": journal }))
+}
+
 fn main() {
     match provision_db() {
         Ok(p) => println!("[baraka] db ready at {}", p.display()),
         Err(e) => eprintln!("[baraka] db provisioning FAILED: {e}"),
     }
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![db_status])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");
 }

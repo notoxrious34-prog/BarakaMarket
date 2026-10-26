@@ -84,3 +84,17 @@ test('api: void keeps row, z summary aggregates the day', async () => {
   assert.equal(z.total_ttc_ct, 179400);
   assert.equal(z.total_especes_ct, 179400);
 });
+
+test('api: raw-print spools drawer-kick bytes and rejects garbage', async () => {
+  const ok = await fetch(`${base}/api/raw-print`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hex: '1b700019fa', label: 'drawer-kick' }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(((await ok.json()) as { bytes: number }).bytes, 5);
+  const bad = await fetch(`${base}/api/raw-print`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hex: 'ZZZ' }),
+  });
+  assert.equal(bad.status, 400);
+});

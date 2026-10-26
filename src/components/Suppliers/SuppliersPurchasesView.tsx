@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, PurchaseItem, Supplier, TVARate } from '../../types';
-import { formatDZD } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
 import { calculateNewPMP } from '../../utils/accounting';
 import {
   Truck,

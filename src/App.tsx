@@ -11,6 +11,8 @@ import { SuppliersPurchasesView } from './components/Suppliers/SuppliersPurchase
 import { AccountingJournalView } from './components/Accounting/AccountingJournalView';
 import { TicketThermal80mm } from './components/Receipts/TicketThermal80mm';
 import { FactureReglementaireA4 } from './components/Receipts/FactureReglementaireA4';
+import { SettlementQuittanceTicket } from './components/Receipts/SettlementQuittanceTicket';
+import { StoreProfileSetupModal } from './components/Settings/StoreProfileSetupModal';
 
 const MainLayout: React.FC = () => {
   const {
@@ -20,7 +22,9 @@ const MainLayout: React.FC = () => {
     currentPrintSale,
     printModalType,
     closePrintModal,
+    lastSettlementQuittance,
     language,
+    needsStoreSetup,
   } = useApp();
 
   // Global hotkeys: Ctrl+L to toggle language
@@ -66,6 +70,9 @@ const MainLayout: React.FC = () => {
         </span>
       </footer>
 
+      {/* Gate-03 TASK 4: first-run identity lock — blocks the POS until saved. */}
+      {needsStoreSetup && <StoreProfileSetupModal />}
+
       {/* Direct Thermal Receipt (80mm) Print Modal */}
       {printModalType === 'ticket' && currentPrintSale && (
         <TicketThermal80mm
@@ -81,6 +88,9 @@ const MainLayout: React.FC = () => {
           onClose={closePrintModal}
         />
       )}
+
+      {/* Debt settlement quittance (Art.136) — auto-opened on settleClientDebt */}
+      {lastSettlementQuittance && <SettlementQuittanceTicket />}
     </div>
   );
 };

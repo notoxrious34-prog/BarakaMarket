@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { PaymentMethod } from '../../types';
-import { calculateSaleTotals, formatDZD } from '../../utils/fiscal';
+import { calculateSaleTotals } from '../../core/cart-bridge';
+import { formatDZD } from '../../core/display';
+import { cashChime } from '../../hardware/sound';
+import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
 import {
   Banknote,
   CreditCard,
@@ -24,6 +27,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
     clients,
     setSelectedClient,
     completeSale,
+    completeSaleFiscal,
+    isFiscalMode,
     storeProfile,
     language,
   } = useApp();
@@ -57,30 +62,43 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
     selectedClient.max_credit_limit > 0 &&
     selectedClient.credit_balance + totals.total_ttc > selectedClient.max_credit_limit;
 
-  const handleValidate = () => {
+  const handleValidate = async () => {
     if (isUnderpaid) return;
     if (paymentMethod === 'CREDIT' && selectedClient.id === 1) {
       alert(isAr ? 'يرجى اختيار عميل من دفتر الديون لتسجيل البيع بالكريدي' : 'Veuillez sélectionner un client pour le crédit');
       return;
     }
 
-    completeSale(paymentMethod, numPaid, isFactureReglementaire);
+    // Gate-02 TASK 1: authoritative SQLite commit in fiscal mode (monotonic
+    // FACT/T); provisional fallback keeps the rush-hour line moving.
+    if (isFiscalMode) {
+      await completeSaleFiscal(paymentMethod, numPaid, isFactureReglementaire);
+    } else {
+      completeSale(paymentMethod, numPaid, isFactureReglementaire);
+    }
+    // Gate-02 TASK 2+4: drawer kick on cash + acoustic seal on every sale.
+    if (paymentMethod === 'ESPECES') kickDrawerViaLoopback();
+    cashChime();
     onClose();
   };
 
-  // Keyboard shortcut: Enter to submit, Escape to close
+  // Keyboard shortcut: Enter to submit, Escape to close, 1/2/3 tender select
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         onClose();
       } else if (e.key === 'Enter' && !isUnderpaid) {
         e.preventDefault();
-        handleValidate();
+        void handleValidate();
+      } else if ((e.target as HTMLElement).tagName !== 'INPUT' && (e.key === '1' || e.key === '2' || e.key === '3')) {
+        if (e.key === '1') setPaymentMethod('ESPECES');
+        if (e.key === '2') setPaymentMethod('DAHABIYA');
+        if (e.key === '3') setPaymentMethod('CREDIT');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [numPaid, isUnderpaid, paymentMethod]);
+  }, [numPaid, isUnderpaid, paymentMethod, isFiscalMode]);
 
   const quickDenominations = [
     totals.total_ttc,

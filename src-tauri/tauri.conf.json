@@ -22,19 +22,23 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' asset: data: blob:; connect-src 'self' ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' asset: data: blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:3100"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "icon": ["icons/icon.ico", "icons/icon.png", "../public/brand/baraka-mark-256.png"],
     "category": "Business",
     "shortDescription": "Système de caisse POS — TVA Algérie, SQLite WAL, Zero-Cloud",
+    "longDescription": "Baraka Market v1.0 — offline Algerian POS: fiscal centimes engine, ESC/POS thermal printing, Z-report hash chain, air-gapped licensing. No internet required.",
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "webviewInstallMode": { "type": "embedBootstrapper" },
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Baraka Market"
       }
     }
   }

@@ -163,6 +163,12 @@ html.light .brand-chip {
 }
 
 /* Print styling for Thermal Receipt (80mm) and Facture A4 */
+/* Lane B spooler: zero margins/headers for instant 80mm output (Gate-02 TASK 2). */
+@page {
+  margin: 0;
+  size: 80mm auto;
+}
+
 @media print {
   body * {
     visibility: hidden;

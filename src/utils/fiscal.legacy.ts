@@ -1,3 +1,14 @@
+/**
+ * @deprecated QUARANTINED LEGACY FLOAT ENGINE — DO NOT IMPORT.
+ * Directive EXEC-DIR-2023-001 TASK 1: monetary monism requires integer
+ * centimes (`src/core/fiscal.centimes.ts`). This file is retained for
+ * forensic diff only. Any `from '../utils/fiscal'` / `from './fiscal'`
+ * import will fail lint review. Use:
+ *  - `src/core/cart-bridge.ts`  (calculateLineTotals / calculateSaleTotals)
+ *  - `src/core/fiscal.centimes.ts` (calculateLineTotalsCt / calculateTimbreFiscalCt / parseScaleBarcodeCt)
+ *  - `src/core/display.ts`      (formatDZD via integer centimes)
+ *  - `src/core/legal.ts`        (numberToWordsFR/AR, computeActivationKey)
+ */
 import { PaymentMethod, SaleItem, StoreProfile, TVABreakdown, TVARate } from '../types';
 
 /**

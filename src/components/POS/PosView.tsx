@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { initialCategories } from '../../data/seedData';
 import { Product, SaleItem } from '../../types';
-import { calculateSaleTotals, formatDZD } from '../../utils/fiscal';
+import { calculateSaleTotals } from '../../core/cart-bridge';
+import { formatDZD } from '../../core/display';
 import {
   Search,
   Barcode,
@@ -24,6 +25,13 @@ import {
 } from 'lucide-react';
 import { PaymentModal } from './PaymentModal';
 import { ScaleSimulationModal } from './ScaleSimulationModal';
+import { QuantityModal } from './QuantityModal';
+import { DiscountModal } from './DiscountModal';
+import { CatalogSearchModal } from './CatalogSearchModal';
+import { useAutoFocusBarcode } from './useAutoFocusBarcode';
+import { attachScannerTrap } from '../../hardware/scanner';
+import { scanBeep, errorBuzz } from '../../hardware/sound';
+import { getCashierPin } from '../../core/fiscal-authority';
 
 export const PosView: React.FC = () => {
   const {
@@ -45,6 +53,7 @@ export const PosView: React.FC = () => {
     language,
     isHardwareScaleActive,
     setHardwareScaleActive,
+    isFiscalMode,
   } = useApp();
 
   const isAr = language === 'ar';
@@ -57,9 +66,20 @@ export const PosView: React.FC = () => {
   // Modals state
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
+  const [qtyModalIndex, setQtyModalIndex] = useState<number | null>(null);
+  const [discountModalIndex, setDiscountModalIndex] = useState<number | null>(null);
+  const [showCatalogModal, setShowCatalogModal] = useState(false);
   const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
+  const [isLocked, setIsLocked] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(false);
 
   const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // TASK 6: focus trap — re-arm barcode whenever modals toggle.
+  const { rearm: rearmBarcode } = useAutoFocusBarcode(barcodeInputRef, [
+    showPaymentModal, showScaleModal, qtyModalIndex, discountModalIndex, showCatalogModal,
+  ]);
 
   // Calculate live cart totals (defaulting to Cash/Espèces preview for Timbre preview)
   const cartTotals = calculateSaleTotals(currentCart, 'ESPECES', storeProfile);
@@ -76,14 +96,40 @@ export const PosView: React.FC = () => {
     return matchesCategory && matchesSearch;
   });
 
-  // Zero-Mouse Keyboard Controller (F1-F9, Space, Enter)
+  // Zero-Mouse Keyboard Controller (F1-F10, Space, Enter) — TASK 6 extended matrix
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // F10 lock: toggle even from inputs (cashier quick-lock)
+      if (e.key === 'F10') {
+        e.preventDefault();
+        setIsLocked(prev => !prev);
+        return;
+      }
+      if (isLocked) {
+        // Any key unlocks except F10 handled above — require explicit F10 to avoid accidents.
+        return;
+      }
       // Don't intercept if an input or modal is currently typing (unless it's an F-key)
       if (e.key === 'F1') {
         e.preventDefault();
         barcodeInputRef.current?.focus();
         barcodeInputRef.current?.select();
+      } else if (e.key === 'F2') {
+        // Quantity override modal for last scanned / selected item
+        e.preventDefault();
+        if (currentCart.length > 0) {
+          const idx = editingItemIndex ?? currentCart.length - 1;
+          setEditingItemIndex(idx);
+          setQtyModalIndex(idx);
+        }
+      } else if (e.key === 'F3') {
+        // Line remise modal (percent or fixed DZD)
+        e.preventDefault();
+        if (currentCart.length > 0) {
+          const idx = editingItemIndex ?? currentCart.length - 1;
+          setEditingItemIndex(idx);
+          setDiscountModalIndex(idx);
+        }
       } else if (e.key === 'F4') {
         e.preventDefault();
         if (currentCart.length > 0) {
@@ -97,6 +143,10 @@ export const PosView: React.FC = () => {
       } else if (e.key === 'F6') {
         e.preventDefault();
         setShowScaleModal(prev => !prev);
+      } else if (e.key === 'F7') {
+        // Instant obsidian catalog search (ArrowUp/Down + Enter)
+        e.preventDefault();
+        setShowCatalogModal(prev => !prev);
       } else if (e.key === 'F9') {
         e.preventDefault();
         // Trigger payment modal with credit mode
@@ -114,7 +164,7 @@ export const PosView: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentCart, heldCarts, holdCurrentCart, restoreHeldCart]);
+  }, [currentCart, heldCarts, holdCurrentCart, restoreHeldCart, editingItemIndex, updateCartItemQty, updateCartItemDiscount, isLocked]);
 
   // Handle barcode scanner submission
   const handleBarcodeSubmit = (e: React.FormEvent) => {
@@ -122,6 +172,7 @@ export const PosView: React.FC = () => {
     if (!barcodeInput.trim()) return;
 
     const res = scanBarcode(barcodeInput);
+    if (res.success) scanBeep(); else errorBuzz();
     setScanFeedback({
       message: res.message,
       isError: !res.success,
@@ -133,8 +184,35 @@ export const PosView: React.FC = () => {
     }, 3000);
   };
 
+  // Gate-02 TASK 3: HID burst trap — hardware scans land in the cart even
+  // when the barcode field lost focus; human typing passes through.
+  useEffect(() => {
+    const detach = attachScannerTrap(code => {
+      const res = scanBarcode(code);
+      if (res.success) scanBeep(); else errorBuzz();
+      setScanFeedback({ message: res.message, isError: !res.success });
+      setTimeout(() => setScanFeedback(null), 3000);
+    });
+    return detach;
+  }, [scanBarcode]);
+
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-80px)] bg-[#0b0f17] overflow-hidden">
+    <div className="flex flex-col h-[calc(100vh-80px)] bg-[#0b0f17] overflow-hidden">
+      {/* Authority banner: green FISCAL in native shell, amber provisional in browser. */}
+      {isFiscalMode ? (
+        <div className="px-4 py-1.5 bg-emerald-950/80 border-b border-emerald-500/40 text-center text-[11px] font-bold text-emerald-300 tracking-wide" role="status">
+          {isAr
+            ? '● الوضع الجبائي النشط (SQLite WAL — تسلسل أحادي)'
+            : '● MODE FISCAL ACTIF (SQLITE WAL MONOTONIC)'}
+        </div>
+      ) : (
+        <div className="px-4 py-1.5 bg-amber-950/80 border-b border-amber-500/40 text-center text-[11px] font-bold text-amber-300 tracking-wide" role="alert">
+          {isAr
+            ? '⚠ بيئة اختبار غير جبائية — الأرقام مؤقتة (التسلسل الأحادي من SQLite هو المرجع)'
+            : '⚠ NON-FISCAL TEST ENVIRONMENT — provisional numbers (SQLite monotonic seq is authoritative)'}
+        </div>
+      )}
+      <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
       {/* LEFT COLUMN: Catalog, Search, Categories, Quick Tap */}
       <div className="flex-1 flex flex-col border-e border-[#1e293b] p-3 overflow-hidden">
         {/* Scanner & Quick Search Bar */}
@@ -171,10 +249,11 @@ export const PosView: React.FC = () => {
           <div className="relative w-full sm:w-64">
             <Search className="w-4 h-4 absolute inset-y-0 start-3 my-auto text-slate-400" />
             <input
+              ref={searchInputRef}
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder={isAr ? 'بحث بالاسم...' : 'Filtrer par nom...'}
+              placeholder={isAr ? 'بحث بالاسم... (F7)' : 'Filtrer par nom... (F7)'}
               className="w-full bg-[#111722] border border-[#233145] focus:border-emerald-500 rounded-xl ps-9 pe-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
             />
           </div>
@@ -529,16 +608,86 @@ export const PosView: React.FC = () => {
       {/* Payment Modal */}
       {showPaymentModal && (
         <PaymentModal
-          onClose={() => setShowPaymentModal(false)}
+          onClose={() => { setShowPaymentModal(false); rearmBarcode(); }}
         />
       )}
 
       {/* Scale Simulator Modal */}
       {showScaleModal && (
         <ScaleSimulationModal
-          onClose={() => setShowScaleModal(false)}
+          onClose={() => { setShowScaleModal(false); rearmBarcode(); }}
         />
       )}
+
+      {/* F2 Quantity override */}
+      {qtyModalIndex !== null && (
+        <QuantityModal
+          itemIndex={qtyModalIndex}
+          onClose={() => { setQtyModalIndex(null); rearmBarcode(); }}
+        />
+      )}
+
+      {/* F3 Line remise */}
+      {discountModalIndex !== null && (
+        <DiscountModal
+          itemIndex={discountModalIndex}
+          onClose={() => { setDiscountModalIndex(null); rearmBarcode(); }}
+        />
+      )}
+
+      {/* F7 Catalog search */}
+      {showCatalogModal && (
+        <CatalogSearchModal
+          onClose={() => { setShowCatalogModal(false); rearmBarcode(); }}
+        />
+      )}
+
+      {/* Cashier lock overlay with 4-digit PIN (F10) */}
+      {isLocked && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4">
+          <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-8 text-center max-w-sm w-full">
+            <div className="text-4xl mb-3">🔒</div>
+            <h3 className="text-lg font-bold text-white">{isAr ? 'الصندوق مقفل' : 'Caisse Verrouillée'}</h3>
+            <p className="text-xs text-slate-400 mt-1">{isAr ? 'أدخل رمز PIN المكوّن من 4 أرقام أو اضغط F10' : 'Code PIN à 4 chiffres ou F10'}</p>
+            <form
+              onSubmit={e => {
+                e.preventDefault();
+                if (pinInput === getCashierPin()) {
+                  setIsLocked(false);
+                  setPinInput('');
+                  setPinError(false);
+                  rearmBarcode();
+                } else {
+                  setPinError(true);
+                }
+              }}
+              className="mt-4 space-y-2"
+            >
+              <input
+                type="password"
+                inputMode="numeric"
+                maxLength={4}
+                value={pinInput}
+                onChange={e => { setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4)); setPinError(false); }}
+                placeholder="••••"
+                autoFocus
+                className={`w-full bg-[#162030] border rounded-xl px-3 py-2.5 text-xl font-mono text-white text-center tracking-[0.5em] outline-none ${pinError ? 'border-rose-500' : 'border-[#2b3a4f] focus:border-emerald-500'}`}
+                dir="ltr"
+              />
+              {pinError && (
+                <p className="text-[11px] text-rose-400">{isAr ? 'رمز خاطئ' : 'PIN incorrect'}</p>
+              )}
+              <button
+                type="submit"
+                className="w-full px-6 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-bold cursor-pointer"
+              >
+                {isAr ? 'فتح (Enter)' : 'Déverrouiller (Enter)'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+      </div>
     </div>
   );
 };

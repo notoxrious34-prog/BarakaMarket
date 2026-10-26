@@ -1,7 +1,10 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Client, PaymentMethod } from '../../types';
-import { formatDZD } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
+import { cashChime } from '../../hardware/sound';
+import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
+import { ClientAccountStatement } from './ClientAccountStatement';
 import {
   BookOpen,
   UserPlus,
@@ -14,6 +17,7 @@ import {
   AlertTriangle,
   Receipt,
   ArrowDownLeft,
+  FileText,
   X,
   CreditCard,
   Banknote,
@@ -33,6 +37,7 @@ export const CarnetDetteView: React.FC = () => {
   const [settlementMethod, setSettlementMethod] = useState<PaymentMethod>('ESPECES');
   const [settlementNote, setSettlementNote] = useState('');
   const [lastSettlementReceipt, setLastSettlementReceipt] = useState<any | null>(null);
+  const [showStatement, setShowStatement] = useState(false);
 
   // Form for new client
   const [newClientName, setNewClientName] = useState('');
@@ -77,6 +82,9 @@ export const CarnetDetteView: React.FC = () => {
     );
 
     setLastSettlementReceipt(record);
+    // Gate-02 TASK 2+4: drawer kick on cash encaissement + acoustic seal.
+    if (settlementMethod === 'ESPECES') kickDrawerViaLoopback();
+    cashChime();
     setShowSettlementModal(false);
   };
 
@@ -228,6 +236,13 @@ export const CarnetDetteView: React.FC = () => {
                 >
                   <DollarSign className="w-4 h-4" />
                   <span>{isAr ? 'تسجيل دفعة / تسديد' : 'Encaisser Versement'}</span>
+                </button>
+                <button
+                  onClick={() => setShowStatement(true)}
+                  className="px-4 py-2.5 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <FileText className="w-4 h-4 text-amber-400" />
+                  <span>{isAr ? 'كشف الحساب' : 'Relevé de Compte'}</span>
                 </button>
               </div>
             </div>
@@ -521,6 +536,15 @@ export const CarnetDetteView: React.FC = () => {
             </form>
           </div>
         </div>
+      )}
+      {/* Gate-03 TASK 2 — statement of account modal */}
+      {showStatement && selectedClient && (
+        <ClientAccountStatement
+          client={selectedClient}
+          creditSales={clientCreditSales}
+          settlements={clientSettlements}
+          onClose={() => setShowStatement(false)}
+        />
       )}
     </div>
   );

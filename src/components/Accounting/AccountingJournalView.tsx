@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { formatDZD } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
 import {
   PieChart,
   TrendingUp,

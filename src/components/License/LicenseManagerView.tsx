@@ -1,6 +1,10 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { computeActivationKey } from '../../utils/fiscal';
+import {
+  computeHwid, collectBrowserFingerprint, generateActivationKey,
+  validateLicense, evaluateTrial,
+} from '../../core/licensing';
+import { getOrCreateMachineSeed, getInstallEpochMs, loadStoredLicense, saveStoredLicense } from '../../core/license-store';
 import {
   KeyRound,
   ShieldCheck,
@@ -15,33 +19,59 @@ import {
 } from 'lucide-react';
 
 export const LicenseManagerView: React.FC = () => {
-  const { language } = useApp();
+  const { language, sales } = useApp();
   const isAr = language === 'ar';
 
-  // Hardware ID for this POS machine
-  const [hardwareId] = useState('BM-7F89-A2C4-99D1');
-  const [activationKey, setActivationKey] = useState(() => computeActivationKey('BM-7F89-A2C4-99D1'));
-  const [inputKey, setInputKey] = useState(activationKey);
-  const [isActivated, setIsActivated] = useState(true);
+  // Gate-03 TASK 3: real deterministic HWID (stable seed + platform fingerprint).
+  const seed = useMemo(() => getOrCreateMachineSeed(), []);
+  const hardwareId = useMemo(() => computeHwid(collectBrowserFingerprint(seed)), [seed]);
+  const [storeName, setStoreName] = useState(() => loadStoredLicense()?.storeName ?? '');
+  const [inputKey, setInputKey] = useState('');
+  const [stored, setStored] = useState(() => loadStoredLicense());
+  const [activationError, setActivationError] = useState('');
   const [copiedKey, setCopiedKey] = useState(false);
 
-  // Key generator simulator for BarakaDEV
+  // Key generator for BarakaDEV support (store name is part of the signature).
+  const [keygenStore, setKeygenStore] = useState('');
   const [keygenInputHWID, setKeygenInputHWID] = useState('');
   const [generatedResult, setGeneratedResult] = useState('');
 
+  const trial = evaluateTrial(
+    stored?.status ?? 'TRIAL',
+    sales.filter(s => s.status === 'COMPLETED').length,
+    getInstallEpochMs(),
+    Date.now(),
+  );
+  const isActivated = stored?.status === 'ACTIVATED';
+
   const handleCopy = (text: string) => {
-    navigator.clipboard.writeText(text);
+    try { navigator.clipboard.writeText(text); } catch { /* headless/test lane */ }
     setCopiedKey(true);
     setTimeout(() => setCopiedKey(false), 2000);
+  };
+
+  const handleActivate = (e: React.FormEvent) => {
+    e.preventDefault();
+    setActivationError('');
+    if (!storeName.trim()) {
+      setActivationError(isAr ? 'أدخل اسم المحل أولاً' : 'Saisissez le nom du magasin');
+      return;
+    }
+    if (validateLicense(storeName, hardwareId, inputKey)) {
+      const rec = { status: 'ACTIVATED' as const, storeName: storeName.trim(), key: inputKey.trim().toUpperCase(), installedAtMs: getInstallEpochMs() };
+      saveStoredLicense(rec);
+      setStored(rec);
+    } else {
+      setActivationError(isAr ? 'مفتاح غير صالح لهذا المحل/الجهاز' : 'Clé invalide pour ce magasin / HWID');
+    }
   };
 
   const handleGenerateKey = (e: React.FormEvent) => {
     e.preventDefault();
     let hwid = keygenInputHWID.trim().toUpperCase();
-    if (!hwid) return;
+    if (!hwid || !keygenStore.trim()) return;
     if (!hwid.startsWith('BM-')) hwid = `BM-${hwid}`;
-    const res = computeActivationKey(hwid);
-    setGeneratedResult(res);
+    setGeneratedResult(generateActivationKey(keygenStore, hwid));
   };
 
   return (
@@ -84,14 +114,16 @@ export const LicenseManagerView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3 bg-emerald-950/60 border border-emerald-800/60 rounded-xl px-4 py-3 justify-self-center md:justify-self-end whitespace-nowrap">
-          <ShieldCheck className="w-8 h-8 text-emerald-400" />
+        <div className={`flex items-center gap-3 border rounded-xl px-4 py-3 justify-self-center md:justify-self-end whitespace-nowrap ${isActivated ? 'bg-emerald-950/60 border-emerald-800/60' : 'bg-amber-950/60 border-amber-800/60'}`}>
+          <ShieldCheck className={`w-8 h-8 ${isActivated ? 'text-emerald-400' : 'text-amber-400'}`} />
           <div>
             <div className="text-xs font-bold text-white">
-              {isAr ? 'الترخيص نشط ومفعل مدى الحياة' : 'Licence Activée (À Vie)'}
+              {isActivated
+                ? (isAr ? 'الترخيص نشط ومفعل مدى الحياة' : 'Licence Activée (À Vie)')
+                : (isAr ? `نسخة تجريبية — ${trial.salesRemaining} عملية / ${trial.daysRemaining} يوم` : `Essai — ${trial.salesRemaining} ventes / ${trial.daysRemaining} j`)}
             </div>
-            <div className="text-[11px] text-emerald-300 font-mono">
-              Poste Caisse #01 • Illimité
+            <div className="text-[11px] text-slate-400 font-mono">
+              {isActivated ? stored?.storeName : 'TRIAL 50 ventes / 14 j'} • {hardwareId}
             </div>
           </div>
         </div>
@@ -128,26 +160,53 @@ export const LicenseManagerView: React.FC = () => {
               </div>
             </div>
 
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">
-                {isAr ? 'مفتاح التفعيل (Offline Activation Key):' : 'Clé d\'Activation Active:'}
-              </label>
-              <div className="flex items-center gap-2">
+            <form onSubmit={handleActivate} className="space-y-3">
+              <div>
+                <label className="text-xs text-slate-300 block mb-1">
+                  {isAr ? 'اسم المحل (كما في السجل التجاري):' : 'Nom du magasin (registre de commerce):'}
+                </label>
                 <input
                   type="text"
-                  readOnly
-                  value={activationKey}
-                  className="flex-1 bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-sm text-emerald-400 font-mono font-bold outline-none"
+                  value={storeName}
+                  onChange={e => setStoreName(e.target.value)}
+                  placeholder={isAr ? 'مثال: عطارة النور' : 'Ex: Epicerie Nour'}
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-emerald-500"
                 />
-                <button
-                  onClick={() => handleCopy(activationKey)}
-                  className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] hover:border-amber-500/50 text-slate-300 font-semibold rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors"
-                >
-                  {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedKey ? (isAr ? 'تم' : 'Copié') : (isAr ? 'نسخ' : 'Copier')}</span>
-                </button>
               </div>
-            </div>
+              <div>
+                <label className="text-xs text-slate-300 block mb-1">
+                  {isAr ? 'مفتاح التفعيل:' : 'Clé d\'activation (AK-XXXX-XXXX-XXXX-XXXX):'}
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={inputKey}
+                    onChange={e => setInputKey(e.target.value.toUpperCase())}
+                    placeholder="AK-XXXX-XXXX-XXXX-XXXX"
+                    className="flex-1 bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-sm text-emerald-400 font-mono font-bold uppercase outline-none focus:border-emerald-500"
+                  />
+                  <button
+                    onClick={() => handleCopy(inputKey || stored?.key || '')}
+                    type="button"
+                    className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] hover:border-amber-500/50 text-slate-300 font-semibold rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors"
+                  >
+                    {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                    <span>{copiedKey ? (isAr ? 'تم' : 'Copié') : (isAr ? 'نسخ' : 'Copier')}</span>
+                  </button>
+                </div>
+              </div>
+              {activationError && <p className="text-[11px] text-rose-400">{activationError}</p>}
+              {isActivated && (
+                <p className="text-[11px] text-emerald-400 font-mono">{stored?.key}</p>
+              )}
+              <button
+                type="submit"
+                className="w-full py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-950/40 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span>{isAr ? 'تفعيل الرخصة الدائمة' : 'Activer la Licence'}</span>
+              </button>
+            </form>
           </div>
 
           <div className="pt-2 border-t border-[#1e293b] space-y-2 text-xs text-slate-400">
@@ -182,6 +241,19 @@ export const LicenseManagerView: React.FC = () => {
           <form onSubmit={handleGenerateKey} className="space-y-3">
             <div>
               <label className="text-xs text-slate-300 block mb-1">
+                {isAr ? 'اسم محل الزبون:' : 'Nom du magasin client:'}
+              </label>
+              <input
+                type="text"
+                required
+                value={keygenStore}
+                onChange={e => setKeygenStore(e.target.value)}
+                placeholder={isAr ? 'اسم المحل' : 'Nom du magasin'}
+                className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-amber-500"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-300 block mb-1">
                 {isAr ? 'أدخل معرف عتاد الزبون (HWID):' : 'Saisir le HWID du Client:'}
               </label>
               <input
@@ -189,7 +261,7 @@ export const LicenseManagerView: React.FC = () => {
                 required
                 value={keygenInputHWID}
                 onChange={e => setKeygenInputHWID(e.target.value.toUpperCase())}
-                placeholder="BM-XXXX-XXXX-XXXX"
+                placeholder="BM-XXXX-XXXX-XXXX-XXXX"
                 className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white font-mono uppercase outline-none focus:border-amber-500"
               />
             </div>

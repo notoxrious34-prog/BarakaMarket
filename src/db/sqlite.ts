@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertIntegerCentimes } from '../core/money.js';
 import { calculateTimbreFiscalCt, type SaleTotalsCt } from '../core/fiscal.centimes.js';
+import { GENESIS_PREV_HASH as GENESIS_Z_HASH, computeZHash as computeZHashDb } from '../core/zreport.js';
 import type { PaymentMethod, TVARate } from '../types';
 
 export type Unit = 'PIECE' | 'KG' | 'LITRE';
@@ -97,9 +98,36 @@ export interface BarakaDb {
   activeSalesCount(): number;
   voidSale(saleId: string, reason: string, voidedBy: string): void;
   backupTo(destPath: string): void;
+  /** TASK 4 — ACID ephemeral cart draft (power-cut resilience). */
+  saveCartDraft(sessionId: string, payloadJson: string, itemCount: number, totalTtcCt: number): void;
+  loadCartDraft(sessionId: string): { payload_json: string; item_count: number; total_ttc_ct: number; updated_at: string } | null;
+  clearCartDraft(sessionId: string): void;
+  /** TASK 3 — fiscal debt settlement with Art.136 timbre + quittance number. */
+  recordSettlement(input: {
+    id?: string; client_id: number; client_name?: string; amount_ct: number;
+    payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
+    timbre_ct?: number; total_collected_ct?: number; receipt_number?: string;
+    date?: string; note?: string | null;
+  }): { id: string; receipt_number: string };
+  /** Gate-03 TASK 1 — tamper-evident Z-report closure. */
+  finalizeZReport(input: {
+    day: string; openingTime: string; closingTime: string;
+    totals: {
+      salesCount: number; totalHtCt: number; tva0BaseCt: number; tva9BaseCt: number;
+      tva9AmtCt: number; tva19BaseCt: number; tva19AmtCt: number; totalTvaCt: number;
+      totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
+      dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
+      firstInvoice: string; lastInvoice: string;
+    };
+  }): { report_number: string; hash: string; prev_hash: string };
+  getLatestZHash(): string;
+  listZReports(): Record<string, unknown>[];
+  /** Gate-03 TASK 3 — license + machine seed in meta KV. */
+  getMeta(key: string): string | null;
+  setMeta(key: string, value: string): void;
 }
 
-function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T', year: number): number {
+function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z', year: number): number {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error(`[db] invalid seq year: ${year}`);
   }
@@ -119,6 +147,41 @@ export function openBarakaDb(dbPath: string): BarakaDb {
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec('PRAGMA synchronous = NORMAL;');
   db.exec(schemaSql());
+  // Idempotent migration for pre-existing baraka.db files (IF NOT EXISTS
+  // does not add columns to old tables). Duplicate-column errors ignored.
+  for (const ddl of [
+    'ALTER TABLE client_settlements ADD COLUMN timbre_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE client_settlements ADD COLUMN total_collected_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE client_settlements ADD COLUMN receipt_number TEXT',
+    // Gate-03 TASK 1: directive z_reports columns on pre-existing DBs.
+    'ALTER TABLE z_reports ADD COLUMN day TEXT NOT NULL DEFAULT \'\'',
+    'ALTER TABLE z_reports ADD COLUMN opening_time TEXT NOT NULL DEFAULT \'\'',
+    'ALTER TABLE z_reports ADD COLUMN closing_time TEXT NOT NULL DEFAULT \'\'',
+    'ALTER TABLE z_reports ADD COLUMN total_sales_count INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE z_reports ADD COLUMN especes_gross_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE z_reports ADD COLUMN cib_total_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE z_reports ADD COLUMN dahabiya_total_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE z_reports ADD COLUMN credit_granted_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE z_reports ADD COLUMN credit_collected_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE z_reports ADD COLUMN first_invoice_number TEXT NOT NULL DEFAULT \'\'',
+    'ALTER TABLE z_reports ADD COLUMN last_invoice_number TEXT NOT NULL DEFAULT \'\'',
+    'ALTER TABLE z_reports ADD COLUMN prev_hash TEXT NOT NULL DEFAULT \'\'',
+  ]) {
+    try { db.exec(ddl); } catch { /* column already exists */ }
+  }
+  // Migrate old seq CHECK (FACT,T[,Q]) -> (FACT,T,Q,Z) for Z-report numbers.
+  try {
+    const seqSql = (db.prepare("SELECT sql FROM sqlite_master WHERE name = 'seq'").get() as { sql: string }).sql ?? '';
+    if (!seqSql.includes("'Z'")) {
+      db.exec(`CREATE TABLE IF NOT EXISTS seq_new (
+        kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z')),
+        year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, year))`);
+      db.exec('INSERT OR IGNORE INTO seq_new (kind, year, last_n) SELECT kind, year, last_n FROM seq');
+      db.exec('DROP TABLE seq');
+      db.exec('ALTER TABLE seq_new RENAME TO seq');
+    }
+  } catch { /* fresh DB already has Q */ }
 
   const pragmas = () => ({
     journal_mode: (db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode,
@@ -310,6 +373,117 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       fs.mkdirSync(path.dirname(path.resolve(destPath)), { recursive: true });
       const escaped = path.resolve(destPath).replace(/'/g, "''");
       db.exec(`VACUUM INTO '${escaped}'`);
+    },
+
+    saveCartDraft(sessionId: string, payloadJson: string, itemCount: number, totalTtcCt: number) {
+      if (!sessionId.trim()) throw new Error('[db] sessionId is required for cart draft');
+      assertIntegerCentimes(totalTtcCt, 'totalTtcCt');
+      if (!Number.isInteger(itemCount) || itemCount < 0) throw new Error('[db] itemCount must be >= 0');
+      JSON.parse(payloadJson); // fail fast on corrupt payloads
+      db.prepare(
+        `INSERT INTO active_cart_draft (session_id, payload_json, item_count, total_ttc_ct, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT (session_id) DO UPDATE SET payload_json = excluded.payload_json,
+           item_count = excluded.item_count, total_ttc_ct = excluded.total_ttc_ct,
+           updated_at = datetime('now')`,
+      ).run(sessionId, payloadJson, itemCount, totalTtcCt);
+    },
+
+    loadCartDraft(sessionId: string) {
+      const row = db.prepare(
+        'SELECT payload_json, item_count, total_ttc_ct, updated_at FROM active_cart_draft WHERE session_id = ?',
+      ).get(sessionId) as
+        | { payload_json: string; item_count: number; total_ttc_ct: number; updated_at: string }
+        | undefined;
+      return row ?? null;
+    },
+
+    clearCartDraft(sessionId: string) {
+      db.prepare('DELETE FROM active_cart_draft WHERE session_id = ?').run(sessionId);
+    },
+
+    recordSettlement(input: {
+      id?: string; client_id: number; client_name?: string; amount_ct: number;
+      payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
+      timbre_ct?: number; total_collected_ct?: number; receipt_number?: string;
+      date?: string; note?: string | null;
+    }) {
+      assertIntegerCentimes(input.amount_ct, 'amount_ct');
+      if (input.amount_ct <= 0) throw new Error('[db] settlement amount must be > 0');
+      const timbreCt = input.timbre_ct ?? 0;
+      const collectedCt = input.total_collected_ct ?? input.amount_ct;
+      assertIntegerCentimes(timbreCt, 'timbre_ct');
+      assertIntegerCentimes(collectedCt, 'total_collected_ct');
+      // Fiscal cross-check: recompute timbre from the engine (client row may not exist in tests).
+      const expected = calculateTimbreFiscalCt(input.amount_ct, input.payment_method, timbreProfile());
+      if (expected !== timbreCt) {
+        throw new Error(`[db] settlement timbre mismatch: got ${timbreCt}ct, fiscal rule says ${expected}ct`);
+      }
+      const id = input.id ?? randomUUID();
+      const year = parseInt((input.date ?? new Date().toISOString()).slice(0, 4), 10);
+      const receipt = input.receipt_number ?? `Q-${year}-${pad6(bumpSeq(db, 'Q', year))}`;
+      db.prepare(
+        `INSERT INTO client_settlements (id, client_id, client_name, amount_ct, payment_method,
+          timbre_ct, total_collected_ct, receipt_number, date, note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id, input.client_id, input.client_name ?? '', input.amount_ct, input.payment_method,
+        timbreCt, collectedCt, receipt, input.date ?? new Date().toISOString(), input.note ?? null,
+      );
+      return { id, receipt_number: receipt };
+    },
+    getMeta(key: string): string | null {
+      const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+      return row?.value ?? null;
+    },
+    setMeta(key: string, value: string) {
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, value);
+    },
+    getLatestZHash(): string {
+      const row = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as { hash: string } | undefined;
+      return row?.hash ?? GENESIS_Z_HASH;
+    },
+    finalizeZReport(input: {
+      day: string; openingTime: string; closingTime: string;
+      totals: {
+        salesCount: number; totalHtCt: number; tva0BaseCt: number; tva9BaseCt: number;
+        tva9AmtCt: number; tva19BaseCt: number; tva19AmtCt: number; totalTvaCt: number;
+        totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
+        dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
+        firstInvoice: string; lastInvoice: string;
+      };
+    }) {
+      const t = input.totals;
+      for (const [k, v] of Object.entries(t)) {
+        if (typeof v === 'number' && !Number.isInteger(v)) throw new Error(`[db] z_report ${k} must be integer centimes`);
+      }
+      const year = parseInt(input.day.slice(0, 4), 10);
+      if (!Number.isInteger(year) || year < 2000 || year > 2100) throw new Error('[db] z_report invalid day');
+      const prev = ((): string => {
+        const row = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as { hash: string } | undefined;
+        return row?.hash ?? GENESIS_Z_HASH;
+      })();
+      const number = `Z-${year}-${pad6(bumpSeq(db, 'Z', year))}`;
+      const hash = computeZHashDb(prev, number, input.day, t.totalTtcCt, t.totalTimbreCt);
+      db.prepare(
+        `INSERT INTO z_reports (report_number, day, opening_time, closing_time,
+          total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
+          tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
+          especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
+          credit_collected_ct, first_invoice_number, last_invoice_number,
+          prev_hash, hash, finalized)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+      ).run(
+        number, input.day, input.openingTime, input.closingTime,
+        t.salesCount, t.totalHtCt, t.tva0BaseCt, t.tva9BaseCt, t.tva9AmtCt,
+        t.tva19BaseCt, t.tva19AmtCt, t.totalTvaCt, t.totalTimbreCt, t.totalTtcCt,
+        t.especesGrossCt, t.cibTotalCt, t.dahabiyaTotalCt, t.creditGrantedCt,
+        t.creditCollectedCt, t.firstInvoice, t.lastInvoice, prev, hash,
+      );
+      return { report_number: number, hash, prev_hash: prev };
+    },
+    listZReports(): Record<string, unknown>[] {
+      return db.prepare('SELECT * FROM z_reports ORDER BY rowid ASC').all() as Record<string, unknown>[];
     },
   };
 }

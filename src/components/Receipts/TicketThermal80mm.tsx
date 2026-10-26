@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Sale } from '../../types';
-import { formatDZD } from '../../utils/fiscal';
-import { Printer, X, Download, Copy, Check } from 'lucide-react';
+import { formatDZD } from '../../core/display';
+import { Printer, X, Download, Copy, Check, Cpu } from 'lucide-react';
+import { buildReceipt, downloadRaw } from '../../hardware/escpos';
 
 interface TicketThermalProps {
   sale: Sale;
@@ -18,6 +19,36 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
 
   const handlePrint = () => {
     window.print();
+  };
+
+  /** Gate-02 TASK 2 Lane A: raw deterministic ESC/POS .bin export. */
+  const handleDownloadRaw = () => {
+    const buf = buildReceipt({
+      storeName: storeProfile.store_name,
+      rc: storeProfile.rc_number,
+      nif: storeProfile.nif_number,
+      invoice: sale.invoice_number,
+      ticket: sale.ticket_number,
+      date: formattedDate,
+      cashier: sale.cashier_name,
+      items: sale.items.map(it => ({
+        name: isAr ? it.name_ar || it.name_fr : it.name_fr,
+        qty: it.quantity,
+        unit: it.unit,
+        lineTtc: it.total_line_ttc,
+      })),
+      totalHt: sale.total_ht,
+      tva9Base: sale.tva_breakdown[9].base_ht,
+      tva9Amt: sale.tva_breakdown[9].tva_amount,
+      tva19Base: sale.tva_breakdown[19].base_ht,
+      tva19Amt: sale.tva_breakdown[19].tva_amount,
+      timbre: sale.timbre_fiscal,
+      totalTtc: sale.total_ttc,
+      paymentMethod: sale.payment_method,
+      amountPaid: sale.amount_paid,
+      changeDue: sale.amount_returned,
+    });
+    downloadRaw(buf, `${sale.ticket_number}.bin`);
   };
 
   const handleCopyRaw = () => {
@@ -221,6 +252,15 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
           </button>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleDownloadRaw}
+              title={isAr ? 'تصدير ملف ESC/POS الخام (Lane A)' : 'Export brut ESC/POS (Lane A)'}
+              className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] text-slate-300 rounded-xl text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            >
+              <Cpu className="w-4 h-4 text-amber-400" />
+              <span>.bin</span>
+            </button>
             <button
               type="button"
               onClick={onClose}

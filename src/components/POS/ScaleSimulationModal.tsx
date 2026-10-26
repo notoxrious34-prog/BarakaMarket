@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Scale, Barcode, CheckCircle, X, ShoppingBag } from 'lucide-react';
-import { formatDZD } from '../../utils/fiscal';
+import { formatDZD } from '../../core/display';
 
 interface ScaleSimulationModalProps {
   onClose: () => void;
