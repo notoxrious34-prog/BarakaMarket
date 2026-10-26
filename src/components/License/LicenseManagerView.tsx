@@ -26,7 +26,7 @@ export const LicenseManagerView: React.FC = () => {
   const [copiedKey, setCopiedKey] = useState(false);
 
   // Key generator simulator for BarakaDEV
-  const [keygenInputHWID, setKeygenInputHWID] = useState('BM-');
+  const [keygenInputHWID, setKeygenInputHWID] = useState('');
   const [generatedResult, setGeneratedResult] = useState('');
 
   const handleCopy = (text: string) => {
@@ -37,26 +37,36 @@ export const LicenseManagerView: React.FC = () => {
 
   const handleGenerateKey = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!keygenInputHWID.trim()) return;
-    const res = computeActivationKey(keygenInputHWID.trim());
+    let hwid = keygenInputHWID.trim().toUpperCase();
+    if (!hwid) return;
+    if (!hwid.startsWith('BM-')) hwid = `BM-${hwid}`;
+    const res = computeActivationKey(hwid);
     setGeneratedResult(res);
   };
 
   return (
     <div className="flex-1 bg-[#0b0f17] p-6 overflow-y-auto space-y-6">
       {/* Header Banner */}
-      <div className="force-dark bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-        {/* Official Baraka (بركة) emblem — large placement, gold aura */}
-        <div className="shrink-0 rounded-3xl [background:radial-gradient(circle_at_center,rgba(212,175,55,0.22),transparent_70%)] p-3">
-          <img
-            src="/brand/baraka-emblem-512.png"
-            alt="Baraka — بركة"
-            className="w-36 h-36 rounded-3xl object-cover ring-1 ring-amber-400/20 shadow-2xl shadow-black/50"
-            draggable={false}
-          />
-        </div>
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
+      <div className="force-dark relative overflow-hidden bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 md:p-8 shadow-2xl">
+        {/* Gold hairline sheen */}
+        <div aria-hidden={true} className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />
+        {/* Watermark depth layer */}
+        <img
+          src="/brand/baraka-emblem-512.png"
+          aria-hidden={true}
+          className="pointer-events-none absolute -end-16 -bottom-28 w-96 h-96 object-contain opacity-10 select-none"
+          draggable={false}
+        />
+        <div className="relative grid grid-cols-1 md:grid-cols-[auto_1fr_auto] items-center gap-6 md:gap-8">
+        {/* Floating emblem — no box, no ring: gold lives on the gradient */}
+        <img
+          src="/brand/baraka-emblem-512.png"
+          alt="Baraka — بركة"
+          className="w-40 h-40 md:w-44 md:h-44 object-contain justify-self-center drop-shadow-[0_0_44px_rgba(212,175,55,0.6)]"
+          draggable={false}
+        />
+        <div className="space-y-2.5 text-center md:text-start">
+          <div className="flex items-center justify-center md:justify-start gap-2 flex-wrap">
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
               BarakaDEV Algerian Retail Solutions
             </span>
@@ -64,17 +74,17 @@ export const LicenseManagerView: React.FC = () => {
               Tarif Unique: 5,000 DZD
             </span>
           </div>
-          <h2 className="text-2xl font-black text-white">
+          <h2 className="text-2xl md:text-3xl font-black tracking-tight text-white">
             {isAr ? 'نظام الحماية ورخصة البرنامج بدون إنترنت (Offline Licensing)' : 'Licence Perpétuelle & Empreinte Matérielle'}
           </h2>
-          <p className="text-xs text-slate-400 max-w-2xl">
+          <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">
             {isAr
               ? 'تعتمد منظومة Baraka Market على بصمة العتاد (Hardware ID) لتفعيل النسخة الدائمة بدون الحاجة لاتصال بالإنترنت، مع ثبات مطلق وسرعة تشغيل فائقة.'
               : 'Système d\'activation autonome hors-ligne basé sur l\'empreinte unique de la machine (HWID), sans dépendance au cloud ni frais récurrents.'}
           </p>
         </div>
 
-        <div className="flex items-center gap-3 bg-emerald-950/60 border border-emerald-800/60 rounded-xl px-4 py-3">
+        <div className="flex items-center gap-3 bg-emerald-950/60 border border-emerald-800/60 rounded-xl px-4 py-3 justify-self-center md:justify-self-end whitespace-nowrap">
           <ShieldCheck className="w-8 h-8 text-emerald-400" />
           <div>
             <div className="text-xs font-bold text-white">
@@ -84,6 +94,7 @@ export const LicenseManagerView: React.FC = () => {
               Poste Caisse #01 • Illimité
             </div>
           </div>
+        </div>
         </div>
       </div>
 
@@ -109,7 +120,7 @@ export const LicenseManagerView: React.FC = () => {
                 />
                 <button
                   onClick={() => handleCopy(hardwareId)}
-                  className="px-3 py-2 bg-[#162030] hover:bg-[#233145] text-slate-300 rounded-xl text-xs flex items-center gap-1 cursor-pointer"
+                  className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] hover:border-amber-500/50 text-slate-300 font-semibold rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Copy className="w-3.5 h-3.5" />
                   <span>{isAr ? 'نسخ' : 'Copier'}</span>
@@ -130,7 +141,7 @@ export const LicenseManagerView: React.FC = () => {
                 />
                 <button
                   onClick={() => handleCopy(activationKey)}
-                  className="px-3 py-2 bg-[#162030] hover:bg-[#233145] text-slate-300 rounded-xl text-xs flex items-center gap-1 cursor-pointer"
+                  className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] hover:border-amber-500/50 text-slate-300 font-semibold rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedKey ? (isAr ? 'تم' : 'Copié') : (isAr ? 'نسخ' : 'Copier')}</span>
@@ -159,7 +170,7 @@ export const LicenseManagerView: React.FC = () => {
         <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 shadow-xl space-y-4">
           <h3 className="text-sm font-bold text-amber-400 flex items-center gap-2">
             <KeyRound className="w-4 h-4" />
-            <span>{isAr ? 'مولد مفاتيح التفعيل لموزعي BarakaDEV' : 'Générateur de Clés (BarakaDEV Keygen)'}</span>
+            <span>{isAr ? 'مولد مفاتيح التفعيل لموزعي BarakaDEV' : 'Générateur de Clés BarakaDEV'}</span>
           </h3>
 
           <p className="text-xs text-slate-400">
@@ -177,8 +188,8 @@ export const LicenseManagerView: React.FC = () => {
                 type="text"
                 required
                 value={keygenInputHWID}
-                onChange={e => setKeygenInputHWID(e.target.value)}
-                placeholder="Ex: BM-A8DF-92KJ-4XLP"
+                onChange={e => setKeygenInputHWID(e.target.value.toUpperCase())}
+                placeholder="BM-XXXX-XXXX-XXXX"
                 className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white font-mono uppercase outline-none focus:border-amber-500"
               />
             </div>
