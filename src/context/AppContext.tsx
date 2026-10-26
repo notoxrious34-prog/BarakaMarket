@@ -24,7 +24,8 @@ import {
   initialStoreProfile,
   initialSuppliers,
 } from '../data/seedData';
-import { calculateLineTotals, calculateSaleTotals, parseScaleBarcode } from '../utils/fiscal';
+import { calculateLineTotals, calculateSaleTotals } from '../core/cart-bridge';
+import { parseScaleBarcode } from '../utils/fiscal';
 import { calculateAccountingSummary, calculateNewPMP } from '../utils/accounting';
 
 interface AppContextType {

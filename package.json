@@ -8,7 +8,12 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "api": "tsx server/index.ts",
+    "seed": "tsx scripts/seed-db.ts",
+    "migrate": "tsx scripts/migrate-localstorage.ts",
+    "bench": "tsx scripts/bench-core.ts",
+    "test:all": "tsx --test src/core/*.test.ts src/utils/*.test.ts src/db/*.test.ts server/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
