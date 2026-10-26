@@ -51,19 +51,19 @@ export const Navbar: React.FC = () => {
           title={isAr ? 'بركة ماركت — العودة لنقطة البيع' : 'Baraka Market — retour Caisse'}
         >
           {theme === 'light' ? (
-            <span className="brand-chip w-9 h-9 rounded-xl bg-[#0b0f17] ring-1 ring-amber-400/40 shadow-md flex items-center justify-center">
+            <span className="brand-chip w-10 h-10 rounded-xl bg-[#0b0f17] ring-1 ring-amber-400/40 shadow-md flex items-center justify-center">
               <img
-                src="/brand/baraka-emblem-256.png"
+                src="/brand/baraka-mark-256.png"
                 alt="Baraka — بركة"
-                className="w-7 h-7 object-contain drop-shadow-[0_0_6px_rgba(212,160,23,0.6)]"
+                className="w-8 h-8 object-contain drop-shadow-[0_0_6px_rgba(212,160,23,0.6)]"
                 draggable={false}
               />
             </span>
           ) : (
             <img
-              src="/brand/baraka-emblem-256.png"
+              src="/brand/baraka-mark-256.png"
               alt="Baraka — بركة"
-              className="w-9 h-9 rounded-xl object-contain ring-1 ring-amber-400/25 drop-shadow-[0_0_8px_rgba(212,160,23,0.45)]"
+              className="w-10 h-10 rounded-xl object-contain ring-1 ring-amber-400/25 drop-shadow-[0_0_8px_rgba(212,160,23,0.45)]"
               draggable={false}
             />
           )}
