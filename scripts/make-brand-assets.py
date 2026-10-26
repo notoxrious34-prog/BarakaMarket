@@ -100,6 +100,8 @@ if core:
     pad = int(max(mark.size) * 0.10)
     tile = Image.new('RGBA', (mark.width + 2 * pad, mark.height + 2 * pad), (0, 0, 0, 0))
     tile.paste(mark, (pad, pad), mark)
+    tile.save('D:/Dev/baraka-market/src-tauri/icon-mark-full.png')
+    print('MARK-FULL', tile.size)
     for s in (256, 64):
         m = tile.copy()
         m.thumbnail((s, s), Image.LANCZOS)
