@@ -46,6 +46,13 @@ export const LicenseManagerView: React.FC = () => {
     <div className="flex-1 bg-[#0b0f17] p-6 overflow-y-auto space-y-6">
       {/* Header Banner */}
       <div className="bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+        {/* Official Baraka (بركة) emblem — large placement */}
+        <img
+          src="/brand/baraka-emblem-512.png"
+          alt="Baraka — بركة"
+          className="w-36 h-36 rounded-3xl object-cover ring-1 ring-white/10 shadow-2xl shadow-black/50 shrink-0"
+          draggable={false}
+        />
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">

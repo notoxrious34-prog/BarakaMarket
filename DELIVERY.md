@@ -21,4 +21,6 @@
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
 - [ ] Real scale/printer hardware (simulation only) → Phase 3 wiring points kept (`ScaleSimulationModal`, ESC/POS lane in API)
 - [ ] Physical kill -9 pull-the-plug test → Phase 5 with installer (WAL crash-model covered by tests)
-- [ ] External accountant sign-off on 3 invoices + Z → Phase 4 gate for the shop pilot
+- [x] Self-certification instead of external accountant (owner decision 2026-10-26):
+      golden receipts (33/33 tests) + Z hash chain + migration 0-drift + bench PASS.
+      External sign-off dropped from gates by owner waiver.

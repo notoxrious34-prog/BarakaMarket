@@ -50,6 +50,9 @@ export const Navbar: React.FC = () => {
           <span className="font-semibold text-amber-400 tracking-wider">
             {storeProfile.store_name}
           </span>
+          <span className="text-[10px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            v1.0-rc1
+          </span>
           <span className="text-slate-600">|</span>
           <span>RC: <strong className="text-slate-300" dir="ltr">{storeProfile.rc_number}</strong></span>
           <span className="text-slate-600">|</span>
@@ -73,27 +76,21 @@ export const Navbar: React.FC = () => {
 
       {/* Main Navbar */}
       <div className="px-4 py-2.5 flex items-center justify-between gap-3">
-        {/* Brand & Logo */}
+        {/* Brand & Logo — official Baraka (بركة) emblem tile */}
         <div
           onClick={() => setActiveView('pos')}
-          className="flex items-center gap-3 cursor-pointer group shrink-0"
+          className="flex items-center gap-2.5 cursor-pointer group shrink-0"
+          title={isAr ? 'بركة ماركت — العودة لنقطة البيع' : 'Baraka Market — retour Caisse'}
         >
-          <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-emerald-500 to-emerald-700 flex items-center justify-center shadow-lg shadow-emerald-900/30 border border-emerald-400/30">
-            <ShoppingCart className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-lg text-white tracking-tight group-hover:text-emerald-400 transition-colors">
-                Baraka Market
-              </span>
-              <span className="text-[10px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                v1.0 UHD 4K
-              </span>
-            </div>
-            <p className="text-[10px] text-slate-400">
-              {isAr ? 'نظام نقاط البيع والامتثال الجبائي الجزائري' : 'Système POS & Fiscalité Algérienne DGI'}
-            </p>
-          </div>
+          <img
+            src="/brand/baraka-emblem-256.png"
+            alt="Baraka — بركة"
+            className="w-9 h-9 rounded-[10px] object-cover ring-1 ring-white/10 shadow-lg shadow-black/40"
+            draggable={false}
+          />
+          <span className="font-bold text-lg text-white tracking-tight group-hover:text-emerald-400 transition-colors whitespace-nowrap">
+            Baraka Market
+          </span>
         </div>
 
         {/* Navigation Tabs */}
