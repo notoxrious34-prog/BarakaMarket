@@ -1,0 +1,6 @@
+{
+  "name": "Baraka Market v1.0 - Algerian POS & Retail ERP",
+  "description": "Système de Caisse et Gestion Commerciale pour Supermarchés conforme aux normes fiscales algériennes (NIF, NIS, RC, AI, TVA 0-9-19%, Droit de Timbre, Carnet de Dette, Rapport Z).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,185 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-main: #0b0f17;
+    --bg-header: #070a0f;
+    --bg-card: #111722;
+    --bg-card-hover: #162030;
+    --border-subtle: #1e293b;
+    --border-accent: #233145;
+    --text-primary: #f8fafc;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-emerald: #10b981;
+    --accent-emerald-hover: #059669;
+    --accent-gold: #d4af37;
+  }
+
+  html.light {
+    --bg-main: #f1f5f9;
+    --bg-header: #e2e8f0;
+    --bg-card: #ffffff;
+    --bg-card-hover: #f8fafc;
+    --border-subtle: #cbd5e1;
+    --border-accent: #94a3b8;
+    --text-primary: #0f172a;
+    --text-secondary: #334155;
+    --text-muted: #64748b;
+    --accent-emerald: #059669;
+    --accent-emerald-hover: #047857;
+    --accent-gold: #b45309;
+  }
+
+  body {
+    background-color: var(--bg-main);
+    color: var(--text-primary);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  /* When Arabic language is active */
+  [dir="rtl"] body, [dir="rtl"] {
+    font-family: 'Cairo', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* 4K UHD Ultra High Resolution Optimizations (2560px and 3840px UHD Monitors) */
+@media (min-width: 2560px) {
+  html {
+    font-size: 18px;
+  }
+  .max-w-4xl {
+    max-width: 1400px;
+  }
+  .max-w-lg {
+    max-width: 680px;
+  }
+  .max-w-md {
+    max-width: 540px;
+  }
+}
+
+@media (min-width: 3840px) {
+  html {
+    font-size: 22px;
+  }
+  .max-w-4xl {
+    max-width: 1800px;
+  }
+  .max-w-lg {
+    max-width: 860px;
+  }
+}
+
+/* Custom scrollbar for POS item lists */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+}
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Light mode specific element styles */
+html.light .bg-\[\#0b0f17\] {
+  background-color: #f1f5f9 !important;
+}
+html.light .bg-\[\#070a0f\] {
+  background-color: #e2e8f0 !important;
+}
+html.light .bg-\[\#0e141f\] {
+  background-color: #f8fafc !important;
+}
+html.light .bg-\[\#111722\] {
+  background-color: #ffffff !important;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+}
+html.light .bg-\[\#162030\] {
+  background-color: #f1f5f9 !important;
+}
+html.light .hover\:bg-\[\#162030\]:hover {
+  background-color: #e2e8f0 !important;
+}
+html.light .hover\:bg-\[\#1e293b\]:hover {
+  background-color: #cbd5e1 !important;
+}
+html.light .border-\[\#1e293b\] {
+  border-color: #cbd5e1 !important;
+}
+html.light .border-\[\#233145\], html.light .border-\[\#2b3a4f\] {
+  border-color: #94a3b8 !important;
+}
+html.light .text-slate-400 {
+  color: #475569 !important;
+}
+html.light .text-slate-300 {
+  color: #1e293b !important;
+}
+html.light .text-slate-200, html.light .text-white {
+  color: #0f172a !important;
+}
+html.light input, html.light select, html.light textarea {
+  color: #0f172a !important;
+}
+
+/* Print styling for Thermal Receipt (80mm) and Facture A4 */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  
+  #printable-receipt, #printable-receipt * {
+    visibility: visible;
+  }
+
+  #printable-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 80mm !important;
+    max-width: 80mm !important;
+    margin: 0 !important;
+    padding: 4mm !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    font-size: 11px !important;
+    line-height: 1.25 !important;
+  }
+
+  #printable-facture-a4, #printable-facture-a4 * {
+    visibility: visible;
+  }
+
+  #printable-facture-a4 {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 210mm !important;
+    min-height: 297mm !important;
+    margin: 0 !important;
+    padding: 15mm !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-family: 'Plus Jakarta Sans', 'Cairo', sans-serif !important;
+  }
+}
