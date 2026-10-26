@@ -45,14 +45,16 @@ export const LicenseManagerView: React.FC = () => {
   return (
     <div className="flex-1 bg-[#0b0f17] p-6 overflow-y-auto space-y-6">
       {/* Header Banner */}
-      <div className="bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-        {/* Official Baraka (بركة) emblem — large placement */}
-        <img
-          src="/brand/baraka-emblem-512.png"
-          alt="Baraka — بركة"
-          className="w-36 h-36 rounded-3xl object-cover ring-1 ring-white/10 shadow-2xl shadow-black/50 shrink-0"
-          draggable={false}
-        />
+      <div className="force-dark bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 shadow-2xl flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+        {/* Official Baraka (بركة) emblem — large placement, gold aura */}
+        <div className="shrink-0 rounded-3xl [background:radial-gradient(circle_at_center,rgba(212,175,55,0.22),transparent_70%)] p-3">
+          <img
+            src="/brand/baraka-emblem-512.png"
+            alt="Baraka — بركة"
+            className="w-36 h-36 rounded-3xl object-cover ring-1 ring-amber-400/20 shadow-2xl shadow-black/50"
+            draggable={false}
+          />
+        </div>
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">

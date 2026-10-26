@@ -141,6 +141,27 @@ html.light input, html.light select, html.light textarea {
   color: #0f172a !important;
 }
 
+/* Colored fills keep white text in light mode (same specificity, placed last wins) */
+html.light .from-emerald-600,
+html.light .from-amber-600,
+html.light .bg-emerald-600,
+html.light .bg-emerald-600\/90,
+html.light .bg-amber-600 {
+  color: #ffffff !important;
+}
+
+/* Opt-out: intentional dark brand panels keep their light text in light mode */
+html.light .force-dark .text-white { color: #f8fafc !important; }
+html.light .force-dark .text-slate-200 { color: #e2e8f0 !important; }
+html.light .force-dark .text-slate-300 { color: #cbd5e1 !important; }
+html.light .force-dark .text-slate-400 { color: #94a3b8 !important; }
+html.light .force-dark .text-slate-500 { color: #94a3b8 !important; }
+html.light .force-dark input { color: #f8fafc !important; }
+/* Brand chip: stays deep-navy in light mode so the gold emblem keeps contrast */
+html.light .brand-chip {
+  background-color: #0b0f17 !important;
+}
+
 /* Print styling for Thermal Receipt (80mm) and Facture A4 */
 @media print {
   body * {
