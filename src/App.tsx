@@ -20,6 +20,7 @@ const MainLayout: React.FC = () => {
     currentPrintSale,
     printModalType,
     closePrintModal,
+    language,
   } = useApp();
 
   // Global hotkeys: Ctrl+L to toggle language
@@ -48,6 +49,22 @@ const MainLayout: React.FC = () => {
         {activeView === 'license' && <LicenseManagerView />}
         {activeView === 'settings' && <StoreProfileView />}
       </main>
+
+      {/* Slim status bar: cashier • version • local DB (fiscal IDs live on receipts + settings) */}
+      <footer className="px-4 py-1 bg-[#070a0f] border-t border-[#162030] text-[10px] text-slate-500 flex items-center justify-between gap-2 select-none">
+        <span>
+          {language === 'ar' ? 'الكاشير:' : 'Caissier:'}{' '}
+          <span className="text-slate-300 font-medium">Amine (Caisse 01)</span>
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="flex items-center gap-1 text-emerald-400">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+            WAL
+          </span>
+          <span className="text-slate-600">|</span>
+          <span className="uppercase tracking-widest text-amber-400/80">v1.0-rc1</span>
+        </span>
+      </footer>
 
       {/* Direct Thermal Receipt (80mm) Print Modal */}
       {printModalType === 'ticket' && currentPrintSale && (

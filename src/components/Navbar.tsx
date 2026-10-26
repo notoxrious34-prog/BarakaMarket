@@ -10,7 +10,6 @@ import {
   Scale,
   Languages,
   Clock,
-  CheckCircle2,
   ChevronDown,
   Trash2,
   PlayCircle,
@@ -32,7 +31,6 @@ export const Navbar: React.FC = () => {
     heldCarts,
     restoreHeldCart,
     deleteHeldCart,
-    storeProfile,
     isHardwareScaleActive,
     setHardwareScaleActive,
     scaleWeightGrams,
@@ -44,36 +42,6 @@ export const Navbar: React.FC = () => {
 
   return (
     <header className="bg-[#0b0f17] border-b border-[#1e293b] text-slate-200 select-none sticky top-0 z-40 transition-colors">
-      {/* Top Bar: Legal mentions & Store Header */}
-      <div className="px-4 py-1.5 bg-[#070a0f] border-b border-[#162030] text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3">
-          <span className="font-semibold text-amber-400 tracking-wider">
-            {storeProfile.store_name}
-          </span>
-          <span className="text-[10px] font-semibold uppercase tracking-widest px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20">
-            v1.0-rc1
-          </span>
-          <span className="text-slate-600">|</span>
-          <span>RC: <strong className="text-slate-300" dir="ltr">{storeProfile.rc_number}</strong></span>
-          <span className="text-slate-600">|</span>
-          <span>NIF: <strong className="text-slate-300" dir="ltr">{storeProfile.nif_number}</strong></span>
-          <span className="text-slate-600">|</span>
-          <span>AI: <strong className="text-slate-300" dir="ltr">{storeProfile.ai_number}</strong></span>
-        </div>
-
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-1.5 text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-2 py-0.5 rounded text-[10px]">
-            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-            <span>{isAr ? 'قاعدة بيانات محلية نشطة (WAL Mode)' : 'Base SQLite-WAL Sécurisée'}</span>
-          </div>
-
-          <div className="text-slate-400 text-[11px] flex items-center gap-1">
-            <span className="text-slate-500">{isAr ? 'الكاشير:' : 'Caissier:'}</span>
-            <span className="text-slate-200 font-medium">Amine (Caisse 01)</span>
-          </div>
-        </div>
-      </div>
-
       {/* Main Navbar */}
       <div className="px-4 py-2.5 flex items-center justify-between gap-3">
         {/* Brand & Logo — official Baraka (بركة) emblem tile */}
