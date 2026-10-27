@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Baraka Market",
-  "version": "1.0.0",
-  "identifier": "com.barakadev.market",
+  "version": "2.0.0",
+  "identifier": "com.barakamarket.pos",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3000",
@@ -12,11 +12,13 @@
   "app": {
     "windows": [
       {
-        "title": "Baraka Market — بركة",
-        "width": 1366,
-        "height": 768,
+        "title": "Baraka Market — Supermarket POS & Management",
+        "width": 1280,
+        "height": 800,
         "minWidth": 1024,
-        "minHeight": 640,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
         "center": true,
         "decorations": true
       }
@@ -31,7 +33,7 @@
     "icon": ["icons/icon.ico", "icons/icon.png", "../public/brand/baraka-mark-256.png"],
     "category": "Business",
     "shortDescription": "Système de caisse POS — TVA Algérie, SQLite WAL, Zero-Cloud",
-    "longDescription": "Baraka Market v1.0 — offline Algerian POS: fiscal centimes engine, ESC/POS thermal printing, Z-report hash chain, air-gapped licensing. No internet required.",
+    "longDescription": "Baraka Market v2.0 — offline Algerian POS: fiscal centimes engine, ESC/POS thermal printing, Z-report hash chain, air-gapped licensing. No internet required.",
     "windows": {
       "webviewInstallMode": { "type": "embedBootstrapper" },
       "nsis": {

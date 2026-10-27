@@ -1,7 +1,7 @@
 {
   "name": "baraka-market",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
@@ -14,6 +14,7 @@
     "migrate": "tsx scripts/migrate-localstorage.ts",
     "bench": "tsx scripts/bench-core.ts",
     "test:all": "tsx --test src/core/*.test.ts src/hardware/*.test.ts src/utils/*.test.ts src/db/*.test.ts server/*.test.ts",
+    "verify:release": "tsx scripts/verify-release.ts",
     "tauri": "tauri"
   },
   "dependencies": {
