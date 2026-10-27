@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* ADR-008-MKT: dark: utilities follow the app's .dark class toggle
+   (Tailwind v4 default is prefers-color-scheme, which ignores it). */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   :root {
     --bg-main: #0b0f17;
@@ -209,4 +213,13 @@ html.light .brand-chip {
     color: #111827 !important;
     font-family: 'Plus Jakarta Sans', 'Cairo', sans-serif !important;
   }
+}
+
+/* ADR-007-MKT: hide scrollbars on horizontal tab rails while keeping scroll. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
 }

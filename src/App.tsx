@@ -56,10 +56,10 @@ const MainLayout: React.FC = () => {
       </main>
 
       {/* Slim status bar: cashier • version • local DB (fiscal IDs live on receipts + settings) */}
-      <footer className="px-4 py-1 bg-[#070a0f] border-t border-[#162030] text-[10px] text-slate-500 flex items-center justify-between gap-2 select-none">
+      <footer className="px-4 py-1 bg-slate-100 dark:bg-[#070a0f] border-t border-slate-200 dark:border-[#162030] text-[10px] text-slate-600 dark:text-slate-500 flex items-center justify-between gap-2 select-none transition-colors">
         <span>
           {language === 'ar' ? 'الكاشير:' : 'Caissier:'}{' '}
-          <span className="text-slate-300 font-medium">Amine (Caisse 01)</span>
+          <span className="text-slate-800 dark:text-slate-300 font-medium">Amine (Caisse 01)</span>
         </span>
         <span className="flex items-center gap-2">
           {isFiscalMode ? (
@@ -73,11 +73,11 @@ const MainLayout: React.FC = () => {
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
                 WAL
               </span>
-              <span className="text-slate-600">|</span>
+              <span className="text-slate-300 dark:text-slate-600">|</span>
               <span className="text-amber-400/90 font-semibold">PROVISOIRE</span>
             </>
           )}
-          <span className="text-slate-600">|</span>
+          <span className="text-slate-300 dark:text-slate-600">|</span>
           <span className="uppercase tracking-widest text-amber-400/80">v1.0-rc1</span>
         </span>
       </footer>

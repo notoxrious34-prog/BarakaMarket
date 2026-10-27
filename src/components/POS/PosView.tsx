@@ -20,7 +20,6 @@ import {
   BookOpen,
   ArrowRight,
   Maximize2,
-  Clock,
   AlertCircle,
 } from 'lucide-react';
 import { PaymentModal } from './PaymentModal';
@@ -54,6 +53,8 @@ export const PosView: React.FC = () => {
     isHardwareScaleActive,
     setHardwareScaleActive,
     isFiscalMode,
+    isTrialExpired,
+    setActiveView,
   } = useApp();
 
   const isAr = language === 'ar';
@@ -73,6 +74,15 @@ export const PosView: React.FC = () => {
   const [isLocked, setIsLocked] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
+  // ADR-002-MKT: trial-expiry lockout modal (checkout hard-blocked when expired).
+  const [showLicenseLock, setShowLicenseLock] = useState(false);
+
+  /** ADR-002: expired trial routes to the activation sanctuary, not to payment. */
+  const requestCheckout = () => {
+    if (currentCart.length === 0) return;
+    if (isTrialExpired) setShowLicenseLock(true);
+    else setShowPaymentModal(true);
+  };
 
   const barcodeInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -149,22 +159,25 @@ export const PosView: React.FC = () => {
         setShowCatalogModal(prev => !prev);
       } else if (e.key === 'F9') {
         e.preventDefault();
-        // Trigger payment modal with credit mode
-        if (currentCart.length > 0) {
-          setShowPaymentModal(true);
-        }
-      } else if (e.key === ' ' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
-        // Space bar for quick checkout
+        if (currentCart.length === 0) return;
+        requestCheckout();
+      } else if (e.key === 'F12') {
         e.preventDefault();
-        if (currentCart.length > 0) {
-          setShowPaymentModal(true);
-        }
+        // ADR-005-MKT: F12 opens the Cash Settlement Cockpit directly.
+        // ADR-007-MKT: hard guard — empty cart never reaches the cockpit.
+        if (currentCart.length === 0) return;
+        requestCheckout();
+      } else if (e.key === ' ' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+        // Space bar for quick checkout — suppressed on empty cart.
+        e.preventDefault();
+        if (currentCart.length === 0) return;
+        requestCheckout();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentCart, heldCarts, holdCurrentCart, restoreHeldCart, editingItemIndex, updateCartItemQty, updateCartItemDiscount, isLocked]);
+  }, [currentCart, heldCarts, holdCurrentCart, restoreHeldCart, editingItemIndex, updateCartItemQty, updateCartItemDiscount, isLocked, isTrialExpired]);
 
   // Handle barcode scanner submission
   const handleBarcodeSubmit = (e: React.FormEvent) => {
@@ -202,7 +215,7 @@ export const PosView: React.FC = () => {
           In the Tauri desktop shell the fiscal state lives subtly in the
           status bar — never a conflicting full-width badge. */}
       {!isFiscalMode && (
-        <div className="px-4 py-1.5 bg-amber-950/80 border-b border-amber-500/40 text-center text-[11px] font-bold text-amber-300 tracking-wide" role="alert">
+        <div className="flex-shrink-0 px-4 py-1.5 bg-amber-950/80 border-b border-amber-500/40 text-center text-[11px] font-bold text-amber-300 tracking-wide" role="alert">
           {isAr
             ? '⚠ بيئة اختبار غير جبائية — الأرقام مؤقتة (التسلسل الأحادي من SQLite هو المرجع)'
             : '⚠ NON-FISCAL TEST ENVIRONMENT — provisional numbers (SQLite monotonic seq is authoritative)'}
@@ -210,7 +223,7 @@ export const PosView: React.FC = () => {
       )}
       <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
       {/* LEFT COLUMN: Catalog, Search, Categories, Quick Tap */}
-      <div className="flex-1 flex flex-col border-e border-[#1e293b] p-3 overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 border-e border-[#1e293b] p-3 overflow-hidden">
         {/* Scanner & Quick Search Bar */}
         <div className="flex flex-col sm:flex-row items-center gap-2 mb-3">
           <form
@@ -241,8 +254,8 @@ export const PosView: React.FC = () => {
             </button>
           </form>
 
-          {/* Quick text search */}
-          <div className="relative w-full sm:w-64">
+          {/* Quick text search (compact secondary affordance, F7) */}
+          <div className="relative w-full sm:w-52 shrink-0">
             <Search className="w-4 h-4 absolute inset-y-0 start-3 my-auto text-slate-400" />
             <input
               ref={searchInputRef}
@@ -254,15 +267,6 @@ export const PosView: React.FC = () => {
             />
           </div>
 
-          {/* Electronic Scale RS232 Simulation Trigger Button */}
-          <button
-            onClick={() => setShowScaleModal(true)}
-            className="px-3 py-2 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-500 hover:to-amber-600 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-md shadow-amber-950/40 cursor-pointer shrink-0"
-            title={isAr ? 'محاكي ميزان الخضر واللحوم (F6)' : 'Simulateur Balance Électronique (F6)'}
-          >
-            <Scale className="w-4 h-4" />
-            <span>{isAr ? 'ميزان (F6)' : 'Balance (F6)'}</span>
-          </button>
         </div>
 
         {/* Scan Feedback Banner */}
@@ -280,12 +284,12 @@ export const PosView: React.FC = () => {
         )}
 
         {/* Categories Pills */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pb-2 mb-2 no-scrollbar">
+        <div className="flex items-center gap-2 overflow-x-auto no-scrollbar px-2 py-1 mb-2 flex-shrink-0">
           {initialCategories.map(cat => (
             <button
               key={cat.id}
               onClick={() => setSelectedCategory(cat.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all cursor-pointer ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap flex-shrink-0 transition-all cursor-pointer ${
                 selectedCategory === cat.id
                   ? 'bg-emerald-600/90 text-white shadow-md shadow-emerald-950/60 font-semibold'
                   : 'bg-[#111722] hover:bg-[#162030] text-slate-400 hover:text-slate-200 border border-[#1e293b]'
@@ -297,8 +301,8 @@ export const PosView: React.FC = () => {
         </div>
 
         {/* Product Cards Grid */}
-        <div className="flex-1 overflow-y-auto pe-1">
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-2.5">
+        <div className="flex-1 min-h-0 overflow-y-auto pe-1 pb-1">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
             {filteredProducts.map(product => {
               const isPerishableSoon =
                 product.has_expiry_date &&
@@ -345,7 +349,7 @@ export const PosView: React.FC = () => {
 
                   {/* Expiry Warning if near */}
                   {isPerishableSoon && (
-                    <div className="text-[9px] text-rose-400 bg-rose-950/50 px-1 py-0.5 rounded mb-1 flex items-center gap-1 border border-rose-900/40">
+                    <div className="text-[10px] font-bold uppercase tracking-wide bg-rose-600 text-white px-1.5 py-0.5 rounded shadow-sm mb-1 flex items-center gap-1">
                       <span>{isAr ? 'قريب الانتهاء' : 'Date courte'}</span>
                     </div>
                   )}
@@ -366,7 +370,7 @@ export const PosView: React.FC = () => {
         </div>
 
         {/* Keyboard Shortcuts Bottom Bar (Prompt Specification) */}
-        <div className="mt-2 pt-2 border-t border-[#1e293b] bg-[#070a0f] px-3 py-1.5 rounded-lg flex flex-wrap items-center justify-between text-[11px] text-slate-400 gap-2">
+        <div className="mt-2 pt-2 border-t border-[#1e293b] bg-[#070a0f] px-3 py-1.5 rounded-lg flex flex-wrap items-center justify-between text-[11px] text-slate-400 gap-2 flex-shrink-0">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <kbd className="px-1.5 py-0.5 bg-[#162030] text-emerald-400 font-mono rounded border border-[#2b3a4f]">F1</kbd>
@@ -398,7 +402,7 @@ export const PosView: React.FC = () => {
       </div>
 
       {/* RIGHT COLUMN: Active Ticket / Cart, Totals & Quick Checkout */}
-      <div className="w-full lg:w-[420px] flex flex-col bg-[#0e141f] border-s border-[#1e293b] p-3 shadow-xl">
+      <div className="w-full lg:w-[420px] flex flex-col min-h-0 bg-[#0e141f] border-s border-[#1e293b] p-3 shadow-xl">
         {/* Ticket Header: Client Selector & Order Header */}
         <div className="bg-[#111722] p-2.5 rounded-xl border border-[#1e293b] mb-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -438,7 +442,7 @@ export const PosView: React.FC = () => {
         </div>
 
         {/* Cart Items List */}
-        <div className="flex-1 overflow-y-auto space-y-1.5 pe-1">
+        <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 pe-1">
           {currentCart.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500">
               <ShoppingBag className="w-12 h-12 stroke-[1.2] mb-3 text-slate-600" />
@@ -568,33 +572,18 @@ export const PosView: React.FC = () => {
           </div>
         </div>
 
-        {/* Action Buttons: Hold, Recall, Pay */}
-        <div className="grid grid-cols-2 gap-2 mt-2">
-          <button
-            onClick={() => holdCurrentCart()}
-            disabled={currentCart.length === 0}
-            className="py-2.5 px-3 bg-[#162030] hover:bg-[#1e293b] disabled:opacity-40 disabled:cursor-not-allowed border border-[#2b3a4f] text-slate-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-          >
-            <Clock className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'تعليق (F4)' : 'Attente (F4)'}</span>
-          </button>
-
-          <button
-            onClick={() => {
-              if (heldCarts.length > 0) restoreHeldCart(heldCarts[0].id);
-            }}
-            disabled={heldCarts.length === 0}
-            className="py-2.5 px-3 bg-[#162030] hover:bg-[#1e293b] disabled:opacity-40 disabled:cursor-not-allowed border border-[#2b3a4f] text-slate-300 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-          >
-            <span>{isAr ? `استرجاع (${heldCarts.length})` : `Rappeler (${heldCarts.length})`}</span>
-          </button>
-        </div>
-
-        {/* PRIMARY CHECKOUT BUTTON */}
+        {/* ADR-007-MKT: parked-sales controls live in the top navbar + F4/F5.
+            The inline Attente/Rappeler pair was the 3rd duplicate — removed. */}
+        {/* PRIMARY CHECKOUT BUTTON — hard guard on empty cart.
+            ADR-008-MKT: disabled state is theme-aware (dark: follows .dark). */}
         <button
-          onClick={() => setShowPaymentModal(true)}
+          onClick={requestCheckout}
           disabled={currentCart.length === 0}
-          className="mt-2 py-3.5 px-4 bg-gradient-to-r from-emerald-600 via-emerald-500 to-emerald-600 hover:from-emerald-500 hover:to-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold text-base shadow-lg shadow-emerald-950/60 flex items-center justify-center gap-2 transition-all cursor-pointer"
+          className={`mt-2 py-3.5 px-4 rounded-xl font-bold text-base flex items-center justify-center gap-2 transition-all ${
+            currentCart.length === 0
+              ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-500 border border-slate-300 dark:border-slate-700 cursor-not-allowed opacity-60'
+              : 'bg-gradient-to-r from-emerald-600 via-emerald-500 to-emerald-600 hover:from-emerald-500 hover:to-emerald-400 text-white shadow-lg shadow-emerald-950/60 cursor-pointer'
+          }`}
         >
           <Banknote className="w-5 h-5" />
           <span>{isAr ? 'إتمام الدفع والطباعة (Space)' : 'ENCAISSER & IMPRIMER (Space)'}</span>
@@ -606,6 +595,36 @@ export const PosView: React.FC = () => {
         <PaymentModal
           onClose={() => { setShowPaymentModal(false); rearmBarcode(); }}
         />
+      )}
+
+      {/* ADR-002-MKT: trial-expiry lockout — reports/stock stay open, sales stop. */}
+      {showLicenseLock && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" role="alertdialog" aria-modal="true">
+          <div className="w-full max-w-md bg-[#0e1522] border border-amber-500/60 rounded-2xl p-6 text-center shadow-2xl">
+            <p className="text-amber-300 font-bold text-lg">
+              {isAr ? 'انتهت الفترة التجريبية' : "Période d'essai terminée"}
+            </p>
+            <p className="mt-2 text-sm text-slate-300">
+              {isAr
+                ? 'انتهت الفترة التجريبية (50 عملية بيع / 14 يوماً). يرجى تفعيل البرنامج لمواصلة البيع.'
+                : "Période d'essai terminée (50 ventes / 14 jours). Veuillez activer votre licence Baraka Market pour continuer les ventes."}
+            </p>
+            <div className="mt-5 flex gap-2">
+              <button
+                onClick={() => { setShowLicenseLock(false); rearmBarcode(); }}
+                className="flex-1 py-2.5 px-3 bg-[#162030] hover:bg-[#1e293b] border border-[#2b3a4f] text-slate-300 rounded-xl text-sm font-semibold cursor-pointer"
+              >
+                {isAr ? 'لاحقاً' : 'Plus tard'}
+              </button>
+              <button
+                onClick={() => { setShowLicenseLock(false); setActiveView('license'); }}
+                className="flex-1 py-2.5 px-3 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-black rounded-xl text-sm font-bold cursor-pointer"
+              >
+                {isAr ? 'تفعيل البرنامج' : 'Activer la licence'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Scale Simulator Modal */}

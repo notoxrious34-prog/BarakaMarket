@@ -29,6 +29,8 @@ export const Navbar: React.FC = () => {
     theme,
     toggleTheme,
     heldCarts,
+    holdCurrentCart,
+    currentCart,
     restoreHeldCart,
     deleteHeldCart,
     isHardwareScaleActive,
@@ -89,22 +91,22 @@ export const Navbar: React.FC = () => {
         </div>
 
         {/* Navigation Tabs */}
-        <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+        <nav className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto no-scrollbar">
           <button
             onClick={() => setActiveView('pos')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'pos'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
             }`}
           >
-            <ShoppingCart className="w-4 h-4" />
-            <span>{isAr ? 'الكاشير (F1)' : 'Caisse (F1)'}</span>
+            <ShoppingCart className="w-4 h-4 flex-shrink-0" />
+            <span>{isAr ? 'الكاشير' : 'Caisse'}</span>
           </button>
 
           <button
             onClick={() => setActiveView('products')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'products'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
@@ -117,7 +119,7 @@ export const Navbar: React.FC = () => {
           <button
             onClick={() => setActiveView('suppliers')}
             title={isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'suppliers'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
@@ -130,7 +132,7 @@ export const Navbar: React.FC = () => {
           <button
             onClick={() => setActiveView('clients')}
             title={isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'clients'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
@@ -143,7 +145,7 @@ export const Navbar: React.FC = () => {
           <button
             onClick={() => setActiveView('accounting')}
             title={isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'accounting'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
@@ -155,7 +157,7 @@ export const Navbar: React.FC = () => {
 
           <button
             onClick={() => setActiveView('reports')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'reports'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
                 : 'text-slate-300 hover:bg-[#162030] hover:text-white'
@@ -167,7 +169,7 @@ export const Navbar: React.FC = () => {
 
           <button
             onClick={() => setActiveView('license')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'license'
                 ? 'bg-amber-600 text-white shadow-md shadow-amber-900/40'
                 : 'text-amber-400/90 hover:bg-[#162030] hover:text-amber-300'
@@ -179,7 +181,7 @@ export const Navbar: React.FC = () => {
 
           <button
             onClick={() => setActiveView('settings')}
-            className={`p-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+            className={`p-2 rounded-lg text-xs font-medium transition-all cursor-pointer flex-shrink-0 ${
               activeView === 'settings'
                 ? 'bg-slate-700 text-white'
                 : 'text-slate-400 hover:bg-[#162030] hover:text-white'
@@ -208,6 +210,18 @@ export const Navbar: React.FC = () => {
             ) : (
               <Moon className="w-4 h-4 text-indigo-500" />
             )}
+          </button>
+
+          {/* ADR-007-MKT: single park control (F4) — the cart-column
+              Attente/Rappeler pair was the 3rd duplicate. Restore via badge. */}
+          <button
+            onClick={() => holdCurrentCart()}
+            disabled={currentCart.length === 0}
+            className="px-2.5 py-1.5 bg-[#162030] hover:bg-[#1e293b] disabled:opacity-40 disabled:cursor-not-allowed border border-[#2b3a4f] rounded-lg text-xs text-slate-300 flex items-center gap-2 transition-colors cursor-pointer"
+            title={isAr ? 'تعليق السلة (F4)' : 'Mettre en attente (F4)'}
+          >
+            <Clock className="w-3.5 h-3.5 text-amber-400" />
+            <span className="hidden xl:inline">{isAr ? 'تعليق' : 'Attente'}</span>
           </button>
 
           {/* Held Carts Badge */}
