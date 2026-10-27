@@ -1,0 +1,33 @@
+# CHARTER v2.0-MKT — Baraka Market (active reference)
+
+> Canonical reference copy. Amendments require a new ADR and executor
+> re-ratification. Definitions here are normative for all `TASK-*-MKT` work.
+
+## Mission
+
+Ship and sustain a single-click, offline-first supermarket POS for Algerian
+retail: fiscal-monist cash register, Tamper-evident daily closures, air-gapped
+licensing, zero-mouse cashier ergonomics, native thermal printing.
+
+## Laws
+
+1. **Fiscal monism** — integer centimes / milli-units only (§2 of the Constitution).
+2. **Legal audit trail** — SQLite-owned monotonic sequences; hash-chained Z-reports.
+3. **Art. 136 reconciliation** — timbre on all qualifying ESPECES inflows.
+4. **Zero-cloud enforcement** — no cloud SDKs, no telemetry, no network-gated checkout.
+5. **Zero-mouse integrity** — full transaction cycle keyboard-executable.
+6. **Hardware autonomy** — no binary assets; synthesized feedback; deterministic ESC/POS.
+7. **Single-click offline deployment** — NSIS installer, first-run provisioning,
+   no shopkeeper-facing configuration.
+
+## Ratified baseline (TASK-AUD-001-MKT)
+
+Tauri v2 shell · React 19 · TypeScript strict · Vite 8 · Tailwind v4 ·
+rusqlite 0.32 (bundled) + node:sqlite · WAL/FK-ON · 58/58 tests ·
+`fd23dd7` / tag `v1.0.0`.
+
+## Known capability gaps (tracked, not waived)
+
+Multi-barcode products · packaging/colisage · scale prefixes 21/28/29 ·
+pole display · serial scale link · engine-level (trigger) ledger enforcement ·
+versioned migrations · loopback auth token.
