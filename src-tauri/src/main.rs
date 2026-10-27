@@ -1,7 +1,8 @@
-//! Baraka Market v1.0 — Tauri shell.
-//! v1 installer scope: native window + first-run SQLite provisioning
-//! (db/schema.sql embedded at compile time). The POS UI runs the verified
-//! localStorage lane; full SQLite wiring lands in TASK #003 via `invoke`.
+//! Baraka Market v1.0 — Tauri v2 shell (verified baseline, ADR-001-MKT).
+//! Native window + first-run SQLite provisioning
+//! (db/schema.sql embedded at compile time). Fiscal authority is exposed
+//! via the `db_status` invoke command; full sales/settlement/Z lanes are
+//! served by the audited loopback API and the SQLite WAL layer.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{fs, path::PathBuf};

@@ -2,6 +2,223 @@ export type TVARate = 0 | 9 | 19;
 
 export type PaymentMethod = 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
 
+/** ADR-006-MKT: auditable shrinkage reasons (La Casse / Démarque). */
+export type LossReason = 'EXPIRED' | 'BROKEN' | 'DAMAGED' | 'THEFT' | 'INTERNAL_USE' | 'AUTRE';
+
+export interface InventoryLoss {
+  id: number;
+  product_id: number;
+  qty_milli: number;
+  reason: LossReason;
+  unit_cost_ct: number;
+  total_loss_ct: number;
+  notes: string | null;
+  created_at: string;
+}
+
+/** ADR-009-MKT: bulk catalog import row (camelCase) + batch result. */
+export interface ImportProductRow {
+  barcode: string;
+  name: string;
+  buyPriceCt: number;
+  priceCt: number;
+  tvaRate: 0 | 9 | 19;
+  stockMilli: number;
+  category: string;
+  unit: 'PIECE' | 'KG' | 'LITRE';
+}
+
+export interface BatchImportResult {
+  inserted: number;
+  updated: number;
+  failed: number;
+}
+
+/** ADR-011-MKT: supplier BL receiving (mapped to purchases/purchase_items). */
+export interface SupplierDeliveryItem {
+  productId: number;
+  packMultiplier?: number;
+  packCount: number;
+  unitCostCt: number;
+  totalCostCt?: number;
+  updateSellPriceCt?: number;
+  tvaRate?: 0 | 9 | 19;
+}
+
+export interface SupplierDeliveryReceipt {
+  supplierId: number;
+  invoiceRef?: string;
+  items: SupplierDeliveryItem[];
+  paidAmountCt: number;
+  paymentMethod?: 'ESPECES' | 'VIREMENT' | 'CHEQUE';
+  notes?: string;
+  date?: string;
+}
+
+export interface DeliveryReceiptResult {
+  purchaseId: string;
+  totalCostCt: number;
+  paidAmountCt: number;
+  remainingDebtCt: number;
+  itemsProcessed: number;
+}
+
+export interface SupplierStatement {
+  supplierId: number;
+  supplierName: string;
+  totalPurchasedCt: number;
+  totalPaidCt: number;
+  outstandingCt: number;
+}
+
+/** ADR-012-MKT: customer credit ledger (Carnet de Dette) settlement. */
+export interface ClientSettlementPayload {
+  clientId: number;
+  amountCt: number;
+  paymentMethod?: PaymentMethod;
+  notes?: string;
+  cashierName?: string;
+  date?: string;
+}
+
+export interface ClientSettlementResult {
+  settlementId: string;
+  receiptNumber: string;
+  clientId: number;
+  clientName: string;
+  clientPhone?: string;
+  previousBalanceCt: number;
+  paidAmountCt: number;
+  timbreCt: number;
+  totalCollectedCt: number;
+  newBalanceCt: number;
+  paymentMethod: PaymentMethod;
+  cashierName?: string;
+  createdAt: string;
+}
+
+export interface CreditEligibility {
+  allowed: boolean;
+  currentBalanceCt: number;
+  maxCreditCt: number;
+  projectedBalanceCt: number;
+  reason?: string;
+}
+
+/** ADR-014-MKT: manager override PIN gate + void audit trail. */
+export type ProtectedActionType = 'LINE_VOID' | 'CART_CLEAR' | 'MANUAL_DISCOUNT' | 'DRAWER_KICK';
+
+export interface VoidLogEntry {
+  actionType: ProtectedActionType;
+  productId?: number;
+  productName?: string;
+  amountCt: number;
+  cashierName: string;
+  managerApprovedBy?: string;
+  reason: string;
+  sessionId?: string;
+}
+
+export interface VoidLogRecord extends VoidLogEntry {
+  id: string;
+  createdAt: string;
+}
+
+export interface VoidSummary {
+  totalVoidCount: number;
+  totalVoidAmountCt: number;
+}
+
+/** ADR-015-MKT: online backup + disaster recovery. */
+export interface BackupMetadata {
+  id: string;
+  filename: string;
+  filePath: string;
+  fileSizeBytes: number;
+  sha256Checksum: string;
+  salesCount: number;
+  productsCount: number;
+  status: 'VERIFIED' | 'CORRUPT' | 'RESTORED';
+  createdAt: string;
+}
+
+export interface BackupValidationReport {
+  isValid: boolean;
+  sha256: string;
+  fileSizeBytes: number;
+  salesCount: number;
+  tableCount: number;
+  integrityCheckResult: string;
+  errors: string[];
+}
+
+export interface RestoreResult {
+  success: boolean;
+  quarantineBackupPath: string;
+  restoredBackupPath: string;
+  restoredAt: string;
+}
+
+/** ADR-013-MKT: cash session lifecycle + Z closure. */
+export type CashMovementType = 'DEPOSIT' | 'WITHDRAWAL' | 'EXPENSE';
+
+export interface CashSessionRecord {
+  id: string;
+  cashierName: string;
+  openedAt: string;
+  closedAt?: string;
+  openingFloatCt: number;
+  closingCountedCt?: number;
+  theoreticalCashCt?: number;
+  cashDiffCt?: number;
+  status: 'OPEN' | 'CLOSED';
+  zReportId?: string;
+  notes?: string;
+}
+
+export interface CashSessionLiveStatus {
+  session: CashSessionRecord;
+  openingFloatCt: number;
+  cashSalesCt: number;
+  settlementsCashCt: number;
+  depositsCt: number;
+  withdrawalsCt: number;
+  expensesCt: number;
+  theoreticalCashCt: number;
+  totalSalesCount: number;
+}
+
+export interface ZClosureResult {
+  zNumber: string;
+  sessionId: string;
+  cashierName: string;
+  periodStart: string;
+  periodEnd: string;
+  totalHtCt: number;
+  totalTva9Ct: number;
+  totalTva19Ct: number;
+  totalTimbreCt: number;
+  totalTtcCt: number;
+  salesCount: number;
+  cashSalesCt: number;
+  cibSalesCt: number;
+  dahabiyaSalesCt: number;
+  creditSalesCt: number;
+  settlementsCashCt: number;
+  depositsCt: number;
+  withdrawalsCt: number;
+  expensesCt: number;
+  openingFloatCt: number;
+  theoreticalCashCt: number;
+  closingCountedCt: number;
+  cashDiffCt: number;
+  hash: string;
+  prevHash: string;
+}
+
+/** ADR-010-MKT: shelf-edge label types (canonical in core/shelf-labels). */
+export type { ShelfLabelItem, A4LabelOptions } from '../core/shelf-labels.js';
+
 export interface StoreProfile {
   id: number;
   store_name: string;
@@ -57,6 +274,19 @@ export interface SaleItem {
   total_line_ht: number;
   total_line_tva: number;
   total_line_ttc: number;
+  /** ADR-004-MKT colisage: base units per scanned row (>1 for packs). */
+  packMultiplier?: number;
+  /** ADR-004-MKT colisage: display label, e.g. 'Pack x6'. */
+  packName?: string;
+}
+
+/** ADR-004-MKT: browser-lane mirror of product_barcodes (localStorage). */
+export interface ProductBarcodeAlias {
+  product_id: number;
+  barcode: string;
+  multiplier: number;
+  pack_name?: string;
+  price_override_ct?: number;
 }
 
 export interface TVABreakdown {

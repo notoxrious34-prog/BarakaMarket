@@ -160,6 +160,156 @@ export function buildQuittance(q: EscPosQuittance): Uint8Array {
   return new Uint8Array(out);
 }
 
+export interface ThermalSettlementQuittance {
+  receiptNumber: string;
+  date: string;
+  clientName: string;
+  clientPhone?: string;
+  cashierName?: string;
+  previousBalanceCt: number;
+  paidAmountCt: number;
+  timbreCt: number;
+  totalCollectedCt: number;
+  newBalanceCt: number;
+  paymentMethod: string;
+}
+
+/**
+ * Compile a Carnet de Dette settlement quittance (ADR-012-MKT):
+ * bilingual title, ledger block with double-height Versement,
+ * drawer kick on cash, partial cut. Deterministic bytes.
+ */
+export function buildThermalSettlementQuittance(
+  r: ThermalSettlementQuittance,
+  store: string | { store_name: string; phone?: string; address?: string } = 'BARAKA MARKET',
+): Uint8Array {
+  const name = typeof store === 'string' ? store : store.store_name;
+  const contact = typeof store === 'string' ? '' : [store.phone, store.address].filter(Boolean).join(' — ');
+  const out: number[] = [];
+  out.push(...ESC_INIT, ...ESC_ALIGN_CENTER, ...ESC_BOLD_ON);
+  out.push(...line(name));
+  out.push(...ESC_BOLD_OFF);
+  if (contact) out.push(...line(contact.slice(0, 42)));
+  out.push(...line(sep32));
+  out.push(...ESC_BOLD_ON);
+  out.push(...line('*** QUITTANCE DE REGLEMENT ***'));
+  out.push(...line('/ وصل تسديد دين /'));
+  out.push(...ESC_BOLD_OFF);
+  out.push(...line(`${r.date}  ${r.receiptNumber}`));
+  if (r.cashierName) out.push(...line(`Caissier: ${r.cashierName}`.slice(0, 42)));
+  out.push(...line(sep32));
+  out.push(...ESC_ALIGN_LEFT);
+  out.push(...line(`Client: ${r.clientName}`.slice(0, 42)));
+  if (r.clientPhone) out.push(...line(`Tel: ${r.clientPhone}`.slice(0, 42)));
+  out.push(...line(`Ancien Solde : ${money(r.previousBalanceCt / 100)}`));
+  out.push(0x1b, 0x21, 0x10);
+  out.push(...line(`Versement    : ${money(r.paidAmountCt / 100)}`));
+  out.push(0x1b, 0x21, 0x00);
+  if (r.timbreCt > 0) out.push(...line(`Timbre Art.136: +${money(r.timbreCt / 100)}`));
+  out.push(...ESC_BOLD_ON);
+  out.push(...line(`Nouveau Solde: ${money(r.newBalanceCt / 100)}`));
+  out.push(...ESC_BOLD_OFF);
+  out.push(...line(`${r.paymentMethod} — Collecte: ${money(r.totalCollectedCt / 100)}`));
+  out.push(...line(sep32));
+  out.push(...ESC_ALIGN_CENTER);
+  out.push(...line('Merci pour votre confiance'));
+  out.push(...line('/ شكرا لثقتكم /'));
+  out.push(...feed(3));
+  out.push(...ESCPOS_DRAWER_KICK);
+  out.push(...ESCPOS_PAPER_CUT);
+  return new Uint8Array(out);
+}
+
+export interface ThermalZReport {
+  zNumber: string;
+  periodStart: string;
+  periodEnd: string;
+  cashierName: string;
+  totalHtCt: number;
+  totalTva9Ct: number;
+  totalTva19Ct: number;
+  totalTimbreCt: number;
+  totalTtcCt: number;
+  salesCount: number;
+  cashSalesCt: number;
+  cibSalesCt: number;
+  dahabiyaSalesCt: number;
+  creditSalesCt: number;
+  settlementsCashCt: number;
+  depositsCt: number;
+  withdrawalsCt: number;
+  expensesCt: number;
+  openingFloatCt: number;
+  theoreticalCashCt: number;
+  closingCountedCt: number;
+  cashDiffCt: number;
+  hash: string;
+}
+
+/**
+ * Compile the fiscal Z closure ticket (ADR-013-MKT): turnover, tender
+ * split, drawer reconciliation with surplus/deficit verdict, hash tail.
+ */
+export function buildThermalZReport(
+  z: ThermalZReport,
+  store: string | { store_name: string; nif_number?: string; ai_number?: string; address?: string } = 'BARAKA MARKET',
+): Uint8Array {
+  const name = typeof store === 'string' ? store : store.store_name;
+  const ids = typeof store === 'string' ? '' :
+    [`NIF ${store.nif_number ?? '-'}`, `AI ${store.ai_number ?? '-'}`, store.address ?? ''].filter(Boolean).join(' ').slice(0, 42);
+  const dz = (ct: number): string => money(ct / 100);
+  const out: number[] = [];
+  out.push(...ESC_INIT, ...ESC_ALIGN_CENTER, ...ESC_BOLD_ON);
+  out.push(...line(name));
+  out.push(...ESC_BOLD_OFF);
+  if (ids) out.push(...line(ids));
+  out.push(...line(sep32));
+  out.push(...ESC_BOLD_ON);
+  out.push(0x1b, 0x21, 0x10);
+  out.push(...line('*** RAPPORT Z DE CLOTURE ***'));
+  out.push(0x1b, 0x21, 0x00);
+  out.push(...line('/ تقرير الإغلاق المالي /'));
+  out.push(...ESC_BOLD_OFF);
+  out.push(...line(`${z.zNumber}  ${z.periodEnd.slice(0, 10)}`));
+  out.push(...line(`Periode: ${z.periodStart.slice(0, 16)}`));
+  out.push(...line(`      -> ${z.periodEnd.slice(0, 16)}`));
+  out.push(...line(`Caissier: ${z.cashierName}`.slice(0, 32)));
+  out.push(...line(sep32));
+  out.push(...ESC_ALIGN_LEFT);
+  out.push(...line(`--- CHIFFRE D'AFFAIRES (${z.salesCount}) ---`));
+  out.push(...line(`Total HT   : ${dz(z.totalHtCt)}`));
+  out.push(...line(`TVA 9%     : +${dz(z.totalTva9Ct)}`));
+  out.push(...line(`TVA 19%    : +${dz(z.totalTva19Ct)}`));
+  if (z.totalTimbreCt > 0) out.push(...line(`Timbre     : +${dz(z.totalTimbreCt)}`));
+  out.push(...ESC_BOLD_ON);
+  out.push(...line(`Total TTC  : ${dz(z.totalTtcCt)}`));
+  out.push(...ESC_BOLD_OFF);
+  out.push(...line('--- REGLEMENTS ---'));
+  out.push(...line(`Especes    : ${dz(z.cashSalesCt)}`));
+  out.push(...line(`CIB        : ${dz(z.cibSalesCt)}`));
+  out.push(...line(`Dahabiya   : ${dz(z.dahabiyaSalesCt)}`));
+  out.push(...line(`Credit     : ${dz(z.creditSalesCt)}`));
+  out.push(...line('--- CAISSE ---'));
+  out.push(...line(`Fond Initial : ${dz(z.openingFloatCt)}`));
+  out.push(...line(`Encaiss. ventes: ${dz(z.cashSalesCt)}`));
+  out.push(...line(`Encaiss. dettes: ${dz(z.settlementsCashCt)}`));
+  out.push(...line(`Depots     : +${dz(z.depositsCt)}`));
+  out.push(...line(`Retraits   : -${dz(z.withdrawalsCt)}`));
+  out.push(...line(`Depenses   : -${dz(z.expensesCt)}`));
+  out.push(...ESC_BOLD_ON);
+  out.push(...line(`Theorique  : ${dz(z.theoreticalCashCt)}`));
+  out.push(...line(`Reel Compte: ${dz(z.closingCountedCt)}`));
+  out.push(...line(`Ecart      : ${dz(z.cashDiffCt)} ${z.cashDiffCt < 0 ? 'DEFICIT' : z.cashDiffCt > 0 ? 'EXCEDENT' : 'PARFAIT'}`));
+  out.push(...ESC_BOLD_OFF);
+  out.push(...line(sep32));
+  out.push(...ESC_ALIGN_CENTER);
+  out.push(...line(`Hash: ${z.hash.slice(0, 16)}...`));
+  out.push(...line('*** FIN DE RAPPORT ***'));
+  out.push(...feed(3));
+  out.push(...ESCPOS_PAPER_CUT);
+  return new Uint8Array(out);
+}
+
 /** Lane A export: download a raw .bin buffer (USB/COM spooler handoff). */
 export function downloadRaw(buffer: Uint8Array, filename: string): void {
   if (typeof window === 'undefined' || typeof document === 'undefined') return;

@@ -1,0 +1,132 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { openBarakaDb } from './sqlite.js';
+
+const TMP = path.resolve('data/.tmp-tests/backups');
+const tmpDb = (name: string): string => {
+  fs.mkdirSync(TMP, { recursive: true });
+  const p = path.join(TMP, name);
+  try { fs.unlinkSync(p); } catch { /* fresh */ }
+  try { fs.unlinkSync(`${p}-wal`); } catch { /* fresh */ }
+  try { fs.unlinkSync(`${p}-shm`); } catch { /* fresh */ }
+  return p;
+};
+
+const PROD = (id: number, barcode: string) => ({
+  id, barcode, name_fr: `PROD ${id}`, name_ar: '', category_id: 'test',
+  buy_price_ct: 1000, sell_price_ct: 1500, tva_rate: 0 as const, stock_milli: 1000,
+  min_stock_milli: 0, unit: 'PIECE' as const, is_scale: 0, scale_item_code: null,
+  has_expiry: 0, expiry_date: null,
+});
+
+test('backup: hot snapshot file with SHA-256 and VERIFIED log row', () => {
+  const dbPath = tmpDb('hot.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(40, '6130000000405'));
+  const meta = b.createDatabaseBackup({ destinationDir: TMP, label: 'test' });
+  assert.match(meta.filename, /^baraka-backup-\d{8}-\d{6}-test\.sqlite$/);
+  assert.ok(fs.existsSync(meta.filePath));
+  assert.match(meta.sha256Checksum, /^[0-9a-f]{64}$/);
+  assert.ok(meta.fileSizeBytes > 0);
+  assert.equal(meta.productsCount, 1);
+  assert.equal(meta.status, 'VERIFIED');
+  b.close();
+  fs.rmSync(meta.filePath);
+});
+
+test('backup: snapshot passes integrity and mirrors live counts', () => {
+  const dbPath = tmpDb('mirror.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(41, '6130000000412'));
+  const meta = b.createDatabaseBackup({ destinationDir: TMP });
+  const rep = b.validateBackupForRestore(meta.filePath);
+  assert.equal(rep.isValid, true);
+  assert.deepEqual(rep.errors, []);
+  assert.equal(rep.integrityCheckResult, 'ok');
+  assert.equal(rep.sha256, meta.sha256Checksum);
+  assert.ok(rep.tableCount > 10);
+  // DB keeps serving reads and writes around the hot backup.
+  b.upsertProduct(PROD(42, '6130000000429'));
+  assert.equal(b.getProduct(42).name_fr, 'PROD 42');
+  b.close();
+  fs.rmSync(meta.filePath);
+});
+
+test('backup: garbage and truncated files fail pre-flight', () => {
+  const b = openBarakaDb(':memory:');
+  const garbage = path.join(TMP, 'garbage.sqlite');
+  fs.mkdirSync(TMP, { recursive: true });
+  fs.writeFileSync(garbage, 'this is definitely not a sqlite database file');
+  const bad = b.validateBackupForRestore(garbage);
+  assert.equal(bad.isValid, false);
+  assert.ok(bad.errors.some(e => e.includes('magic')));
+  const missing = b.validateBackupForRestore(path.join(TMP, 'nope.sqlite'));
+  assert.equal(missing.isValid, false);
+  assert.ok(missing.errors.some(e => e.includes('does not exist')));
+  b.close();
+  fs.rmSync(garbage);
+});
+
+test('backup: truncated snapshot fails integrity open', () => {
+  const dbPath = tmpDb('trunc.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(43, '6130000000436'));
+  const meta = b.createDatabaseBackup({ destinationDir: TMP });
+  const trunc = path.join(TMP, 'trunc.sqlite');
+  fs.writeFileSync(trunc, fs.readFileSync(meta.filePath).subarray(0, 200));
+  const rep = b.validateBackupForRestore(trunc);
+  assert.equal(rep.isValid, false);
+  b.close();
+  fs.rmSync(meta.filePath);
+  fs.rmSync(trunc);
+});
+
+test('backup: restore drill quarantines first, then rewinds state', () => {
+  const dbPath = tmpDb('restore.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(44, '6130000000443'));
+  const meta = b.createDatabaseBackup({ destinationDir: TMP });
+  b.upsertProduct(PROD(45, '6130000000450'));
+  const out = b.restoreBackupSafely(meta.filePath);
+  assert.equal(out.success, true);
+  assert.ok(fs.existsSync(out.quarantineBackupPath));
+  assert.ok(out.quarantineBackupPath.includes('pre-restore-quarantine-'));
+  assert.equal(out.restoredBackupPath, path.resolve(dbPath));
+  const fresh = openBarakaDb(dbPath);
+  assert.equal(fresh.getProduct(44).name_fr, 'PROD 44');
+  assert.throws(() => fresh.getProduct(45), /not found/);
+  const listed = fresh.listDatabaseBackups();
+  assert.equal(listed[0].status, 'RESTORED');
+  fresh.close();
+  fs.rmSync(out.quarantineBackupPath);
+  fs.rmSync(meta.filePath);
+});
+
+test('backup: invalid restore target aborts, live DB untouched', () => {
+  const dbPath = tmpDb('norestore.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(46, '6130000000467'));
+  assert.throws(() => b.restoreBackupSafely(path.join(TMP, 'ghost.sqlite')), /BACKUP_INTEGRITY_FAILED/);
+  assert.equal(b.getProduct(46).name_fr, 'PROD 46');
+  assert.throws(() => openBarakaDb(':memory:').restoreBackupSafely(dbPath), /:memory:/);
+  b.close();
+});
+
+test('backup: catalog lists newest-first, tampered files flagged CORRUPT', () => {
+  const dbPath = tmpDb('catalog.db');
+  const b = openBarakaDb(dbPath);
+  const first = b.createDatabaseBackup({ destinationDir: TMP, label: 'a' });
+  const second = b.createDatabaseBackup({ destinationDir: TMP, label: 'b' });
+  const listed = b.listDatabaseBackups();
+  assert.equal(listed.length, 2);
+  assert.equal(listed[0].filename, second.filename);
+  fs.appendFileSync(second.filePath, 'tamper');
+  const relisted = b.listDatabaseBackups();
+  assert.equal(relisted.length, 1);
+  assert.equal(relisted[0].filename, first.filename);
+  b.close();
+  fs.rmSync(first.filePath);
+  fs.rmSync(second.filePath);
+});

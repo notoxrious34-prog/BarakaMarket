@@ -1,4 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useMemo } from 'react';
+import { computeHwid, collectBrowserFingerprint } from '../core/licensing';
+import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed } from '../core/license-store';
 import {
   AccountingSummary,
   Client,
@@ -7,6 +9,7 @@ import {
   HeldCart,
   PaymentMethod,
   Product,
+  ProductBarcodeAlias,
   PurchaseInvoice,
   PurchaseItem,
   Sale,
@@ -24,7 +27,7 @@ import {
   initialStoreProfile,
   initialSuppliers,
 } from '../data/seedData';
-import { calculateLineTotals, calculateSaleTotals } from '../core/cart-bridge';
+import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, postSaleToLoopback, type AuthorityStatus } from '../core/fiscal-authority';
 import { centimesToDzd, dzdToCentimes } from '../core/money';
@@ -65,7 +68,7 @@ interface AppContextType {
   toggleLanguage: () => void;
   toggleTheme: () => void;
   setSelectedClient: (client: Client) => void;
-  addToCart: (product: Product, quantity?: number, discountPercent?: number) => void;
+  addToCart: (product: Product, quantity?: number, discountPercent?: number, pack?: { unitPriceTtc?: number; packMultiplier?: number; packName?: string; barcode?: string }) => void;
   updateCartItemQty: (index: number, quantity: number) => void;
   updateCartItemDiscount: (index: number, discountPercent: number) => void;
   removeFromCart: (index: number) => void;
@@ -74,6 +77,10 @@ interface AppContextType {
   restoreHeldCart: (heldId: string) => void;
   deleteHeldCart: (heldId: string) => void;
   scanBarcode: (barcode: string) => { success: boolean; message: string };
+  /** ADR-004-MKT colisage: browser-lane alias/pack labels (persisted). */
+  productBarcodes: ProductBarcodeAlias[];
+  addProductBarcode: (alias: ProductBarcodeAlias) => void;
+  deleteProductBarcode: (barcode: string) => void;
   completeSale: (
     paymentMethod: PaymentMethod,
     amountPaid: number,
@@ -128,6 +135,8 @@ interface AppContextType {
   /** Gate-03 TASK 3: license snapshot for the Navbar trial badge. */
   licenseActivated: boolean;
   trialRemaining: { sales: number; days: number };
+  /** ADR-002-MKT: hard trial expiry — POS checkout blocked while true. */
+  isTrialExpired: boolean;
   openPrintModal: (sale: Sale, type: 'ticket' | 'facture') => void;
   closePrintModal: () => void;
   closeSettlementQuittance: () => void;
@@ -154,6 +163,7 @@ const STORAGE_KEYS = {
   SEQ_FACT_PREFIX: 'baraka_seq_FACT_',
   SEQ_TICKET_PREFIX: 'baraka_seq_T_',
   SEQ_QUITTANCE_PREFIX: 'baraka_seq_Q_',
+  BARCODES: 'baraka_product_barcodes_v1',
 };
 
 /**
@@ -188,6 +198,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return initialProducts;
     }
   });
+
+  // ADR-004-MKT: browser-lane alias/pack registry (SQLite product_barcodes mirror).
+  const [productBarcodes, setProductBarcodes] = useState<ProductBarcodeAlias[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.BARCODES);
+      if (saved) return JSON.parse(saved) as ProductBarcodeAlias[];
+    } catch { /* fall through to seed */ }
+    // Demo colisage: EAU LALLA 1.5L (id 5, 45 DZD) — Pack x6 label at 250 DZD.
+    return [{ product_id: 5, barcode: '6130000001059', multiplier: 6, pack_name: 'Pack x6', price_override_ct: 25000 }];
+  });
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEYS.BARCODES, JSON.stringify(productBarcodes)); } catch { /* private mode */ }
+  }, [productBarcodes]);
+
+  const addProductBarcode = (alias: ProductBarcodeAlias) => {
+    const code = alias.barcode.trim();
+    if (!code || !Number.isInteger(alias.multiplier) || alias.multiplier < 1) return;
+    setProductBarcodes(prev => {
+      const rest = prev.filter(a => a.barcode !== code);
+      return [...rest, { ...alias, barcode: code }];
+    });
+  };
+  const deleteProductBarcode = (barcode: string) => {
+    setProductBarcodes(prev => prev.filter(a => a.barcode !== barcode));
+  };
 
   const [clients, setClients] = useState<Client[]>(() => {
     try {
@@ -392,14 +427,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   }, [sales, purchases, products, clients, suppliers, settlements, supplierPayments]);
 
-  const addToCart = (product: Product, quantity = 1, discountPercent = 0) => {
+  const addToCart = (product: Product, quantity = 1, discountPercent = 0, pack?: { unitPriceTtc?: number; packMultiplier?: number; packName?: string; barcode?: string }) => {
+    // ADR-004-MKT: pack rows carry their own unit price + multiplier; the
+    // scanned pack barcode is stored so sale_items records the exact label.
+    const unitPrice = pack?.unitPriceTtc ?? product.sell_price;
+    const rowBarcode = pack?.barcode ?? product.barcode;
+    const rowNameFr = pack?.packName ? `${product.name_fr} [${pack.packName}]` : product.name_fr;
     setCurrentCart(prev => {
-      const existingIndex = prev.findIndex(item => item.product_id === product.id);
+      const existingIndex = prev.findIndex(item => item.product_id === product.id && item.unit_price_ttc === unitPrice && (item.packName ?? '') === (pack?.packName ?? ''));
       if (existingIndex >= 0) {
         const existing = prev[existingIndex];
         const newQty = existing.quantity + quantity;
         const lineTotals = calculateLineTotals(
-          product.sell_price,
+          unitPrice,
           newQty,
           product.tva_rate,
           discountPercent || existing.discount_percent
@@ -414,21 +454,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return updated;
       } else {
         const lineTotals = calculateLineTotals(
-          product.sell_price,
+          unitPrice,
           quantity,
           product.tva_rate,
           discountPercent
         );
         const newItem: SaleItem = {
           product_id: product.id,
-          barcode: product.barcode,
-          name_fr: product.name_fr,
+          barcode: rowBarcode,
+          name_fr: rowNameFr,
           name_ar: product.name_ar,
-          unit_price_ttc: product.sell_price,
+          unit_price_ttc: unitPrice,
           quantity,
           unit: product.unit,
           tva_rate: product.tva_rate,
           discount_percent: discountPercent,
+          packMultiplier: pack?.packMultiplier,
+          packName: pack?.packName,
           ...lineTotals,
         };
         return [...prev, newItem];
@@ -521,17 +563,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const code = rawInput.trim();
     if (!code) return { success: false, message: 'Code vide' };
 
+    // ADR-003-MKT: universal scale labels PP IIIII VVVVV C (20/21/22/28/29,
+    // checksum-gated). Weight -> kg qty; price -> qty back-calculated so the
+    // line total reproduces the label: qtyMilli = round(priceCt*10/sell_price).
     const scaleResult = parseScaleBarcode(code);
     if (scaleResult.isScale && scaleResult.itemCode) {
       const product = products.find(
-        p => p.scale_item_code === scaleResult.itemCode || p.barcode.includes(scaleResult.itemCode!)
+        p => p.scale_item_code === scaleResult.itemCode
+          || p.scale_item_code === String(scaleResult.rawNumericCode)
+          || p.barcode === code
       );
       if (product) {
-        const qty = scaleResult.weightKg || 1;
-        addToCart(product, qty);
+        if (scaleResult.mode === 'PRICE' && scaleResult.priceCt !== undefined) {
+          const unitCt = Math.round(product.sell_price * 100);
+          const qtyMilli = unitCt > 0 ? Math.round((scaleResult.priceCt * 1000) / unitCt) : 1000;
+          addToCart(product, qtyMilli / 1000);
+          return {
+            success: true,
+            message: `${product.name_fr} - ${(scaleResult.priceCt / 100).toFixed(2)} DZD (prix étiquette)`,
+          };
+        }
+        const grams = scaleResult.weightGrams ?? 1000;
+        addToCart(product, grams / 1000);
         return {
           success: true,
-          message: `${product.name_fr} - ${qty} kg ajouté via balance`,
+          message: `${product.name_fr} - ${grams} g pesé (balance)`,
         };
       }
     }
@@ -551,6 +607,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           success: true,
           message: `${directProduct.name_fr} ajouté`,
         };
+      }
+    }
+
+    // ADR-004-MKT priority 3: alternate barcode / multipack label registry.
+    // Alias (x1) resolves transparently; pack (xN) resolves with multiplier +
+    // effective price (override wins, else unit x N). Chime as usual.
+    const alias = productBarcodes.find(a => a.barcode === code);
+    if (alias) {
+      const product = products.find(p => p.id === alias.product_id);
+      if (product) {
+        const multiplier = alias.multiplier;
+        const effectiveCt = effectivePackPriceCt(
+          Math.round(product.sell_price * 100), multiplier, alias.price_override_ct ?? null,
+        );
+        if (multiplier > 1) {
+          addToCart(product, 1, 0, {
+            unitPriceTtc: effectiveCt / 100,
+            packMultiplier: multiplier,
+            packName: alias.pack_name ?? `Pack x${multiplier}`,
+            barcode: code,
+          });
+          return {
+            success: true,
+            message: `${product.name_fr} [${alias.pack_name ?? `Pack x${multiplier}`}] - ${(effectiveCt / 100).toFixed(2)} DZD ajouté`,
+          };
+        }
+        addToCart(product, 1, 0, { barcode: code });
+        return { success: true, message: `${product.name_fr} ajouté` };
       }
     }
 
@@ -613,12 +697,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       is_provisional: true,
     };
 
-    // Deduct stock quantities
+    // Deduct stock quantities (ADR-004-MKT: packs drain multiplier x base units)
     setProducts(prev =>
       prev.map(p => {
         const itemSold = currentCart.find(i => i.product_id === p.id);
         if (itemSold) {
-          const newQty = Math.max(0, Math.round((p.stock_qty - itemSold.quantity) * 100) / 100);
+          const baseUnits = itemSold.quantity * (itemSold.packMultiplier ?? 1);
+          const newQty = Math.max(0, Math.round((p.stock_qty - baseUnits) * 100) / 100);
           return { ...p, stock_qty: newQty };
         }
         return p;
@@ -684,7 +769,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         name_fr: it.name_fr,
         name_ar: it.name_ar,
         unit_price_ct: dzdToCentimes(it.unit_price_ttc),
-        qty_milli: Math.round(it.quantity * 1000),
+        // ADR-004-MKT: packs drain multiplier x base units (12 000 milli = 12 units).
+        qty_milli: Math.round(it.quantity * (it.packMultiplier ?? 1) * 1000),
         unit: it.unit,
         tva_rate: it.tva_rate,
         discount_bp: Math.round((it.discount_percent || 0) * 100),
@@ -1034,6 +1120,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Gate-03 TASK 3: trial badge data (recomputed from stored license + sales).
+  // ADR-002-MKT: licenseRev re-fires the snapshot after SQLite-mirror restore.
+  const [licenseRev, setLicenseRev] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (localStorage.getItem('baraka_license_v1')) return;
+        const hwid = computeHwid(collectBrowserFingerprint(getOrCreateMachineSeed()));
+        const rec = await restoreLicenseFromSqlite(hwid);
+        if (!cancelled && rec) {
+          saveStoredLicense(rec);
+          setLicenseRev(r => r + 1);
+        }
+      } catch { /* offline lane */ }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const licenseSnapshot = useMemo(() => {
     try {
       const raw = localStorage.getItem('baraka_license_v1');
@@ -1048,7 +1152,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (Number.isFinite(inst)) days = Math.max(0, 14 - Math.floor((Date.now() - inst) / 86400000));
     } catch { /* keep default */ }
     return { activated: false, sales: Math.max(0, 50 - completed), days };
-  }, [sales]);
+  }, [sales, licenseRev]);
+
+  /** ADR-002-MKT: trial checkout lockout — BOTH budgets exhausted, no license. */
+  const isTrialExpired = !licenseSnapshot.activated
+    && licenseSnapshot.sales <= 0
+    && licenseSnapshot.days <= 0;
 
   const openPrintModal = (sale: Sale, type: 'ticket' | 'facture') => {
     setCurrentPrintSale(sale);
@@ -1174,6 +1283,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         restoreHeldCart,
         deleteHeldCart,
         scanBarcode,
+        productBarcodes,
+        addProductBarcode,
+        deleteProductBarcode,
         completeSale,
         completeSaleFiscal,
         settleClientDebt,
@@ -1192,6 +1304,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         completeStoreSetup,
         licenseActivated: licenseSnapshot.activated,
         trialRemaining: { sales: licenseSnapshot.sales, days: licenseSnapshot.days },
+        isTrialExpired,
         openPrintModal,
         closePrintModal,
         closeSettlementQuittance,

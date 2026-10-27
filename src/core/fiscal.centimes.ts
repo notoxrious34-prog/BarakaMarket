@@ -158,29 +158,106 @@ export function calculateSaleTotalsCt(
   };
 }
 
+export type ScalePrefix = '20' | '21' | '22' | '28' | '29';
+export type ScaleMode = 'WEIGHT' | 'PRICE';
+
 export interface ScaleBarcodeResultCt {
   isScale: boolean;
+  prefix?: ScalePrefix;
+  /** 5-digit zero-padded scale item code, e.g. '00142'. */
   itemCode?: string;
-  weightKg?: number;
-  priceOverride?: number;
+  rawNumericCode?: number;
+  mode?: ScaleMode;
+  /** Integer grams — equals qty_milli (schema: 1.45 kg -> 1450). */
+  weightGrams?: number;
+  /** Integer centimes (price labels store whole DINARS: priceCt = VVVVV * 100). */
+  priceCt?: number;
 }
 
 /**
- * Smart barcode-scale parser (ميزان الباركود الذكي). Pure function, no money.
- * 20XXXXXWWWWWC -> weight in grams; 22XXXXXPPPPPC -> price.
+ * EAN-13 modulo-10 check digit (GS1). Exactly 13 numeric digits; weights 1/3
+ * alternating from the left; valid only when the 13th digit matches.
  */
-export function parseScaleBarcodeCt(rawCode: string): ScaleBarcodeResultCt {
+export function isValidEan13(barcode: string): boolean {
+  if (!/^\d{13}$/.test(barcode)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) sum += parseInt(barcode[i], 10) * (i % 2 === 0 ? 1 : 3);
+  return (10 - (sum % 10)) % 10 === parseInt(barcode[12], 10);
+}
+
+const SCALE_PREFIXES: readonly string[] = ['20', '21', '22', '28', '29'];
+
+function matchScaleLayout(clean: string): { prefix: ScalePrefix; itemCode: string; valueStr: string } | null {
+  if (clean.length !== 13 || /^[0-9]+$/.test(clean) === false) return null;
+  const prefix = clean.slice(0, 2);
+  if (SCALE_PREFIXES.indexOf(prefix) === -1) return null;
+  return { prefix: prefix as ScalePrefix, itemCode: clean.slice(2, 7), valueStr: clean.slice(7, 12) };
+}
+
+/**
+ * Universal variable-weight parser (ADR-003-MKT). Pure, no money math.
+ * Layout PP IIIII VVVVV C — checksum-gated: corrupted reads return
+ * isScale:false so the caller falls through to the standard lookup.
+ * - WEIGHT (20, 21, 28 default): VVVVV = grams -> weightGrams (= qty_milli).
+ * - PRICE (22, 29, 28 with prefix28AsPrice): VVVVV = whole DZD -> priceCt = V*100.
+ */
+export function parseScaleBarcodeCt(
+  rawCode: string,
+  opts?: { prefix28AsPrice?: boolean },
+): ScaleBarcodeResultCt {
   const clean = rawCode.trim();
-  const match = clean.match(/^(20|22)(\d{5})(\d{5})(\d)$/);
-  if (!match) return { isScale: false };
-  const [, prefix, itemCode, valueStr] = match;
-  const numValue = parseInt(valueStr, 10);
-  if (prefix === '20') {
-    const weightKg = Math.round((numValue / 1000) * 1000) / 1000;
-    return { isScale: true, itemCode, weightKg };
+  const parts = matchScaleLayout(clean);
+  if (!parts || !isValidEan13(clean)) return { isScale: false };
+  const numValue = parseInt(parts.valueStr, 10);
+  const rawNumericCode = parseInt(parts.itemCode, 10);
+  const isPrice =
+    parts.prefix === '22' || parts.prefix === '29' || (parts.prefix === '28' && opts?.prefix28AsPrice === true);
+  if (isPrice) {
+    return {
+      isScale: true, prefix: parts.prefix, itemCode: parts.itemCode,
+      rawNumericCode, mode: 'PRICE', priceCt: numValue * 100,
+    };
   }
-  if (prefix === '22') {
-    return { isScale: true, itemCode, priceOverride: numValue };
+  return {
+    isScale: true, prefix: parts.prefix, itemCode: parts.itemCode,
+    rawNumericCode, mode: 'WEIGHT', weightGrams: numValue,
+  };
+}
+
+export interface CashChangeCt {
+  changeCt: Centimes;
+  isValid: boolean;
+  deficitCt: Centimes;
+}
+
+/**
+ * Cash tender settlement in strict integer centimes (ADR-005-MKT).
+ * Tendered comes from the DZD input via dzdToCentimes; no floats below.
+ */
+export function calculateCashChange(totalTtcCt: Centimes, tenderedCt: Centimes): CashChangeCt {
+  assertIntegerCentimes(totalTtcCt, 'totalTtcCt');
+  assertIntegerCentimes(tenderedCt, 'tenderedCt');
+  return {
+    changeCt: Math.max(0, tenderedCt - totalTtcCt) as Centimes,
+    isValid: tenderedCt >= totalTtcCt,
+    deficitCt: Math.max(0, totalTtcCt - tenderedCt) as Centimes,
+  };
+}
+
+/**
+ * Algerian smart note presets (centimes, deduped ascending, all >= total):
+ * exact, 500/1000/2000 thresholds, next x1000 multiple, next x2000
+ * multiple, 5000. E.g. 1430 DZD -> [143000, 200000, 500000].
+ */
+export function smartCashPresetsCt(totalTtcCt: Centimes): Centimes[] {
+  assertIntegerCentimes(totalTtcCt, 'totalTtcCt');
+  const DZD = 100;
+  const out = new Set<Centimes>([totalTtcCt]);
+  for (const note of [500, 1000, 2000]) {
+    if (totalTtcCt <= note * DZD) out.add((note * DZD) as Centimes);
   }
-  return { isScale: false };
+  out.add((Math.ceil(totalTtcCt / (1000 * DZD)) * 1000 * DZD) as Centimes);
+  out.add((Math.ceil(totalTtcCt / (2000 * DZD)) * 2000 * DZD) as Centimes);
+  out.add((5000 * DZD) as Centimes);
+  return [...out].filter(v => v >= totalTtcCt).sort((a, b) => a - b);
 }

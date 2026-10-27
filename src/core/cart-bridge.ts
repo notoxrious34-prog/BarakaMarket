@@ -5,7 +5,7 @@
  *
  * @module core/cart-bridge
  */
-import { centimesToDzd, dzdToCentimes } from './money.js';
+import { centimesToDzd, dzdToCentimes, assertIntegerCentimes } from './money.js';
 import {
   calculateLineTotalsCt,
   calculateSaleTotalsCt,
@@ -59,4 +59,34 @@ export function calculateSaleTotals(
     total_ttc: conv(t.total_ttc_ct),
     tva_breakdown: breakdown,
   };
+}
+
+/**
+ * ADR-004-MKT colisage math (pure, integer-first).
+ * price_override_ct wins; otherwise unit sell price x multiplier.
+ * Stock drain for N scanned packs: N * multiplier * 1000 milli-units.
+ */
+export function effectivePackPriceCt(
+  sellPriceCt: number,
+  multiplier: number,
+  priceOverrideCt?: number | null,
+): number {
+  assertIntegerCentimes(sellPriceCt, 'sellPriceCt');
+  if (!Number.isInteger(multiplier) || multiplier < 1) {
+    throw new Error(`[cart] multiplier must be >= 1 (got ${multiplier})`);
+  }
+  if (priceOverrideCt !== undefined && priceOverrideCt !== null) {
+    assertIntegerCentimes(priceOverrideCt, 'priceOverrideCt');
+    return priceOverrideCt;
+  }
+  return sellPriceCt * multiplier;
+}
+
+/** Pack-aware stock drain in milli-units: packs * multiplier * 1000. */
+export function packDeductionMilli(packsQty: number, multiplier: number): number {
+  if (!(packsQty > 0)) throw new Error(`[cart] packsQty must be > 0 (got ${packsQty})`);
+  if (!Number.isInteger(multiplier) || multiplier < 1) {
+    throw new Error(`[cart] multiplier must be >= 1 (got ${multiplier})`);
+  }
+  return Math.round(packsQty * multiplier * 1000);
 }

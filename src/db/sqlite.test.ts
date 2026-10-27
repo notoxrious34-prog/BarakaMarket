@@ -221,3 +221,70 @@ test('db: legacy float seed converts to exact centimes/milli', () => {
   void os.tmpdir;
   b.close();
 });
+
+test('db: product_barcodes table exists with indexes + FK cascade', () => {
+  const b = openBarakaDb(':memory:');
+  const tables = (b as unknown as { db: { prepare: (s: string) => { all: () => { name: string }[] } } }).db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='product_barcodes'").all();
+  assert.equal(tables.length, 1);
+  const idx = (b as unknown as { db: { prepare: (s: string) => { all: () => { name: string }[] } } }).db
+    .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='product_barcodes'").all()
+    .map(r => r.name).sort();
+  assert.deepEqual(idx, ['idx_product_barcodes_barcode', 'idx_product_barcodes_product', 'sqlite_autoindex_product_barcodes_1']);
+  b.upsertProduct(PROD);
+  const aid = b.addProductBarcode({ product_id: 1, barcode: 'ALIAS-CASCADE', multiplier: 2, pack_name: 'Pack x2' });
+  assert.equal(b.getProductBarcodes(1).length, 1);
+  (b as unknown as { db: { exec: (s: string) => void } }).db.exec('DELETE FROM products WHERE id = 1');
+  assert.equal(b.getProductBarcodes(1).length, 0);
+  void aid;
+  b.close();
+});
+
+test('db: resolveBarcode primary + alias x1 at unit price', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct(PROD);
+  b.addProductBarcode({ product_id: 1, barcode: '6130000000999' });
+  const prim = b.resolveBarcode(PROD.barcode);
+  assert.equal(prim?.isPack, false);
+  assert.equal(prim?.multiplier, 1);
+  assert.equal(prim?.effectivePriceCt, 18000);
+  const alias = b.resolveBarcode('6130000000999');
+  assert.equal(alias?.product.id, 1);
+  assert.equal(alias?.isPack, false);
+  assert.equal(alias?.multiplier, 1);
+  assert.equal(alias?.effectivePriceCt, 18000);
+  assert.equal(b.resolveBarcode('0000000000000'), null);
+  b.close();
+});
+
+test('db: resolveBarcode pack x6 — override 18000 wins over 3500x6', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct({ ...PROD, id: 2, barcode: 'PACKPARENT', sell_price_ct: 3500, tva_rate: 0, stock_milli: 100000 });
+  b.addProductBarcode({ product_id: 2, barcode: 'PACKX6', multiplier: 6, pack_name: 'Pack x6', price_override_ct: 18000 });
+  b.addProductBarcode({ product_id: 2, barcode: 'CARTONX12', multiplier: 12, pack_name: 'Carton x12' });
+  const pack = b.resolveBarcode('PACKX6');
+  assert.equal(pack?.isPack, true);
+  assert.equal(pack?.multiplier, 6);
+  assert.equal(pack?.packName, 'Pack x6');
+  assert.equal(pack?.effectivePriceCt, 18000);
+  const carton = b.resolveBarcode('CARTONX12');
+  assert.equal(carton?.effectivePriceCt, 42000);
+  assert.throws(() => b.addProductBarcode({ product_id: 2, barcode: 'BAD', multiplier: 0 }), />= 1/);
+  b.close();
+});
+
+test('db: recordSale 2 packs x6 drains exactly 12000 milli', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct({ ...PROD, id: 2, barcode: 'PACKPARENT', sell_price_ct: 3500, tva_rate: 0, stock_milli: 100000 });
+  b.addProductBarcode({ product_id: 2, barcode: 'PACKX6', multiplier: 6, pack_name: 'Pack x6', price_override_ct: 18000 });
+  const t = { total_ht_ct: 36000, total_tva_ct: 0, timbre_ct: 0, total_ttc_ct: 36000, tva_breakdown: { 0: { rate: 0 as const, base_ht_ct: 36000, tva_amount_ct: 0, total_ttc_ct: 36000 }, 9: { rate: 9 as const, base_ht_ct: 0, tva_amount_ct: 0, total_ttc_ct: 0 }, 19: { rate: 19 as const, base_ht_ct: 0, tva_amount_ct: 0, total_ttc_ct: 0 } } };
+  b.recordSale(
+    { cashier_id: 'C-1', cashier_name: 'Amine', payment_method: 'CIB', amount_paid_ct: 36000, amount_returned_ct: 0, totals: t, created_at: '2026-10-27T10:00:00.000Z' },
+    [
+      { product_id: 2, barcode: 'PACKX6', name_fr: 'EAU [Pack x6]', name_ar: '', unit_price_ct: 18000, qty_milli: 12000, unit: 'PIECE', tva_rate: 0, discount_bp: 0, line_ht_ct: 36000, line_tva_ct: 0, line_ttc_ct: 36000 },
+    ],
+  );
+  // 100.000 - 12.000 (2 packs x 6 units) = 88.000 milli
+  assert.equal(b.getProduct(2).stock_milli, 88000);
+  b.close();
+});

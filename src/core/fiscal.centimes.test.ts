@@ -11,6 +11,7 @@ import {
   calculateTimbreFiscalCt,
   calculateSaleTotalsCt,
   parseScaleBarcodeCt,
+  isValidEan13,
 } from './fiscal.centimes.js';
 
 // ---- money.ts ----
@@ -112,12 +113,80 @@ test('fiscal.ct: full Algerian receipt 1776 + timbre 18 = 1794', () => {
   assert.equal(t.total_ht_ct + t.total_tva_ct + t.timbre_ct, t.total_ttc_ct);
 });
 
-// ---- scale barcode ----
-test('fiscal.ct: scale barcode 20/22 parsing', () => {
-  const r = parseScaleBarcodeCt('2000040014501');
+// ---- scale barcodes (ADR-003-MKT: universal PP IIIII VVVVV C) ----
+test('fiscal.ct: EAN-13 checksum accepts valid, rejects corrupted', () => {
+  assert.equal(isValidEan13('2000142012501'), true);
+  assert.equal(isValidEan13('2000142012502'), false); // last digit flipped
+  assert.equal(isValidEan13('6131234567893'), true);
+  assert.equal(isValidEan13('12345'), false);
+  assert.equal(isValidEan13('ABCDEFGHIJKLM'), false);
+});
+
+test('fiscal.ct: prefix 20 = weight 1250 g (apples)', () => {
+  const r = parseScaleBarcodeCt('2000142012501');
   assert.equal(r.isScale, true);
-  assert.equal(r.itemCode, '00040');
-  assert.equal(r.weightKg, 1.45);
-  const reg = parseScaleBarcodeCt('6130000000014');
-  assert.equal(reg.isScale, false);
+  assert.equal(r.prefix, '20');
+  assert.equal(r.mode, 'WEIGHT');
+  assert.equal(r.itemCode, '00142');
+  assert.equal(r.rawNumericCode, 142);
+  assert.equal(r.weightGrams, 1250);
+});
+
+test('fiscal.ct: prefix 21 = weight 450 g (cheese)', () => {
+  const r = parseScaleBarcodeCt('2100055004508');
+  assert.equal(r.isScale, true);
+  assert.equal(r.prefix, '21');
+  assert.equal(r.mode, 'WEIGHT');
+  assert.equal(r.itemCode, '00055');
+  assert.equal(r.weightGrams, 450);
+});
+
+test('fiscal.ct: prefix 22 = price 450 DZD label', () => {
+  const r = parseScaleBarcodeCt('2200142004500');
+  assert.equal(r.isScale, true);
+  assert.equal(r.prefix, '22');
+  assert.equal(r.mode, 'PRICE');
+  assert.equal(r.itemCode, '00142');
+  assert.equal(r.priceCt, 45000);
+});
+
+test('fiscal.ct: prefix 28 defaults to weight (2000 g)', () => {
+  const r = parseScaleBarcodeCt('2800077020004');
+  assert.equal(r.isScale, true);
+  assert.equal(r.prefix, '28');
+  assert.equal(r.mode, 'WEIGHT');
+  assert.equal(r.weightGrams, 2000);
+});
+
+test('fiscal.ct: prefix 28 with flag = price', () => {
+  const r = parseScaleBarcodeCt('2800077020004', { prefix28AsPrice: true });
+  assert.equal(r.isScale, true);
+  assert.equal(r.mode, 'PRICE');
+  assert.equal(r.priceCt, 200000);
+});
+
+test('fiscal.ct: prefix 29 = price 12000 DZD label', () => {
+  const r = parseScaleBarcodeCt('2900077120008');
+  assert.equal(r.isScale, true);
+  assert.equal(r.prefix, '29');
+  assert.equal(r.mode, 'PRICE');
+  assert.equal(r.priceCt, 1200000);
+});
+
+test('fiscal.ct: corrupted check digit falls through to standard lookup', () => {
+  const r = parseScaleBarcodeCt('2000142012509');
+  assert.equal(r.isScale, false);
+  assert.equal(r.prefix, undefined);
+});
+
+test('fiscal.ct: non-scale EAN-13 is not a scale label', () => {
+  const r = parseScaleBarcodeCt('6131234567893');
+  assert.equal(r.isScale, false);
+});
+
+test('fiscal.ct: scale parse trims whitespace, keeps zero-padded code', () => {
+  const r = parseScaleBarcodeCt('  2100055004508\n');
+  assert.equal(r.isScale, true);
+  assert.equal(r.itemCode, '00055');
+  assert.equal(r.rawNumericCode, 55);
 });

@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { PaymentMethod } from '../../types';
 import { calculateSaleTotals } from '../../core/cart-bridge';
 import { formatDZD } from '../../core/display';
+import { formatDZDFromCentimes, dzdToCentimes } from '../../core/money';
+import { calculateCashChange, smartCashPresetsCt } from '../../core/fiscal.centimes';
 import { cashChime } from '../../hardware/sound';
 import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
 import {
@@ -11,7 +13,6 @@ import {
   BookOpen,
   CheckCircle,
   X,
-  FileText,
   Printer,
   AlertTriangle,
 } from 'lucide-react';
@@ -29,6 +30,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
     completeSale,
     completeSaleFiscal,
     isFiscalMode,
+    isTrialExpired,
     storeProfile,
     language,
   } = useApp();
@@ -37,24 +39,30 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('ESPECES');
   const [isFactureReglementaire, setIsFactureReglementaire] = useState(false);
+  // ADR-005-MKT: post-validation Change HUD (giant change, scanner dismisses).
+  const [hudChangeCt, setHudChangeCt] = useState<number | null>(null);
 
   // Compute totals based on currently chosen payment method
   const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
+  const totalTtcCt = dzdToCentimes(totals.total_ttc);
 
+  // Tendered input is Dinars text; converted to centimes once via dzdToCentimes.
   const [amountPaidInput, setAmountPaidInput] = useState<string>(totals.total_ttc.toString());
+  const tenderInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    tenderInputRef.current?.focus();
+    tenderInputRef.current?.select();
+  }, []);
 
   // Update amount paid default when payment method or totals change
   useEffect(() => {
-    if (paymentMethod === 'ESPECES') {
-      setAmountPaidInput(totals.total_ttc.toString());
-    } else {
-      setAmountPaidInput(totals.total_ttc.toString());
-    }
+    setAmountPaidInput(totals.total_ttc.toString());
   }, [paymentMethod, totals.total_ttc]);
 
-  const numPaid = parseFloat(amountPaidInput) || 0;
-  const changeDue = Math.max(0, numPaid - totals.total_ttc);
-  const isUnderpaid = paymentMethod === 'ESPECES' && numPaid < totals.total_ttc;
+  const tenderedCt = amountPaidInput.trim() === '' ? 0 : dzdToCentimes(parseFloat(amountPaidInput) || 0);
+  const change = calculateCashChange(totalTtcCt, tenderedCt);
+  const isUnderpaid = paymentMethod === 'ESPECES' && !change.isValid;
+  const presetsCt = smartCashPresetsCt(totalTtcCt);
 
   // Credit limit check
   const isCreditExceeded =
@@ -62,8 +70,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
     selectedClient.max_credit_limit > 0 &&
     selectedClient.credit_balance + totals.total_ttc > selectedClient.max_credit_limit;
 
-  const handleValidate = async () => {
-    if (isUnderpaid) return;
+  const finalizeWith = async (tenderCt: number) => {
+    if (isTrialExpired) {
+      alert(isAr ? 'انتهت الفترة التجريبية. يرجى تفعيل البرنامج.' : "Essai terminé — activez la licence pour encaisser.");
+      return;
+    }
     if (paymentMethod === 'CREDIT' && selectedClient.id === 1) {
       alert(isAr ? 'يرجى اختيار عميل من دفتر الديون لتسجيل البيع بالكريدي' : 'Veuillez sélectionner un client pour le crédit');
       return;
@@ -71,43 +82,83 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
 
     // Gate-02 TASK 1: authoritative SQLite commit in fiscal mode (monotonic
     // FACT/T); provisional fallback keeps the rush-hour line moving.
+    const paidDzd = tenderCt / 100;
     if (isFiscalMode) {
-      await completeSaleFiscal(paymentMethod, numPaid, isFactureReglementaire);
+      await completeSaleFiscal(paymentMethod, paidDzd, isFactureReglementaire);
     } else {
-      completeSale(paymentMethod, numPaid, isFactureReglementaire);
+      completeSale(paymentMethod, paidDzd, isFactureReglementaire);
     }
-    // Gate-02 TASK 2+4: drawer kick on cash + acoustic seal on every sale.
-    if (paymentMethod === 'ESPECES') kickDrawerViaLoopback();
+    // Gate-02 TASK 2+4 + ADR-005: drawer kick on cash + acoustic seal + HUD.
+    if (paymentMethod === 'ESPECES') {
+      kickDrawerViaLoopback();
+      setHudChangeCt(calculateCashChange(totalTtcCt, tenderCt).changeCt);
+    }
     cashChime();
-    onClose();
+    if (paymentMethod !== 'ESPECES') onClose();
   };
 
-  // Keyboard shortcut: Enter to submit, Escape to close, 1/2/3 tender select
+  const handleValidate = async () => {
+    if (isUnderpaid) return;
+    // Empty tendered field = exact amount (rush-hour express lane).
+    const tenderCt = amountPaidInput.trim() === '' ? totalTtcCt : tenderedCt;
+    await finalizeWith(tenderCt);
+  };
+
+  const setExact = () => setAmountPaidInput((totalTtcCt / 100).toString());
+
+  // ADR-005-MKT keyboard matrix (capture phase: pre-empts the POS F1-F4 layer).
+  // F1/Alt+1 exact · F2/Alt+2 1000 · F3/Alt+3 2000 · F4/Alt+4 5000 ·
+  // Enter finalize (empty = exact) · Escape cancel · 2/3 tender select.
   useEffect(() => {
+    if (hudChangeCt !== null) return;
     const handleKeyDown = (e: KeyboardEvent) => {
+      const inInput = (e.target as HTMLElement).tagName === 'INPUT';
+      const alt = (d: string) => e.altKey && e.key === d;
+      if (e.key === 'F1' || alt('1')) {
+        e.preventDefault(); e.stopPropagation(); setExact(); return;
+      }
+      if (e.key === 'F2' || alt('2')) {
+        e.preventDefault(); e.stopPropagation(); setAmountPaidInput('1000'); return;
+      }
+      if (e.key === 'F3' || alt('3')) {
+        e.preventDefault(); e.stopPropagation(); setAmountPaidInput('2000'); return;
+      }
+      if (e.key === 'F4' || alt('4')) {
+        e.preventDefault(); e.stopPropagation(); setAmountPaidInput('5000'); return;
+      }
       if (e.key === 'Escape') {
-        onClose();
-      } else if (e.key === 'Enter' && !isUnderpaid) {
-        e.preventDefault();
-        void handleValidate();
-      } else if ((e.target as HTMLElement).tagName !== 'INPUT' && (e.key === '1' || e.key === '2' || e.key === '3')) {
-        if (e.key === '1') setPaymentMethod('ESPECES');
+        e.preventDefault(); e.stopPropagation(); onClose(); return;
+      }
+      if (e.key === 'Enter') {
+        const c = calculateCashChange(totalTtcCt, amountPaidInput.trim() === '' ? totalTtcCt : dzdToCentimes(parseFloat(amountPaidInput) || 0));
+        if (!c.isValid && paymentMethod === 'ESPECES') return;
+        e.preventDefault(); e.stopPropagation();
+        void handleValidate(); return;
+      }
+      if (!inInput && (e.key === '2' || e.key === '3')) {
         if (e.key === '2') setPaymentMethod('DAHABIYA');
         if (e.key === '3') setPaymentMethod('CREDIT');
       }
     };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [numPaid, isUnderpaid, paymentMethod, isFiscalMode]);
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [amountPaidInput, totalTtcCt, paymentMethod, isFiscalMode, hudChangeCt, isAr]);
 
-  const quickDenominations = [
-    totals.total_ttc,
-    Math.ceil(totals.total_ttc / 500) * 500,
-    1000,
-    2000,
-    4000,
-    5000,
-  ].filter((v, i, arr) => v >= totals.total_ttc && arr.indexOf(v) === i);
+  // ADR-005-MKT: HUD dismissal — Enter/Space/Escape, any scanner char, or click
+  // ends the splash, closes the cockpit and re-arms the barcode input.
+  useEffect(() => {
+    if (hudChangeCt === null) return;
+    const dismiss = (e: KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'Escape' || e.key.length === 1) {
+        e.preventDefault(); e.stopPropagation();
+        setHudChangeCt(null);
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', dismiss, true);
+    return () => window.removeEventListener('keydown', dismiss, true);
+  }, [hudChangeCt, onClose]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
@@ -117,10 +168,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
           <div>
             <h3 className="text-base font-bold text-white flex items-center gap-2">
               <Banknote className="w-5 h-5 text-emerald-400" />
-              <span>{isAr ? 'إتمام الدفع واستخراج الوصل' : 'Encaissement & Règlement'}</span>
+              <span>{isAr ? 'الدفع في الصندوق / Règlement Caisse' : 'Règlement Caisse / الدفع في الصندوق'}</span>
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              {currentCart.length} {isAr ? 'منتجات في السلة' : 'articles dans le panier'}
+              {currentCart.length} {isAr ? 'منتجات في السلة' : 'articles dans le panier'} · F1 exact · F2 1000 · F3 2000 · F4 5000
             </p>
           </div>
           <button
@@ -149,7 +200,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
                 }`}
               >
                 <Banknote className="w-5 h-5 text-emerald-400" />
-                <span className="text-xs font-bold">{isAr ? 'نقداً (Espèces)' : 'Espèces'}</span>
+                <span className="text-xs font-bold">{isAr ? 'نقداً / Espèces' : 'Espèces / نقداً'}</span>
                 <span className="text-[10px] text-amber-300/80 font-mono">+1% Timbre</span>
               </button>
 
@@ -229,7 +280,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
           {/* Amount Breakdown Panel */}
           <div className="bg-[#0b0f17] border border-[#1e293b] rounded-xl p-3.5 space-y-2">
             <div className="flex justify-between text-xs text-slate-400">
-              <span>{isAr ? 'المجموع بدون ضرائب (HT):' : 'Sous-total HT:'}</span>
+              <span>{isAr ? 'المجموع الكلي / Montant Total (HT):' : 'Montant Total / المجموع الكلي (HT):'}</span>
               <span className="font-mono text-slate-300" dir="ltr">{formatDZD(totals.total_ht)}</span>
             </div>
             <div className="flex justify-between text-xs text-slate-400">
@@ -259,36 +310,58 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-300">
-                  {isAr ? 'المبلغ المستلم من الزبون:' : 'Montant Reçu / Versé (DZD):'}
+                  {isAr ? 'المبلغ المستلم / Montant Reçu:' : 'Montant Reçu / المبلغ المستلم:'}
                 </label>
-                {changeDue > 0 && (
-                  <span className="text-xs font-bold text-emerald-400">
-                    {isAr ? 'الباقي المردود للزبون:' : 'Rendu Monnaie:'}{' '}
-                    <strong className="text-sm font-mono">{formatDZD(changeDue, false)}</strong>
-                  </span>
-                )}
               </div>
 
               <input
+                ref={tenderInputRef}
                 type="number"
                 value={amountPaidInput}
                 onChange={e => setAmountPaidInput(e.target.value)}
                 className="w-full bg-[#162030] border border-[#2b3a4f] focus:border-emerald-500 text-white font-mono text-xl font-bold px-3 py-2 rounded-xl text-center outline-none"
               />
 
-              {/* Quick Cash Buttons */}
+              {/* Algerian note preset chips */}
               <div className="flex flex-wrap gap-1.5 pt-1">
-                {quickDenominations.map(val => (
+                <button
+                  key="exact"
+                  type="button"
+                  onClick={setExact}
+                  title="F1"
+                  className="flex-1 py-1.5 px-2 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 rounded-lg text-xs font-mono font-bold border border-emerald-700 cursor-pointer whitespace-nowrap"
+                >
+                  {isAr ? 'المبلغ بالضبط' : 'Montant Exact'}
+                </button>
+                {presetsCt.filter(p => p !== totalTtcCt).map(p => (
                   <button
-                    key={val}
+                    key={p}
                     type="button"
-                    onClick={() => setAmountPaidInput(val.toString())}
-                    className="flex-1 py-1 px-2 bg-[#162030] hover:bg-[#233145] text-slate-300 hover:text-white rounded-lg text-xs font-mono font-semibold border border-[#2b3a4f] cursor-pointer"
+                    onClick={() => setAmountPaidInput((p / 100).toString())}
+                    className="flex-1 py-1.5 px-2 bg-[#162030] hover:bg-[#233145] text-slate-300 hover:text-white rounded-lg text-xs font-mono font-semibold border border-[#2b3a4f] cursor-pointer whitespace-nowrap"
                   >
-                    {val} DZD
+                    {(p / 100).toLocaleString('fr-DZ')} DA
                   </button>
                 ))}
               </div>
+
+              {/* Live change / deficit indicator */}
+              {change.isValid ? (
+                <div className="bg-emerald-950/60 border border-emerald-600 rounded-xl px-4 py-3 text-center">
+                  <p className="text-xs font-bold text-emerald-300">
+                    {isAr ? 'إرجاع الصرف / Rendu de Monnaie:' : 'Rendu de Monnaie / إرجاع الصرف:'}
+                  </p>
+                  <p className="font-mono font-black text-emerald-300 text-5xl tabular-nums" dir="ltr">
+                    {formatDZDFromCentimes(change.changeCt, false)}
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-rose-950/40 border border-rose-800 rounded-xl px-4 py-2 text-center">
+                  <p className="text-xs font-bold text-rose-300">
+                    {isAr ? `المبلغ ناقص: ${formatDZDFromCentimes(change.deficitCt, false)}` : `Manque: ${formatDZDFromCentimes(change.deficitCt, false)}`}
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -335,6 +408,32 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
           </button>
         </div>
       </div>
+
+      {/* ADR-005-MKT: post-validation Change HUD — scanner/Enter/Space/Esc dismiss */}
+      {hudChangeCt !== null && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/85 backdrop-blur-sm p-4"
+          onClick={() => { setHudChangeCt(null); onClose(); }}
+          role="alertdialog"
+          aria-modal="true"
+        >
+          <div className="text-center space-y-3 max-w-lg">
+            <p className="flex items-center justify-center gap-2 text-emerald-300 font-bold text-lg">
+              <CheckCircle className="w-6 h-6" />
+              {isAr ? 'تم البيع / VENTE ENREGISTRÉE' : 'VENTE ENREGISTRÉE / تم البيع'}
+            </p>
+            <p className="text-slate-300 text-sm font-bold">
+              {isAr ? 'الباقي / À RENDRE:' : 'À RENDRE / الباقي:'}
+            </p>
+            <p className="font-mono font-black text-emerald-300 tabular-nums leading-none text-6xl" dir="ltr">
+              {formatDZDFromCentimes(hudChangeCt, false)}
+            </p>
+            <p className="text-xs text-slate-400">
+              {isAr ? 'امسح المنتج التالي أو اضغط Enter للزبون الموالي' : 'Scannez l’article suivant ou Enter pour le client suivant'}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

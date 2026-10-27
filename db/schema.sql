@@ -53,6 +53,37 @@ CREATE TABLE IF NOT EXISTS products (
   expiry_date      TEXT
 );
 
+-- ADR-004-MKT: alternate barcodes + multipack/colisage labels.
+-- multiplier = 1 -> alias barcode; > 1 -> pack/carton of N base units.
+CREATE TABLE IF NOT EXISTS product_barcodes (
+  id               INTEGER PRIMARY KEY,
+  product_id       INTEGER NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+  barcode          TEXT    NOT NULL UNIQUE,
+  multiplier       INTEGER NOT NULL DEFAULT 1 CHECK (multiplier >= 1),
+  pack_name        TEXT,
+  price_override_ct INTEGER CHECK (price_override_ct IS NULL OR price_override_ct >= 0),
+  created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_product_barcodes_barcode ON product_barcodes (barcode);
+CREATE INDEX IF NOT EXISTS idx_product_barcodes_product ON product_barcodes (product_id);
+
+-- ADR-006-MKT: auditable shrinkage ledger (La Casse / Démarque). One row per
+-- write-off event; stock_milli is decremented atomically by recordInventoryLoss.
+-- product_id uses RESTRICT: a product with loss history cannot be deleted.
+CREATE TABLE IF NOT EXISTS inventory_losses (
+  id            INTEGER PRIMARY KEY,
+  product_id    INTEGER NOT NULL REFERENCES products (id) ON DELETE RESTRICT,
+  qty_milli     INTEGER NOT NULL CHECK (qty_milli > 0),
+  reason        TEXT    NOT NULL CHECK (reason IN ('EXPIRED', 'BROKEN', 'DAMAGED', 'THEFT', 'INTERNAL_USE', 'AUTRE')),
+  unit_cost_ct  INTEGER NOT NULL DEFAULT 0 CHECK (unit_cost_ct >= 0),
+  total_loss_ct INTEGER NOT NULL DEFAULT 0 CHECK (total_loss_ct >= 0),
+  notes         TEXT,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_inventory_losses_product ON inventory_losses (product_id);
+CREATE INDEX IF NOT EXISTS idx_inventory_losses_created ON inventory_losses (created_at);
+CREATE INDEX IF NOT EXISTS idx_products_expiry ON products (expiry_date) WHERE has_expiry = 1;
+
 CREATE TABLE IF NOT EXISTS clients (
   id                  INTEGER PRIMARY KEY,
   name                TEXT    NOT NULL,
@@ -234,13 +265,22 @@ CREATE TABLE IF NOT EXISTS z_reports (
 );
 
 -- Legal void journal. Rows are NEVER deleted from sales; voids append here.
+-- ADR-014-MKT columns carry manager-override audit events alongside sale voids.
 CREATE TABLE IF NOT EXISTS void_log (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  sale_id        TEXT    NOT NULL,
-  invoice_number TEXT    NOT NULL,
+  sale_id        TEXT,
+  invoice_number TEXT,
   reason         TEXT    NOT NULL,
   voided_by      TEXT    NOT NULL DEFAULT '',
-  voided_at      TEXT    NOT NULL
+  voided_at      TEXT    NOT NULL,
+  action_type    TEXT,
+  product_id     INTEGER,
+  product_name   TEXT,
+  amount_ct      INTEGER NOT NULL DEFAULT 0,
+  cashier_name   TEXT,
+  manager_name   TEXT,
+  session_id     TEXT,
+  created_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products (barcode);
@@ -249,3 +289,43 @@ CREATE INDEX IF NOT EXISTS idx_sales_created ON sales (created_at);
 CREATE INDEX IF NOT EXISTS idx_sales_status ON sales (status);
 CREATE INDEX IF NOT EXISTS idx_sale_items_sale ON sale_items (sale_id);
 CREATE INDEX IF NOT EXISTS idx_z_day ON z_reports (day);
+
+-- ADR-013-MKT: cashier shift lifecycle + mid-day drawer movements.
+CREATE TABLE IF NOT EXISTS cash_sessions (
+  id                 TEXT PRIMARY KEY,
+  cashier_name       TEXT NOT NULL,
+  opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
+  closed_at          TEXT,
+  opening_float_ct   INTEGER NOT NULL DEFAULT 0,
+  closing_counted_ct INTEGER,
+  theoretical_cash_ct INTEGER,
+  cash_diff_ct       INTEGER, -- counted - theoretical (surplus > 0, deficit < 0)
+  status             TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')) DEFAULT 'OPEN',
+  z_report_id        TEXT REFERENCES z_reports (report_number),
+  notes              TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cash_sessions_status ON cash_sessions (status);
+
+CREATE TABLE IF NOT EXISTS cash_movements (
+  id            TEXT PRIMARY KEY,
+  session_id    TEXT NOT NULL REFERENCES cash_sessions (id) ON DELETE CASCADE,
+  movement_type TEXT NOT NULL CHECK (movement_type IN ('DEPOSIT', 'WITHDRAWAL', 'EXPENSE')),
+  amount_ct     INTEGER NOT NULL CHECK (amount_ct > 0),
+  reason        TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cash_movements_session ON cash_movements (session_id);
+
+-- ADR-015-MKT: append-only online backup journal (VACUUM INTO snapshots).
+CREATE TABLE IF NOT EXISTS backups_log (
+  id               TEXT PRIMARY KEY,
+  filename         TEXT NOT NULL,
+  file_path        TEXT NOT NULL,
+  file_size_bytes  INTEGER NOT NULL,
+  sha256_checksum  TEXT NOT NULL,
+  sales_count      INTEGER NOT NULL DEFAULT 0,
+  products_count   INTEGER NOT NULL DEFAULT 0,
+  status           TEXT NOT NULL CHECK (status IN ('VERIFIED', 'CORRUPT', 'RESTORED')) DEFAULT 'VERIFIED',
+  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_backups_created ON backups_log (created_at);

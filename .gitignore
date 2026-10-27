@@ -10,6 +10,8 @@ data/
 *.db
 *.db-wal
 *.db-shm
+# ADR-002: owner Ed25519 private key — NEVER commit.
+*.pem
 setup/
 *.nsis.exe
 releases/

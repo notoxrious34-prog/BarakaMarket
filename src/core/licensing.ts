@@ -1,29 +1,58 @@
 /**
- * Baraka Market — BarakaLock air-gapped licensing (Gate-03 TASK 3).
- * Zero internet: deterministic HWID + HMAC-SHA256 activation keys, all
- * arithmetic string-based, no floating point anywhere near the license path.
+ * Baraka Market — BarakaLock air-gapped licensing (ADR-002-MKT).
+ * Asymmetric Ed25519: the owner signs (keygen CLI, private key NEVER ships);
+ * the client only VERIFIES against the embedded public key. No symmetric
+ * secret exists anywhere in the shipped bundle. All string-based, no floats.
  *
  * @module core/licensing
  */
-import { sha256Hex, hmacSha256Hex } from './sha256';
+import { sha256Hex } from './sha256';
 
-/** Offline secret seed — baked into the binary, never transmitted. */
-export const BARAKA_SECRET = 'BARAKA_MARKET_SECRET_ALGERIA_2026';
+/**
+ * Ed25519 public key (raw 32 bytes, hex) matching the owner's offline
+ * private key. VERIFY-ONLY — safe to ship; it cannot mint keys.
+ */
+export const BARAKA_PUBLIC_KEY = 'f3d6687ed8b7ee5289b9deff4a9c37f4aa7526dc383b6c40384cd1ce160a2811';
 
 /** Retail price anchor (DZD) — informational, enforced by sales policy. */
 export const LICENSE_PRICE_DZD = 5000;
 
-/** Trial envelope: 50 sales or 14 days, whichever hits first. */
+/** Trial envelope: 50 sales AND 14 days — expiry needs BOTH exhausted. */
 export const TRIAL_MAX_SALES = 50;
 export const TRIAL_MAX_DAYS = 14;
 
 export type LicenseStatus = 'TRIAL' | 'ACTIVATED';
 
+/** Canonical store identity: trim + uppercase (AR script unaffected). */
+export function canonicalStoreName(storeName: string): string {
+  return storeName.trim().toUpperCase();
+}
+
+/** Canonical signed payload bytes: `STORE||HWID`. */
+export function buildLicensePayload(storeName: string, hwid: string): Uint8Array {
+  return new TextEncoder().encode(`${canonicalStoreName(storeName)}||${hwid.trim().toUpperCase()}`);
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) throw new Error('bad hex');
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function b64urlToBytes(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4 === 2 ? '==' : b64.length % 4 === 3 ? '=' : '';
+  const bin = atob(b64 + pad);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 export interface MachineParts {
   arch: string;
   hostname: string;
   osVersion: string;
-  screen: string;
   seed: string;
 }
 
@@ -32,11 +61,12 @@ const GROUP = (hex16: string, prefix: string): string =>
 
 /**
  * Deterministic machine fingerprint → BM-XXXX-XXXX-XXXX-XXXX.
- * Stable for a given machine+seed; no admin/network permissions needed.
+ * ADR-002: derived STRICTLY from arch + osVersion + hostname + seed.
+ * Screen resolution is EXCLUDED — monitor swaps must not void the license.
  */
 export function computeHwid(parts: MachineParts): string {
   const digest = sha256Hex(
-    [parts.arch, parts.hostname, parts.osVersion, parts.screen, parts.seed].join('|'),
+    [parts.arch, parts.hostname, parts.osVersion, parts.seed].join('|'),
   );
   return GROUP(digest.slice(0, 16), 'BM');
 }
@@ -49,7 +79,6 @@ export function collectBrowserFingerprint(seed: string): MachineParts {
     arch: uaData?.platform ?? (nav?.platform || 'unknown'),
     hostname: 'browser-pos',
     osVersion: nav?.userAgent || 'unknown',
-    screen: typeof screen !== 'undefined' ? `${screen.width}x${screen.height}` : '0x0',
     seed,
   };
 }
@@ -60,30 +89,40 @@ export function collectNodeFingerprint(seed: string, os: { arch(): string; hostn
     arch: os.arch(),
     hostname: os.hostname(),
     osVersion: os.release(),
-    screen: 'headless',
     seed,
   };
 }
 
-/** Activation key: AK-XXXX-XXXX-XXXX-XXXX = first 16 hex of HMAC-SHA256(store||hwid). */
-export function generateActivationKey(storeName: string, hwid: string): string {
-  const sig = hmacSha256Hex(BARAKA_SECRET, `${storeName.trim()}||${hwid.trim().toUpperCase()}`);
-  return GROUP(sig.slice(0, 16), 'AK');
+/** Activation key: `AK-` + base64url(Ed25519(store||hwid)) — 86 chars, no padding. */
+export function formatActivationKey(sigB64url: string): string {
+  return `AK-${sigB64url}`;
 }
 
-/** Timing-safe string compare (length + char walk, no early length leak of note here). */
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
+const AK_RE = /^AK-([A-Za-z0-9_-]{86})$/;
+
+/**
+ * Verify an Ed25519 signature against any raw-32-byte hex public key.
+ * Fails closed (false) on malformed input or runtimes without Ed25519.
+ */
+export async function verifyEd25519Signature(pubkeyHex: string, message: Uint8Array, sigB64url: string): Promise<boolean> {
+  try {
+    const pub = new Uint8Array(hexToBytes(pubkeyHex)) as Uint8Array<ArrayBuffer>;
+    if (pub.length !== 32) return false;
+    const sig = new Uint8Array(b64urlToBytes(sigB64url)) as Uint8Array<ArrayBuffer>;
+    if (sig.length !== 64) return false;
+    const msg = new Uint8Array(message) as Uint8Array<ArrayBuffer>;
+    const key = await crypto.subtle.importKey('raw', pub, { name: 'Ed25519' }, false, ['verify']);
+    return await crypto.subtle.verify('Ed25519', key, sig, msg);
+  } catch {
+    return false;
+  }
 }
 
-/** Offline validation — pure function, zero I/O. */
-export function validateLicense(storeName: string, hwid: string, key: string): boolean {
-  const norm = key.trim().toUpperCase();
-  if (!/^AK-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/.test(norm)) return false;
-  return safeEqual(generateActivationKey(storeName, hwid), norm);
+/** Offline validation — pure async verify against the embedded public key. */
+export async function validateLicense(storeName: string, hwid: string, key: string): Promise<boolean> {
+  const m = AK_RE.exec(key.trim());
+  if (!m || !storeName.trim() || !hwid.trim()) return false;
+  return verifyEd25519Signature(BARAKA_PUBLIC_KEY, buildLicensePayload(storeName, hwid), m[1]);
 }
 
 export interface TrialState {

@@ -39,11 +39,11 @@ test('scanner: burst detector resets after emit (second scan works)', () => {
   assert.equal(feed(det, '2000145014508', 8), '2000145014508');
 });
 
-test('scale: 2000145014508 -> item 00145, 1.450 kg, centimes line total', () => {
-  const r = parseScaleBarcodeCt('2000145014508');
+test('scale: 2000145014502 -> item 00145, 1450 g, centimes line total', () => {
+  const r = parseScaleBarcodeCt('2000145014502');
   assert.equal(r.isScale, true);
   assert.equal(r.itemCode, '00145');
-  assert.equal(r.weightKg, 1.45);
+  assert.equal(r.weightGrams, 1450);
   // 280 DZD/kg x 1.450 kg = 40600 ct exact, HT = round(40600*100/109) = 37248 ct
   const line = calculateLineTotalsCt(dzdToCentimes(280), 1.45, 9);
   assert.equal(line.total_line_ttc_ct, 40600);

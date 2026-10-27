@@ -98,3 +98,185 @@ test('api: raw-print spools drawer-kick bytes and rejects garbage', async () => 
   });
   assert.equal(bad.status, 400);
 });
+
+test('api: POST /purchases/receive commits BL with stock influx', async () => {
+  (baraka as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db
+    .prepare('INSERT OR IGNORE INTO suppliers (id, name) VALUES (9, ?)').run('SUP API');
+  const r = await fetch(`${base}/api/purchases/receive`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      supplierId: 9, invoiceRef: 'BL-API-1',
+      items: [{ productId: 1, packMultiplier: 6, packCount: 2, unitCostCt: 14500 }],
+      paidAmountCt: 0,
+    }),
+  });
+  assert.equal(r.status, 201);
+  const j = await r.json() as { success: boolean; totalCostCt: number; remainingDebtCt: number; itemsProcessed: number };
+  assert.equal(j.success, true);
+  // 12 units x 14500 HT = 174000; TVA 9% = 15660; total 189660
+  assert.equal(j.totalCostCt, 189660);
+  assert.equal(j.remainingDebtCt, 189660);
+  assert.equal(j.itemsProcessed, 1);
+});
+
+test('api: GET /suppliers/:id/purchases lists receipts', async () => {
+  const r = await fetch(`${base}/api/suppliers/9/purchases`);
+  assert.equal(r.status, 200);
+  const rows = await r.json() as { invoice_number: string }[];
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].invoice_number, 'BL-API-1');
+});
+
+test('api: GET /suppliers/:id/statement aggregates ledger', async () => {
+  const r = await fetch(`${base}/api/suppliers/9/statement`);
+  assert.equal(r.status, 200);
+  const st = await r.json() as { supplierName: string; totalPurchasedCt: number; outstandingCt: number };
+  assert.equal(st.supplierName, 'SUP API');
+  assert.equal(st.totalPurchasedCt, 189660);
+  assert.equal(st.outstandingCt, 189660);
+});
+
+test('api: POST /clients/:id/settle decrements ledger with timbre', async () => {
+  (baraka as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db
+    .prepare('INSERT OR IGNORE INTO clients (id, name, phone, credit_balance_ct, max_credit_limit_ct) VALUES (50, ?, ?, 1000000, 0)')
+    .run('CLIENT API', '0550999888');
+  const r = await fetch(`${base}/api/clients/50/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ amountCt: 100000, cashierName: 'API' }),
+  });
+  assert.equal(r.status, 201);
+  const j = await r.json() as { success: boolean; newBalanceCt: number; timbreCt: number; receiptNumber: string };
+  assert.equal(j.success, true);
+  assert.equal(j.newBalanceCt, 900000);
+  assert.equal(j.timbreCt, 1000);
+  assert.match(j.receiptNumber, /^Q-\d{4}-\d{6}$/);
+});
+
+test('api: POST /clients/:id/settle-and-print spools quittance bytes', async () => {
+  const r = await fetch(`${base}/api/clients/50/settle-and-print`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ amountCt: 50000 }),
+  });
+  assert.equal(r.status, 201);
+  const j = await r.json() as { success: boolean; bytes: number; settlement: { newBalanceCt: number } };
+  assert.equal(j.success, true);
+  assert.ok(j.bytes > 100);
+  assert.equal(j.settlement.newBalanceCt, 850000);
+  const bad = await fetch(`${base}/api/clients/777/settle`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ amountCt: 1000 }),
+  });
+  assert.equal(bad.status, 400);
+});
+
+test('api: GET /clients/:id/statement returns ledger history', async () => {
+  const r = await fetch(`${base}/api/clients/50/statement`);
+  assert.equal(r.status, 200);
+  const st = await r.json() as { client: { name: string }; settlements: { amount_ct: number }[]; creditSales: unknown[] };
+  assert.equal(st.client.name, 'CLIENT API');
+  assert.equal(st.settlements.length, 2);
+  assert.deepEqual(st.creditSales, []);
+});
+
+test('api: POST /cash/open starts a guarded session', async () => {
+  const r = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'API', openingFloatCt: 1000000 }),
+  });
+  assert.equal(r.status, 201);
+  const j = await r.json() as { success: boolean; status: string; openingFloatCt: number };
+  assert.equal(j.success, true);
+  assert.equal(j.status, 'OPEN');
+  const dup = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'API2', openingFloatCt: 1 }),
+  });
+  assert.equal(dup.status, 400);
+});
+
+test('api: GET /cash/active reflects live theoretical cash', async () => {
+  const m = await fetch(`${base}/api/cash/movement`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: (await (await fetch(`${base}/api/cash/active`)).json() as { session: { id: string } }).session.id, movementType: 'EXPENSE', amountCt: 50000, reason: 'test depense' }),
+  });
+  assert.equal(m.status, 201);
+  const live = await (await fetch(`${base}/api/cash/active`)).json() as { theoreticalCashCt: number; expensesCt: number };
+  assert.equal(live.expensesCt, 50000);
+  assert.equal(live.theoreticalCashCt, 950000);
+});
+
+test('api: POST /cash/close-and-z finalizes with spooled ticket', async () => {
+  const active = await (await fetch(`${base}/api/cash/active`)).json() as { session: { id: string } };
+  const r = await fetch(`${base}/api/cash/close-and-z`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: active.session.id, countedCashCt: 940000 }),
+  });
+  assert.equal(r.status, 201);
+  const z = await r.json() as { success: boolean; zNumber: string; bytes: number; cashDiffCt: number; sessionId: string };
+  assert.equal(z.success, true);
+  assert.match(z.zNumber, /^Z-\d{4}-\d{6}$/);
+  assert.ok(z.bytes > 200);
+  assert.equal(z.cashDiffCt, -10000);
+  assert.equal(await (await fetch(`${base}/api/cash/active`)).json(), null);
+});
+
+test('api: POST /security/verify-pin checks the manager gate', async () => {
+  const ok = await fetch(`${base}/api/security/verify-pin`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pin: '1234' }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(((await ok.json()) as { success: boolean }).success, true);
+  const bad = await fetch(`${base}/api/security/verify-pin`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ pin: '0000' }),
+  });
+  assert.equal(((await bad.json()) as { success: boolean }).success, false);
+});
+
+test('api: security void-log + summary round-trip', async () => {
+  const w = await fetch(`${base}/api/security/void-log`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      actionType: 'LINE_VOID', productId: 1, productName: 'LAIT',
+      amountCt: 145000, cashierName: 'API', managerApprovedBy: 'Hadj', reason: 'api-test',
+    }),
+  });
+  assert.equal(w.status, 201);
+  const rows = await (await fetch(`${base}/api/security/void-log?reason=api-test`)).json() as { amountCt: number }[];
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].amountCt, 145000);
+  const sum = await (await fetch(`${base}/api/security/void-summary`)).json() as { totalVoidCount: number };
+  assert.ok(sum.totalVoidCount >= 1);
+});
+
+test('api: POST /backups/create snapshots with hash, GET lists catalog', async () => {
+  const c = await fetch(`${base}/api/backups/create`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: 'apitest' }),
+  });
+  assert.equal(c.status, 201);
+  const meta = await c.json() as { success: boolean; filename: string; sha256Checksum: string; filePath: string };
+  assert.equal(meta.success, true);
+  assert.match(meta.filename, /apitest\.sqlite$/);
+  assert.match(meta.sha256Checksum, /^[0-9a-f]{64}$/);
+  const list = await (await fetch(`${base}/api/backups`)).json() as { filename: string }[];
+  assert.ok(list.some(r => r.filename === meta.filename));
+});
+
+test('api: POST /backups/verify validates snapshots and rejects garbage', async () => {
+  const list = await (await fetch(`${base}/api/backups`)).json() as { filePath: string }[];
+  const v = await fetch(`${base}/api/backups/verify`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ backupPath: list[0].filePath }),
+  });
+  assert.equal(v.status, 200);
+  const rep = await v.json() as { isValid: boolean; integrityCheckResult: string; errors: string[] };
+  assert.equal(rep.isValid, true);
+  assert.equal(rep.integrityCheckResult, 'ok');
+  const bad = await fetch(`${base}/api/backups/verify`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ backupPath: 'data/nope.sqlite' }),
+  });
+  assert.equal(((await bad.json()) as { isValid: boolean }).isValid, false);
+});

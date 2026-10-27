@@ -42,16 +42,17 @@ export const LicenseManagerView: React.FC = () => {
     setTimeout(() => setCopiedKey(false), 2000);
   };
 
-  const handleActivate = (e: React.FormEvent) => {
+  const handleActivate = async (e: React.FormEvent) => {
     e.preventDefault();
     setActivationError('');
     if (!storeName.trim()) {
       setActivationError(isAr ? 'أدخل اسم المحل أولاً' : 'Saisissez le nom du magasin');
       return;
     }
-    if (validateLicense(storeName, hardwareId, inputKey)) {
-      const rec = { status: 'ACTIVATED' as const, storeName: storeName.trim(), key: inputKey.trim().toUpperCase(), installedAtMs: getInstallEpochMs() };
-      saveStoredLicense(rec);
+    if (await validateLicense(storeName, hardwareId, inputKey)) {
+      // ADR-002: persist HWID with the record — SQLite restore refuses mismatches.
+      const rec = { status: 'ACTIVATED' as const, storeName: storeName.trim(), key: inputKey.trim(), hwid: hardwareId, installedAtMs: getInstallEpochMs() };
+      saveStoredLicense(rec); // localStorage + fire-and-forget SQLite meta mirror
       setStored(rec);
     } else {
       setActivationError(isAr ? 'مفتاح غير صالح لهذا المحل/الجهاز' : 'Clé invalide pour ce magasin / HWID');
@@ -200,9 +201,9 @@ export const LicenseManagerView: React.FC = () => {
                 <input
                   type="text"
                   value={inputKey}
-                  onChange={e => setInputKey(e.target.value.toUpperCase())}
-                  placeholder="AK-XXXX-XXXX-XXXX-XXXX"
-                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2.5 text-sm text-emerald-400 font-mono font-bold uppercase outline-none focus:border-emerald-500"
+                  onChange={e => setInputKey(e.target.value.trim())}
+                  placeholder="AK-…" maxLength={92}
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2.5 text-sm text-emerald-400 font-mono font-bold outline-none focus:border-emerald-500"
                 />
               </div>
               {activationError && <p className="text-[11px] text-rose-400">{activationError}</p>}

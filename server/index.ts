@@ -8,10 +8,17 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openBarakaDb, type BarakaDb } from '../src/db/sqlite.js';
+import { openBarakaDb, type BarakaDb, type ProductRow } from '../src/db/sqlite.js';
+import type {
+  LossReason, ImportProductRow, ShelfLabelItem, SupplierDeliveryReceipt, ClientSettlementPayload,
+} from '../src/types/index.js';
+import { buildThermalSettlementQuittance, buildThermalZReport } from '../src/hardware/escpos.js';
+import { isValidPinFormat } from '../src/core/security.js';
+import { preflightCsv } from '../src/core/csv-importer.js';
+import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 
 export function createApp(dbPath: string): { app: express.Express; baraka: BarakaDb } {
-  const baraka = openBarakaDb(dbPath);
+  let baraka = openBarakaDb(dbPath);
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
@@ -56,6 +63,368 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       const { reason, by } = req.body as { reason: string; by?: string };
       baraka.voidSale(req.params.id, reason, by ?? '');
       res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-006-MKT: auditable shrinkage ledger (La Casse / Démarque).
+  app.post('/api/losses', (req, res) => {
+    try {
+      const { product_id, qty_milli, reason, unit_cost_ct, total_loss_ct, notes, created_at } = req.body as {
+        product_id: number; qty_milli: number; reason: string;
+        unit_cost_ct?: number; total_loss_ct?: number; notes?: string | null; created_at?: string;
+      };
+      if (product_id === undefined || qty_milli === undefined || !reason) {
+        res.status(400).json({ error: 'body must be {product_id, qty_milli, reason, ...}' }); return;
+      }
+      const out = baraka.recordInventoryLoss({
+        product_id, qty_milli, reason: reason as LossReason,
+        unit_cost_ct, total_loss_ct, notes, created_at,
+      });
+      res.status(201).json(out);
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/losses', (req, res) => {
+    try {
+      const q = req.query as { reason?: string; product_id?: string; from?: string; to?: string; limit?: string };
+      res.json(baraka.getInventoryLosses({
+        reason: q.reason as LossReason | undefined,
+        product_id: q.product_id !== undefined ? Number(q.product_id) : undefined,
+        from: q.from, to: q.to,
+        limit: q.limit !== undefined ? Number(q.limit) : undefined,
+      }));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/perishables/expiring', (req, res) => {
+    try {
+      const days = req.query.days !== undefined ? Number(req.query.days) : 7;
+      res.json(baraka.getExpiringProducts(days));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-009-MKT: bulk catalog import — dry-run preflight + atomic commit.
+  app.post('/api/products/import-preview', (req, res) => {
+    try {
+      const { csvText } = req.body as { csvText: string };
+      if (typeof csvText !== 'string' || !csvText.trim()) {
+        res.status(400).json({ error: 'body must be {csvText: string}' }); return;
+      }
+      const report = preflightCsv(csvText);
+      res.json({
+        success: true,
+        summary: { total: report.summary.total, valid: report.summary.valid, errorsCount: report.summary.errorsCount },
+        preview: report.validRows.slice(0, 10),
+        errors: report.errors,
+      });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/products/import-execute', (req, res) => {
+    try {
+      const { rows, mode } = req.body as { rows: ImportProductRow[]; mode?: 'INSERT_ONLY' | 'UPSERT' };
+      if (!Array.isArray(rows)) { res.status(400).json({ error: 'body must be {rows: [], mode?}' }); return; }
+      const out = baraka.importProductsBatch(rows, mode ?? 'UPSERT');
+      res.json({ success: true, ...out });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-010-MKT: shelf-edge labels (A4 sheets + 80mm thermal strips).
+  const labelItemsFor = (ids: number[]): ShelfLabelItem[] => {
+    const get = baraka.db.prepare('SELECT * FROM products WHERE id = ?');
+    return ids.map(id => {
+      const p = get.get(id) as ProductRow | undefined;
+      if (!p) throw new Error(`[labels] product not found: ${id}`);
+      if (p.tva_rate !== 0 && p.tva_rate !== 9 && p.tva_rate !== 19) {
+        throw new Error(`[labels] illegal TVA rate on product ${id}: ${p.tva_rate}`);
+      }
+      return {
+        id: p.id, barcode: p.barcode, nameFr: p.name_fr, nameAr: p.name_ar || undefined,
+        sellPriceCt: p.sell_price_ct, unit: p.unit, isScale: p.is_scale === 1,
+        scaleCode: p.scale_item_code ?? undefined, tvaRate: p.tva_rate,
+        category: p.category_id || undefined,
+      } satisfies ShelfLabelItem;
+    });
+  };
+
+  app.post('/api/labels/preview-html', (req, res) => {
+    try {
+      const { productIds, storeName } = req.body as { productIds: number[]; storeName?: string };
+      if (!Array.isArray(productIds) || productIds.length === 0) {
+        res.status(400).json({ error: 'body must be {productIds: number[], storeName?}' }); return;
+      }
+      res.json({ html: generateA4LabelsHtml(labelItemsFor(productIds), { storeName }) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/labels/print-thermal', (req, res) => {
+    try {
+      const { productIds, storeName } = req.body as { productIds: number[]; storeName?: string };
+      if (!Array.isArray(productIds) || productIds.length === 0) {
+        res.status(400).json({ error: 'body must be {productIds: number[], storeName?}' }); return;
+      }
+      const buf = generateThermal80mmLabelsEscPos(labelItemsFor(productIds), storeName);
+      // Same spool as /api/raw-print (shop thermal printer lane).
+      fs.mkdirSync(path.resolve('data'), { recursive: true });
+      fs.appendFileSync(path.resolve('data', 'raw-print-spool.bin'), Buffer.from(buf));
+      res.json({ success: true, count: productIds.length, bytes: buf.length });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-011-MKT: supplier BL receiving — atomic stock influx + debt.
+  app.post('/api/purchases/receive', (req, res) => {
+    try {
+      const payload = req.body as SupplierDeliveryReceipt;
+      if (!payload || typeof payload.supplierId !== 'number' || !Array.isArray(payload.items)) {
+        res.status(400).json({ error: 'body must be {supplierId, items[], paidAmountCt, ...}' }); return;
+      }
+      res.status(201).json({ success: true, ...baraka.receiveSupplierDelivery(payload) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/suppliers/:id/purchases', (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const limit = req.query.limit !== undefined ? Number(req.query.limit) : undefined;
+      res.json(baraka.getSupplierPurchases(id, limit));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/suppliers/:id/statement', (req, res) => {
+    try {
+      res.json(baraka.getSupplierBalanceStatement(Number(req.params.id)));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-012-MKT: Carnet de Dette — atomic settlement + thermal quittance.
+  app.post('/api/clients/:id/settle', (req, res) => {
+    try {
+      const { amountCt, paymentMethod, notes, cashierName } = req.body as {
+        amountCt: number; paymentMethod?: ClientSettlementPayload['paymentMethod'];
+        notes?: string; cashierName?: string;
+      };
+      if (typeof amountCt !== 'number') {
+        res.status(400).json({ error: 'body must be {amountCt, paymentMethod?, notes?, cashierName?}' }); return;
+      }
+      res.status(201).json({
+        success: true,
+        ...baraka.settleClientCredit({ clientId: Number(req.params.id), amountCt, paymentMethod, notes, cashierName }),
+      });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/clients/:id/settle-and-print', (req, res) => {
+    try {
+      const { amountCt, paymentMethod, notes, cashierName, storeName } = req.body as {
+        amountCt: number; paymentMethod?: ClientSettlementPayload['paymentMethod'];
+        notes?: string; cashierName?: string; storeName?: string;
+      };
+      if (typeof amountCt !== 'number') {
+        res.status(400).json({ error: 'body must be {amountCt, ...}' }); return;
+      }
+      const settlement = baraka.settleClientCredit({
+        clientId: Number(req.params.id), amountCt, paymentMethod, notes, cashierName,
+      });
+      const buf = buildThermalSettlementQuittance(
+        { ...settlement, date: settlement.createdAt }, storeName ?? 'BARAKA MARKET');
+      fs.mkdirSync(path.resolve('data'), { recursive: true });
+      fs.appendFileSync(path.resolve('data', 'raw-print-spool.bin'), Buffer.from(buf));
+      res.status(201).json({ success: true, settlement, bytes: buf.length });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/clients/:id/statement', (req, res) => {
+    try {
+      res.json(baraka.getClientStatement(Number(req.params.id)));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-013-MKT: cash session lifecycle + Z closure.
+  app.post('/api/cash/open', (req, res) => {
+    try {
+      const { cashierName, openingFloatCt } = req.body as { cashierName: string; openingFloatCt: number };
+      if (typeof cashierName !== 'string' || typeof openingFloatCt !== 'number') {
+        res.status(400).json({ error: 'body must be {cashierName, openingFloatCt}' }); return;
+      }
+      res.status(201).json({ success: true, ...baraka.openCashSession(cashierName, openingFloatCt) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/cash/movement', (req, res) => {
+    try {
+      const { sessionId, movementType, amountCt, reason } = req.body as {
+        sessionId: string; movementType: 'DEPOSIT' | 'WITHDRAWAL' | 'EXPENSE';
+        amountCt: number; reason: string;
+      };
+      if (typeof sessionId !== 'string' || typeof amountCt !== 'number' || typeof reason !== 'string') {
+        res.status(400).json({ error: 'body must be {sessionId, movementType, amountCt, reason}' }); return;
+      }
+      res.status(201).json({ success: true, ...baraka.recordCashMovement(sessionId, movementType, amountCt, reason) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/cash/active', (_req, res) => {
+    res.json(baraka.getActiveCashSession());
+  });
+
+  app.post('/api/cash/close-and-z', (req, res) => {
+    try {
+      const { sessionId, countedCashCt, notes, storeName, printReceipt } = req.body as {
+        sessionId: string; countedCashCt: number; notes?: string;
+        storeName?: string; printReceipt?: boolean;
+      };
+      if (typeof sessionId !== 'string' || typeof countedCashCt !== 'number') {
+        res.status(400).json({ error: 'body must be {sessionId, countedCashCt, notes?, printReceipt?}' }); return;
+      }
+      const z = baraka.closeCashSessionAndGenerateZ(sessionId, countedCashCt, notes);
+      let bytes = 0;
+      if (printReceipt !== false) {
+        const buf = buildThermalZReport(z, storeName ?? 'BARAKA MARKET');
+        fs.mkdirSync(path.resolve('data'), { recursive: true });
+        fs.appendFileSync(path.resolve('data', 'raw-print-spool.bin'), Buffer.from(buf));
+        bytes = buf.length;
+      }
+      res.status(201).json({ success: true, bytes, ...z });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-014-MKT: manager override PIN gate + void audit trail.
+  app.post('/api/security/verify-pin', (req, res) => {
+    try {
+      const { pin } = req.body as { pin: string };
+      if (typeof pin !== 'string') { res.status(400).json({ error: 'body must be {pin}' }); return; }
+      res.json({ success: baraka.verifyManagerPinDb(pin) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/security/set-pin', (req, res) => {
+    try {
+      const { currentPin, newPin } = req.body as { currentPin: string; newPin: string };
+      if (typeof currentPin !== 'string' || typeof newPin !== 'string') {
+        res.status(400).json({ error: 'body must be {currentPin, newPin}' }); return;
+      }
+      if (!baraka.verifyManagerPinDb(currentPin)) {
+        res.status(403).json({ error: 'current PIN rejected' }); return;
+      }
+      if (!isValidPinFormat(newPin)) {
+        res.status(400).json({ error: 'new PIN must be 4-8 numeric digits' }); return;
+      }
+      baraka.setManagerPin(newPin);
+      res.json({ success: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/security/void-log', (req, res) => {
+    try {
+      const entry = req.body as {
+        actionType: 'LINE_VOID' | 'CART_CLEAR' | 'MANUAL_DISCOUNT' | 'DRAWER_KICK';
+        productId?: number; productName?: string; amountCt: number;
+        cashierName: string; managerApprovedBy?: string; reason: string; sessionId?: string;
+      };
+      if (!entry || typeof entry.actionType !== 'string' || typeof entry.amountCt !== 'number') {
+        res.status(400).json({ error: 'body must be VoidLogEntry' }); return;
+      }
+      res.status(201).json({ success: true, ...baraka.recordVoidLog(entry) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/security/void-log', (req, res) => {
+    try {
+      const q = req.query as { fromDate?: string; toDate?: string; reason?: string; limit?: string };
+      res.json(baraka.getVoidLogs({
+        fromDate: q.fromDate, toDate: q.toDate, reason: q.reason,
+        limit: q.limit !== undefined ? Number(q.limit) : undefined,
+      }));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/security/void-summary', (req, res) => {
+    try {
+      const q = req.query as { sessionId?: string };
+      res.json(baraka.getVoidSummaryBySession(q.sessionId));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // ADR-015-MKT: online backup + disaster recovery.
+  app.post('/api/backups/create', (req, res) => {
+    try {
+      const { label } = (req.body ?? {}) as { label?: string };
+      res.status(201).json({ success: true, ...baraka.createDatabaseBackup({ label }) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/backups', (_req, res) => {
+    res.json(baraka.listDatabaseBackups());
+  });
+
+  app.post('/api/backups/verify', (req, res) => {
+    try {
+      const { backupPath } = req.body as { backupPath: string };
+      if (typeof backupPath !== 'string') {
+        res.status(400).json({ error: 'body must be {backupPath}' }); return;
+      }
+      res.json(baraka.validateBackupForRestore(backupPath));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/backups/restore', (req, res) => {
+    try {
+      const { backupPath } = req.body as { backupPath: string };
+      if (typeof backupPath !== 'string') {
+        res.status(400).json({ error: 'body must be {backupPath}' }); return;
+      }
+      const result = baraka.restoreBackupSafely(backupPath);
+      // The restore closed the live handle; re-provision a fresh connection.
+      baraka = openBarakaDb(dbPath);
+      res.json(result);
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

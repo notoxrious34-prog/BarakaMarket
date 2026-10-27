@@ -10,14 +10,22 @@
  * @module db/sqlite
  */
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertIntegerCentimes } from '../core/money.js';
 import { calculateTimbreFiscalCt, type SaleTotalsCt } from '../core/fiscal.centimes.js';
 import { GENESIS_PREV_HASH as GENESIS_Z_HASH, computeZHash as computeZHashDb } from '../core/zreport.js';
-import type { PaymentMethod, TVARate } from '../types';
+import type {
+  PaymentMethod, TVARate, LossReason, InventoryLoss, ImportProductRow, BatchImportResult,
+  SupplierDeliveryReceipt, DeliveryReceiptResult, SupplierStatement,
+  ClientSettlementPayload, ClientSettlementResult, CreditEligibility,
+  CashMovementType, CashSessionRecord, CashSessionLiveStatus, ZClosureResult,
+  ProtectedActionType, VoidLogEntry, VoidLogRecord, VoidSummary,
+  BackupMetadata, BackupValidationReport, RestoreResult,
+} from '../types';
+import { createPinHash, verifyPin, MANAGER_PIN_META_KEY } from '../core/security.js';
 
 export type Unit = 'PIECE' | 'KG' | 'LITRE';
 
@@ -79,6 +87,62 @@ function assertTvaRate(v: number): asserts v is TVARate {
   }
 }
 
+export interface ProductBarcodeRecord {
+  id: number;
+  product_id: number;
+  barcode: string;
+  multiplier: number;
+  pack_name: string | null;
+  price_override_ct: number | null;
+  created_at: string;
+}
+
+export interface ProductBarcodeResolution {
+  product: ProductRow;
+  isPack: boolean;
+  multiplier: number;
+  packName?: string;
+  effectivePriceCt: number;
+  barcode: string;
+}
+
+const LOSS_REASONS: readonly LossReason[] = ['EXPIRED', 'BROKEN', 'DAMAGED', 'THEFT', 'INTERNAL_USE', 'AUTRE'];
+
+function assertLossReason(v: string): asserts v is LossReason {
+  if (!(LOSS_REASONS as readonly string[]).includes(v)) {
+    throw new Error(`[db] invalid loss reason: ${v} (expected ${LOSS_REASONS.join('|')})`);
+  }
+}
+
+export interface RecordLossInput {
+  product_id: number;
+  qty_milli: number;
+  reason: LossReason;
+  unit_cost_ct?: number;
+  total_loss_ct?: number;
+  notes?: string | null;
+  created_at?: string;
+}
+
+export interface LossQuery {
+  reason?: LossReason;
+  product_id?: number;
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+/** ADR-004-MKT: price_override_ct wins; else unit sell price x multiplier. */
+export function effectivePackPriceCt(sellPriceCt: number, multiplier: number, priceOverrideCt?: number | null): number {
+  assertIntegerCentimes(sellPriceCt, 'sellPriceCt');
+  if (!Number.isInteger(multiplier) || multiplier < 1) throw new Error(`[db] multiplier must be >= 1 (got ${multiplier})`);
+  if (priceOverrideCt !== undefined && priceOverrideCt !== null) {
+    assertIntegerCentimes(priceOverrideCt, 'priceOverrideCt');
+    return priceOverrideCt;
+  }
+  return sellPriceCt * multiplier;
+}
+
 function schemaSql(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   return fs.readFileSync(path.join(here, '..', '..', 'db', 'schema.sql'), 'utf8');
@@ -90,6 +154,46 @@ export interface BarakaDb {
   pragmas(): { journal_mode: string; foreign_keys: number };
   upsertProduct(p: ProductRow): void;
   getProduct(id: number): ProductRow;
+  /** ADR-004-MKT: alternate barcodes + multipack/colisage labels. */
+  addProductBarcode(input: { product_id: number; barcode: string; multiplier?: number; pack_name?: string | null; price_override_ct?: number | null }): number;
+  getProductBarcodes(productId: number): ProductBarcodeRecord[];
+  deleteProductBarcode(id: number): void;
+  resolveBarcode(barcode: string): ProductBarcodeResolution | null;
+  /** ADR-006-MKT: auditable shrinkage ledger + expiry surveillance. */
+  recordInventoryLoss(input: RecordLossInput): { id: number; stock_milli: number };
+  getInventoryLosses(q?: LossQuery): InventoryLoss[];
+  getExpiringProducts(daysThreshold: number): ProductRow[];
+  /** ADR-009-MKT: atomic bulk catalog import (INSERT_ONLY skips, UPSERT merges). */
+  importProductsBatch(rows: ImportProductRow[], mode: 'INSERT_ONLY' | 'UPSERT'): BatchImportResult;
+  /** ADR-011-MKT: supplier BL receiving — atomic stock influx + cost + debt. */
+  receiveSupplierDelivery(payload: SupplierDeliveryReceipt): DeliveryReceiptResult;
+  getSupplierPurchases(supplierId: number, limit?: number): Record<string, unknown>[];
+  getSupplierBalanceStatement(supplierId: number): SupplierStatement;
+  /** ADR-012-MKT: atomic Carnet de Dette settlement + credit ceiling gate. */
+  settleClientCredit(payload: ClientSettlementPayload): ClientSettlementResult;
+  checkCreditEligibility(clientId: number, saleTotalTtcCt: number): CreditEligibility;
+  getClientStatement(clientId: number): {
+    client: Record<string, unknown>;
+    settlements: Record<string, unknown>[];
+    creditSales: Record<string, unknown>[];
+  };
+  /** ADR-013-MKT: cash session lifecycle + Z closure. */
+  openCashSession(cashierName: string, openingFloatCt: number): CashSessionRecord;
+  recordCashMovement(sessionId: string, type: CashMovementType, amountCt: number, reason: string): Record<string, unknown>;
+  getCashSessionStatus(sessionId: string): CashSessionLiveStatus;
+  getActiveCashSession(): CashSessionLiveStatus | null;
+  closeCashSessionAndGenerateZ(sessionId: string, countedCashCt: number, notes?: string): ZClosureResult;
+  /** ADR-014-MKT: manager override PIN + append-only void audit. */
+  recordVoidLog(entry: VoidLogEntry): VoidLogRecord;
+  getVoidLogs(filters?: { fromDate?: string; toDate?: string; reason?: string; limit?: number }): VoidLogRecord[];
+  getVoidSummaryBySession(sessionId?: string): VoidSummary;
+  setManagerPin(newPin: string): void;
+  verifyManagerPinDb(inputPin: string): boolean;
+  /** ADR-015-MKT: online backup + disaster recovery. */
+  createDatabaseBackup(options?: { destinationDir?: string; label?: string }): BackupMetadata;
+  listDatabaseBackups(): BackupMetadata[];
+  validateBackupForRestore(backupPath: string): BackupValidationReport;
+  restoreBackupSafely(backupPath: string): RestoreResult;
   nextInvoiceNumber(year: number): string;
   nextTicketNumber(year: number): string;
   recordSale(header: SaleHeaderInput, items: SaleItemInput[]): { id: string; invoice_number: string; ticket_number: string };
@@ -166,6 +270,15 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     'ALTER TABLE z_reports ADD COLUMN first_invoice_number TEXT NOT NULL DEFAULT \'\'',
     'ALTER TABLE z_reports ADD COLUMN last_invoice_number TEXT NOT NULL DEFAULT \'\'',
     'ALTER TABLE z_reports ADD COLUMN prev_hash TEXT NOT NULL DEFAULT \'\'',
+    // ADR-014-MKT: manager-override audit columns on pre-existing void_log.
+    'ALTER TABLE void_log ADD COLUMN action_type TEXT',
+    'ALTER TABLE void_log ADD COLUMN product_id INTEGER',
+    'ALTER TABLE void_log ADD COLUMN product_name TEXT',
+    'ALTER TABLE void_log ADD COLUMN amount_ct INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE void_log ADD COLUMN cashier_name TEXT',
+    'ALTER TABLE void_log ADD COLUMN manager_name TEXT',
+    'ALTER TABLE void_log ADD COLUMN session_id TEXT',
+    'ALTER TABLE void_log ADD COLUMN created_at TEXT',
   ]) {
     try { db.exec(ddl); } catch { /* column already exists */ }
   }
@@ -235,6 +348,798 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const row = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as ProductRow | undefined;
       if (!row) throw new Error(`[db] product not found: ${id}`);
       return row;
+    },
+
+    addProductBarcode(input: { product_id: number; barcode: string; multiplier?: number; pack_name?: string | null; price_override_ct?: number | null }): number {
+      const multiplier = input.multiplier ?? 1;
+      const code = input.barcode.trim();
+      if (!code) throw new Error('[db] barcode must not be empty');
+      if (!Number.isInteger(multiplier) || multiplier < 1) throw new Error(`[db] multiplier must be >= 1 (got ${multiplier})`);
+      if (input.price_override_ct !== undefined && input.price_override_ct !== null) {
+        assertIntegerCentimes(input.price_override_ct, 'price_override_ct');
+      }
+      const res = db.prepare(
+        `INSERT INTO product_barcodes (product_id, barcode, multiplier, pack_name, price_override_ct)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(input.product_id, code, multiplier, input.pack_name ?? null, input.price_override_ct ?? null);
+      return Number(res.lastInsertRowid);
+    },
+
+    getProductBarcodes(productId: number): ProductBarcodeRecord[] {
+      return db.prepare('SELECT * FROM product_barcodes WHERE product_id = ? ORDER BY id').all(productId) as unknown as ProductBarcodeRecord[];
+    },
+
+    deleteProductBarcode(id: number): void {
+      db.prepare('DELETE FROM product_barcodes WHERE id = ?').run(id);
+    },
+
+    resolveBarcode(barcode: string): ProductBarcodeResolution | null {
+      const code = barcode.trim();
+      if (!code) return null;
+      const prod = db.prepare('SELECT * FROM products WHERE barcode = ?').get(code) as ProductRow | undefined;
+      if (prod) {
+        return { product: prod, isPack: false, multiplier: 1, effectivePriceCt: prod.sell_price_ct, barcode: code };
+      }
+      const alias = db.prepare('SELECT * FROM product_barcodes WHERE barcode = ?').get(code) as ProductBarcodeRecord | undefined;
+      if (!alias) return null;
+      const parent = db.prepare('SELECT * FROM products WHERE id = ?').get(alias.product_id) as ProductRow | undefined;
+      if (!parent) return null;
+      return {
+        product: parent,
+        isPack: alias.multiplier > 1,
+        multiplier: alias.multiplier,
+        packName: alias.pack_name ?? undefined,
+        effectivePriceCt: effectivePackPriceCt(parent.sell_price_ct, alias.multiplier, alias.price_override_ct),
+        barcode: code,
+      };
+    },
+
+    recordInventoryLoss(input: RecordLossInput): { id: number; stock_milli: number } {
+      assertLossReason(input.reason);
+      if (!Number.isInteger(input.qty_milli) || input.qty_milli <= 0) {
+        throw new Error(`[db] loss qty_milli must be a positive integer (got ${input.qty_milli})`);
+      }
+      const unitCostCt = input.unit_cost_ct ?? 0;
+      assertIntegerCentimes(unitCostCt, 'unit_cost_ct');
+      if (unitCostCt < 0) throw new Error(`[db] unit_cost_ct must be >= 0 (got ${unitCostCt})`);
+      const totalLossCt = input.total_loss_ct ?? Math.round((unitCostCt * input.qty_milli) / 1000);
+      assertIntegerCentimes(totalLossCt, 'total_loss_ct');
+      // BEGIN IMMEDIATE: ledger row + stock decrement commit atomically.
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const prod = db.prepare('SELECT stock_milli FROM products WHERE id = ?').get(input.product_id) as
+          | { stock_milli: number }
+          | undefined;
+        if (!prod) throw new Error(`[db] loss target product not found: ${input.product_id}`);
+        if (input.qty_milli > prod.stock_milli) {
+          throw new Error(`[db] loss qty ${input.qty_milli} exceeds stock ${prod.stock_milli} (product ${input.product_id})`);
+        }
+        const res = db.prepare(
+          `INSERT INTO inventory_losses (product_id, qty_milli, reason, unit_cost_ct, total_loss_ct, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          input.product_id, input.qty_milli, input.reason, unitCostCt, totalLossCt,
+          input.notes ?? null, input.created_at ?? new Date().toISOString(),
+        );
+        db.prepare('UPDATE products SET stock_milli = stock_milli - ? WHERE id = ?').run(input.qty_milli, input.product_id);
+        db.exec('COMMIT');
+        const row = db.prepare('SELECT stock_milli FROM products WHERE id = ?').get(input.product_id) as { stock_milli: number };
+        return { id: Number(res.lastInsertRowid), stock_milli: row.stock_milli };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    getInventoryLosses(q?: LossQuery): InventoryLoss[] {
+      const where: string[] = [];
+      const args: (string | number)[] = [];
+      if (q?.reason) { assertLossReason(q.reason); where.push('reason = ?'); args.push(q.reason); }
+      if (q?.product_id !== undefined) { where.push('product_id = ?'); args.push(q.product_id); }
+      if (q?.from) { where.push('created_at >= ?'); args.push(q.from); }
+      if (q?.to) { where.push('created_at <= ?'); args.push(q.to); }
+      const limit = q?.limit ?? 200;
+      if (!Number.isInteger(limit) || limit <= 0) throw new Error(`[db] loss query limit must be > 0 (got ${limit})`);
+      const sql = `SELECT * FROM inventory_losses${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC, id DESC LIMIT ?`;
+      return db.prepare(sql).all(...args, limit) as unknown as InventoryLoss[];
+    },
+
+    getExpiringProducts(daysThreshold: number): ProductRow[] {
+      if (!Number.isInteger(daysThreshold) || daysThreshold < 0) {
+        throw new Error(`[db] daysThreshold must be a non-negative integer (got ${daysThreshold})`);
+      }
+      return db.prepare(
+        `SELECT * FROM products
+          WHERE has_expiry = 1 AND expiry_date IS NOT NULL AND expiry_date <> ''
+            AND date(expiry_date) <= date('now', '+' || ? || ' days')
+          ORDER BY date(expiry_date) ASC`,
+      ).all(daysThreshold) as unknown as ProductRow[];
+    },
+
+    importProductsBatch(rows: ImportProductRow[], mode: 'INSERT_ONLY' | 'UPSERT'): BatchImportResult {
+      if (mode !== 'INSERT_ONLY' && mode !== 'UPSERT') throw new Error(`[db] import mode must be INSERT_ONLY|UPSERT (got ${mode})`);
+      const out: BatchImportResult = { inserted: 0, updated: 0, failed: 0 };
+      if (rows.length === 0) return out;
+      const assertUnit = (u: string): void => {
+        if (u !== 'PIECE' && u !== 'KG' && u !== 'LITRE') throw new Error(`[db] import unit must be PIECE|KG|LITRE (got ${u})`);
+      };
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const exists = db.prepare('SELECT id FROM products WHERE barcode = ?');
+        const insIgnore = db.prepare(
+          `INSERT OR IGNORE INTO products (barcode, name_fr, buy_price_ct, sell_price_ct, tva_rate, stock_milli, category_id, unit)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        // Adapted to the real schema (sell_price_ct / name_fr / category_id).
+        const upsert = db.prepare(
+          `INSERT INTO products (barcode, name_fr, buy_price_ct, sell_price_ct, tva_rate, stock_milli, category_id, unit)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (barcode) DO UPDATE SET
+             name_fr = excluded.name_fr,
+             buy_price_ct = excluded.buy_price_ct,
+             sell_price_ct = excluded.sell_price_ct,
+             tva_rate = excluded.tva_rate,
+             stock_milli = products.stock_milli + excluded.stock_milli,
+             category_id = excluded.category_id,
+             unit = excluded.unit`,
+        );
+        for (const r of rows) {
+          try {
+            const code = r.barcode.trim();
+            if (!code) throw new Error('barcode must not be empty');
+            assertTvaRate(r.tvaRate);
+            assertUnit(r.unit);
+            assertIntegerCentimes(r.buyPriceCt, 'buyPriceCt');
+            assertIntegerCentimes(r.priceCt, 'priceCt');
+            assertIntegerCentimes(r.stockMilli, 'stockMilli');
+            if (r.buyPriceCt < 0 || r.priceCt < 0 || r.stockMilli < 0) throw new Error('import money/qty must be >= 0');
+            const args = [code, r.name.trim(), r.buyPriceCt, r.priceCt, r.tvaRate, r.stockMilli, r.category.trim() || 'Général', r.unit] as const;
+            if (mode === 'UPSERT') {
+              const had = exists.get(code) !== undefined;
+              upsert.run(...args);
+              if (had) out.updated += 1; else out.inserted += 1;
+            } else {
+              const res = insIgnore.run(...args);
+              if (Number(res.changes) === 1) out.inserted += 1;
+              else out.failed += 1;
+            }
+          } catch (e) {
+            if (mode === 'UPSERT') throw e;
+            out.failed += 1;
+          }
+        }
+        db.exec('COMMIT');
+        return out;
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    receiveSupplierDelivery(payload: SupplierDeliveryReceipt): DeliveryReceiptResult {
+      if (!Array.isArray(payload.items) || payload.items.length === 0) {
+        throw new Error('[db] delivery must contain at least one item');
+      }
+      const method = payload.paymentMethod ?? 'ESPECES';
+      if (method !== 'ESPECES' && method !== 'VIREMENT' && method !== 'CHEQUE') {
+        throw new Error(`[db] delivery payment method must be ESPECES|VIREMENT|CHEQUE (got ${method})`);
+      }
+      assertIntegerCentimes(payload.paidAmountCt, 'paidAmountCt');
+      if (payload.paidAmountCt < 0) throw new Error('[db] paidAmountCt must be >= 0');
+      const date = payload.date ?? new Date().toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(payload.supplierId) as
+          | { id: number; name: string }
+          | undefined;
+        if (!supplier) throw new Error(`[db] supplier not found: ${payload.supplierId}`);
+        // Line math in integer centimes: HT per base unit x units; TVA rounds half-up.
+        let totalHt = 0, totalTva = 0;
+        const lines: {
+          product: ProductRow; units: number; qtyMilli: number; rate: TVARate;
+          lineHt: number; lineTva: number; lineTtc: number; tvaRate: TVARate;
+        }[] = [];
+        for (const it of payload.items) {
+          const mult = it.packMultiplier ?? 1;
+          if (!Number.isInteger(mult) || mult < 1) throw new Error(`[db] packMultiplier must be >= 1 (got ${mult})`);
+          if (!Number.isInteger(it.packCount) || it.packCount <= 0) {
+            throw new Error(`[db] packCount must be a positive integer (got ${it.packCount})`);
+          }
+          assertIntegerCentimes(it.unitCostCt, 'unitCostCt');
+          if (it.unitCostCt < 0) throw new Error('[db] unitCostCt must be >= 0');
+          const product = db.prepare('SELECT * FROM products WHERE id = ?').get(it.productId) as ProductRow | undefined;
+          if (!product) throw new Error(`[db] delivery product not found: ${it.productId}`);
+          const rate: TVARate = it.tvaRate ?? product.tva_rate;
+          assertTvaRate(rate);
+          const units = it.packCount * mult;
+          const expectedTotal = units * it.unitCostCt;
+          if (it.totalCostCt !== undefined) {
+            assertIntegerCentimes(it.totalCostCt, 'totalCostCt');
+            if (it.totalCostCt !== expectedTotal) {
+              throw new Error(`[db] totalCostCt ${it.totalCostCt} != packCount x multiplier x unitCost ${expectedTotal}`);
+            }
+          }
+          if (it.updateSellPriceCt !== undefined) assertIntegerCentimes(it.updateSellPriceCt, 'updateSellPriceCt');
+          const lineHt = expectedTotal;
+          const lineTva = Math.round((lineHt * rate) / 100);
+          lines.push({ product, units, qtyMilli: units * 1000, rate, lineHt, lineTva, lineTtc: lineHt + lineTva, tvaRate: rate });
+          totalHt += lineHt;
+          totalTva += lineTva;
+        }
+        const totalTtc = totalHt + totalTva;
+        if (payload.paidAmountCt > totalTtc) {
+          throw new Error(`[db] paidAmountCt ${payload.paidAmountCt} exceeds delivery total ${totalTtc}`);
+        }
+        const remaining = totalTtc - payload.paidAmountCt;
+        const purchaseId = randomUUID();
+        const invoiceNumber = payload.invoiceRef?.trim() || `BL-${new Date(date).getFullYear()}-${purchaseId.slice(0, 8).toUpperCase()}`;
+        db.prepare(
+          `INSERT INTO purchases (id, invoice_number, supplier_id, supplier_name, total_ht_ct, total_tva_ct,
+            total_ttc_ct, payment_method, amount_paid_ct, amount_due_ct, date, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          purchaseId, invoiceNumber, payload.supplierId, supplier.name, totalHt, totalTva,
+          totalTtc, remaining === 0 ? method : 'CREDIT', payload.paidAmountCt, remaining, date,
+          payload.notes ?? null,
+        );
+        const insItem = db.prepare(
+          `INSERT INTO purchase_items (purchase_id, product_id, barcode, name_fr, name_ar, qty_milli, unit,
+            unit_buy_price_ht_ct, tva_rate, unit_sell_price_ttc_ct, line_ht_ct, line_ttc_ct)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        const updProduct = db.prepare(
+          `UPDATE products SET stock_milli = stock_milli + ?, buy_price_ct = ?,
+             sell_price_ct = COALESCE(?, sell_price_ct) WHERE id = ?`,
+        );
+        for (let k = 0; k < payload.items.length; k++) {
+          const it = payload.items[k];
+          const ln = lines[k];
+          insItem.run(
+            purchaseId, ln.product.id, ln.product.barcode, ln.product.name_fr, ln.product.name_ar,
+            ln.qtyMilli, ln.product.unit, it.unitCostCt, ln.tvaRate,
+            it.updateSellPriceCt ?? ln.product.sell_price_ct, ln.lineHt, ln.lineTtc,
+          );
+          updProduct.run(ln.qtyMilli, it.unitCostCt, it.updateSellPriceCt ?? null, ln.product.id);
+        }
+        if (payload.paidAmountCt > 0) {
+          db.prepare(
+            `INSERT INTO supplier_payments (id, supplier_id, supplier_name, amount_ct, payment_method, reference, date, note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(randomUUID(), payload.supplierId, supplier.name, payload.paidAmountCt, method, invoiceNumber, date, payload.notes ?? null);
+        }
+        if (remaining > 0) {
+          db.prepare('UPDATE suppliers SET balance_due_ct = balance_due_ct + ? WHERE id = ?').run(remaining, payload.supplierId);
+        }
+        db.exec('COMMIT');
+        return {
+          purchaseId, totalCostCt: totalTtc, paidAmountCt: payload.paidAmountCt,
+          remainingDebtCt: remaining, itemsProcessed: lines.length,
+        };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    getSupplierPurchases(supplierId: number, limit?: number): Record<string, unknown>[] {
+      const lim = limit ?? 50;
+      if (!Number.isInteger(lim) || lim <= 0) throw new Error(`[db] purchases limit must be > 0 (got ${lim})`);
+      return db.prepare(
+        'SELECT * FROM purchases WHERE supplier_id = ? ORDER BY date DESC, id DESC LIMIT ?',
+      ).all(supplierId, lim) as unknown as Record<string, unknown>[];
+    },
+
+    getSupplierBalanceStatement(supplierId: number): SupplierStatement {
+      const supplier = db.prepare('SELECT * FROM suppliers WHERE id = ?').get(supplierId) as
+        | { id: number; name: string; balance_due_ct: number }
+        | undefined;
+      if (!supplier) throw new Error(`[db] supplier not found: ${supplierId}`);
+      const purchased = db.prepare('SELECT COALESCE(SUM(total_ttc_ct), 0) AS t FROM purchases WHERE supplier_id = ?').get(supplierId) as { t: number };
+      const paid = db.prepare('SELECT COALESCE(SUM(amount_ct), 0) AS t FROM supplier_payments WHERE supplier_id = ?').get(supplierId) as { t: number };
+      return {
+        supplierId: supplier.id, supplierName: supplier.name,
+        totalPurchasedCt: purchased.t, totalPaidCt: paid.t,      outstandingCt: supplier.balance_due_ct,
+      };
+    },
+
+    settleClientCredit(payload: ClientSettlementPayload): ClientSettlementResult {
+      assertIntegerCentimes(payload.amountCt, 'amountCt');
+      if (payload.amountCt <= 0) throw new Error('[db] settlement amount must be > 0');
+      const method: PaymentMethod = payload.paymentMethod ?? 'ESPECES';
+      if (method !== 'ESPECES' && method !== 'CIB' && method !== 'DAHABIYA' && method !== 'CREDIT') {
+        throw new Error(`[db] settlement method must be ESPECES|CIB|DAHABIYA|CREDIT (got ${method})`);
+      }
+      const date = payload.date ?? new Date().toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const client = db.prepare(
+          'SELECT id, name, phone, credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = ?',
+        ).get(payload.clientId) as
+          | { id: number; name: string; phone: string; credit_balance_ct: number; max_credit_limit_ct: number }
+          | undefined;
+        if (!client) throw new Error(`[db] CLIENT_NOT_FOUND: ${payload.clientId}`);
+        // Art.136: cash (ESPECES) inflows >= 50 DZD carry stamp duty.
+        const timbreCt = calculateTimbreFiscalCt(payload.amountCt, method, timbreProfile());
+        const collectedCt = payload.amountCt + timbreCt;
+        const newBalance = client.credit_balance_ct - payload.amountCt;
+        db.prepare('UPDATE clients SET credit_balance_ct = ? WHERE id = ?').run(newBalance, client.id);
+        const id = randomUUID();
+        const year = parseInt(date.slice(0, 4), 10);
+        const receipt = `Q-${year}-${pad6(bumpSeq(db, 'Q', year))}`;
+        db.prepare(
+          `INSERT INTO client_settlements (id, client_id, client_name, amount_ct, payment_method,
+            timbre_ct, total_collected_ct, receipt_number, date, note)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          id, client.id, client.name, payload.amountCt, method,
+          timbreCt, collectedCt, receipt, date, payload.notes ?? null,
+        );
+        db.exec('COMMIT');
+        return {
+          settlementId: id, receiptNumber: receipt, clientId: client.id, clientName: client.name,
+          clientPhone: client.phone || undefined, previousBalanceCt: client.credit_balance_ct,
+          paidAmountCt: payload.amountCt, timbreCt, totalCollectedCt: collectedCt,
+          newBalanceCt: newBalance, paymentMethod: method,
+          cashierName: payload.cashierName, createdAt: date,
+        };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    checkCreditEligibility(clientId: number, saleTotalTtcCt: number): CreditEligibility {
+      assertIntegerCentimes(saleTotalTtcCt, 'saleTotalTtcCt');
+      if (saleTotalTtcCt < 0) throw new Error('[db] saleTotalTtcCt must be >= 0');
+      const client = db.prepare(
+        'SELECT credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = ?',
+      ).get(clientId) as { credit_balance_ct: number; max_credit_limit_ct: number } | undefined;
+      if (!client) throw new Error(`[db] CLIENT_NOT_FOUND: ${clientId}`);
+      const projected = client.credit_balance_ct + saleTotalTtcCt;
+      if (client.max_credit_limit_ct > 0 && projected > client.max_credit_limit_ct) {
+        return {
+          allowed: false, currentBalanceCt: client.credit_balance_ct,
+          maxCreditCt: client.max_credit_limit_ct, projectedBalanceCt: projected,
+          reason: 'CREDIT_LIMIT_EXCEEDED',
+        };
+      }
+      return {
+        allowed: true, currentBalanceCt: client.credit_balance_ct,
+        maxCreditCt: client.max_credit_limit_ct, projectedBalanceCt: projected,
+      };
+    },
+
+    getClientStatement(clientId: number) {
+      const client = db.prepare('SELECT * FROM clients WHERE id = ?').get(clientId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!client) throw new Error(`[db] CLIENT_NOT_FOUND: ${clientId}`);
+      const settlements = db.prepare(
+        'SELECT * FROM client_settlements WHERE client_id = ? ORDER BY date DESC, id DESC',
+      ).all(clientId) as unknown as Record<string, unknown>[];
+      const creditSales = db.prepare(
+        "SELECT * FROM sales WHERE client_id = ? AND payment_method = 'CREDIT' ORDER BY created_at DESC, id DESC",
+      ).all(clientId) as unknown as Record<string, unknown>[];
+      return { client, settlements, creditSales };
+    },
+
+    openCashSession(cashierName: string, openingFloatCt: number): CashSessionRecord {
+      const name = cashierName?.trim();
+      if (!name) throw new Error('[db] cashierName must be non-empty');
+      assertIntegerCentimes(openingFloatCt, 'openingFloatCt');
+      if (openingFloatCt < 0) throw new Error('[db] openingFloatCt must be >= 0');
+      const open = db.prepare("SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1").get() as
+        | { id: string }
+        | undefined;
+      if (open) throw new Error(`[db] cash session already OPEN: ${open.id}`);
+      const id = randomUUID();
+      const openedAt = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO cash_sessions (id, cashier_name, opened_at, opening_float_ct, status)
+         VALUES (?, ?, ?, ?, 'OPEN')`,
+      ).run(id, name, openedAt, openingFloatCt);
+      return {
+        id, cashierName: name, openedAt, openingFloatCt, status: 'OPEN',
+      };
+    },
+
+    recordCashMovement(
+      sessionId: string, type: CashMovementType, amountCt: number, reason: string,
+    ): Record<string, unknown> {
+      if (type !== 'DEPOSIT' && type !== 'WITHDRAWAL' && type !== 'EXPENSE') {
+        throw new Error(`[db] movement type must be DEPOSIT|WITHDRAWAL|EXPENSE (got ${type})`);
+      }
+      assertIntegerCentimes(amountCt, 'amountCt');
+      if (amountCt <= 0) throw new Error('[db] movement amount must be > 0');
+      if (!reason?.trim()) throw new Error('[db] movement reason must be non-empty');
+      const session = db.prepare('SELECT id, status FROM cash_sessions WHERE id = ?').get(sessionId) as
+        | { id: string; status: string }
+        | undefined;
+      if (!session) throw new Error(`[db] cash session not found: ${sessionId}`);
+      if (session.status !== 'OPEN') throw new Error(`[db] cash session is ${session.status}: ${sessionId}`);
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO cash_movements (id, session_id, movement_type, amount_ct, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(id, sessionId, type, amountCt, reason.trim(), createdAt);
+      return { id, session_id: sessionId, movement_type: type, amount_ct: amountCt, reason: reason.trim(), created_at: createdAt };
+    },
+
+    getCashSessionStatus(sessionId: string): CashSessionLiveStatus {
+      const s = db.prepare('SELECT * FROM cash_sessions WHERE id = ?').get(sessionId) as
+        | {
+          id: string; cashier_name: string; opened_at: string; closed_at: string | null;
+          opening_float_ct: number; closing_counted_ct: number | null;
+          theoretical_cash_ct: number | null; cash_diff_ct: number | null;
+          status: string; z_report_id: string | null; notes: string | null;
+        }
+        | undefined;
+      if (!s) throw new Error(`[db] cash session not found: ${sessionId}`);
+      const session: CashSessionRecord = {
+        id: s.id, cashierName: s.cashier_name, openedAt: s.opened_at,
+        closedAt: s.closed_at ?? undefined, openingFloatCt: s.opening_float_ct,
+        closingCountedCt: s.closing_counted_ct ?? undefined,
+        theoreticalCashCt: s.theoretical_cash_ct ?? undefined,
+        cashDiffCt: s.cash_diff_ct ?? undefined,
+        status: s.status as 'OPEN' | 'CLOSED', zReportId: s.z_report_id ?? undefined,
+        notes: s.notes ?? undefined,
+      };
+      const end = s.status === 'OPEN' ? new Date().toISOString() : (s.closed_at as string);
+      const sales = db.prepare(
+        `SELECT COUNT(*) AS n,
+           COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0) AS cash,
+           COALESCE(SUM(CASE WHEN payment_method = 'CIB' THEN total_ttc_ct ELSE 0 END), 0) AS cib,
+           COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0) AS dah,
+           COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0) AS cred
+         FROM sales WHERE status = 'COMPLETED' AND created_at >= ? AND created_at <= ?`,
+      ).get(s.opened_at, end) as { n: number; cash: number; cib: number; dah: number; cred: number };
+      const settled = db.prepare(
+        `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
+         WHERE payment_method = 'ESPECES' AND date >= ? AND date <= ?`,
+      ).get(s.opened_at, end) as { t: number };
+      const moves = db.prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN movement_type = 'DEPOSIT' THEN amount_ct ELSE 0 END), 0) AS dep,
+           COALESCE(SUM(CASE WHEN movement_type = 'WITHDRAWAL' THEN amount_ct ELSE 0 END), 0) AS wit,
+           COALESCE(SUM(CASE WHEN movement_type = 'EXPENSE' THEN amount_ct ELSE 0 END), 0) AS exp
+         FROM cash_movements WHERE session_id = ?`,
+      ).get(sessionId) as { dep: number; wit: number; exp: number };
+      const theoretical = s.opening_float_ct + sales.cash + settled.t + moves.dep - moves.wit - moves.exp;
+      return {
+        session, openingFloatCt: s.opening_float_ct, cashSalesCt: sales.cash,
+        settlementsCashCt: settled.t, depositsCt: moves.dep, withdrawalsCt: moves.wit,
+        expensesCt: moves.exp, theoreticalCashCt: theoretical, totalSalesCount: sales.n,
+      };
+    },
+
+    getActiveCashSession(): CashSessionLiveStatus | null {
+      const open = db.prepare("SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1").get() as
+        | { id: string }
+        | undefined;
+      // eslint-disable-next-line @typescript-eslint/no-use-before-define
+      return open ? (this as unknown as BarakaDb).getCashSessionStatus(open.id) : null;
+    },
+
+    closeCashSessionAndGenerateZ(sessionId: string, countedCashCt: number, notes?: string): ZClosureResult {
+      assertIntegerCentimes(countedCashCt, 'countedCashCt');
+      if (countedCashCt < 0) throw new Error('[db] countedCashCt must be >= 0');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const s = db.prepare('SELECT * FROM cash_sessions WHERE id = ?').get(sessionId) as
+          | { id: string; cashier_name: string; opened_at: string; opening_float_ct: number; status: string }
+          | undefined;
+        if (!s) throw new Error(`[db] cash session not found: ${sessionId}`);
+        if (s.status !== 'OPEN') throw new Error(`[db] cash session already ${s.status}: ${sessionId}`);
+        const periodEnd = new Date().toISOString();
+        const agg = db.prepare(
+          `SELECT COUNT(*) AS n,
+             COALESCE(SUM(total_ht_ct), 0) AS ht,
+             COALESCE(SUM(tva9_base_ct), 0) AS b9, COALESCE(SUM(tva9_amt_ct), 0) AS a9,
+             COALESCE(SUM(tva19_base_ct), 0) AS b19, COALESCE(SUM(tva19_amt_ct), 0) AS a19,
+             COALESCE(SUM(timbre_ct), 0) AS timbre,
+             COALESCE(SUM(total_ttc_ct), 0) AS ttc,
+             COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0) AS cash,
+             COALESCE(SUM(CASE WHEN payment_method = 'CIB' THEN total_ttc_ct ELSE 0 END), 0) AS cib,
+             COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0) AS dah,
+             COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0) AS cred,
+             MIN(invoice_number) AS first, MAX(invoice_number) AS last
+           FROM sales WHERE status = 'COMPLETED' AND created_at >= ? AND created_at <= ?`,
+        ).get(s.opened_at, periodEnd) as {
+          n: number; ht: number; b9: number; a9: number; b19: number; a19: number;
+          timbre: number; ttc: number; cash: number; cib: number; dah: number; cred: number;
+          first: string | null; last: string | null;
+        };
+        const settled = db.prepare(
+          `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
+           WHERE payment_method = 'ESPECES' AND date >= ? AND date <= ?`,
+        ).get(s.opened_at, periodEnd) as { t: number };
+        const moves = db.prepare(
+          `SELECT
+             COALESCE(SUM(CASE WHEN movement_type = 'DEPOSIT' THEN amount_ct ELSE 0 END), 0) AS dep,
+             COALESCE(SUM(CASE WHEN movement_type = 'WITHDRAWAL' THEN amount_ct ELSE 0 END), 0) AS wit,
+             COALESCE(SUM(CASE WHEN movement_type = 'EXPENSE' THEN amount_ct ELSE 0 END), 0) AS exp
+           FROM cash_movements WHERE session_id = ?`,
+        ).get(sessionId) as { dep: number; wit: number; exp: number };
+        const theoretical = s.opening_float_ct + agg.cash + settled.t + moves.dep - moves.wit - moves.exp;
+        const diff = countedCashCt - theoretical;
+        // Fiscal Z (hash-chained, gapless) — same statements as finalizeZReport, inside this txn.
+        const day = periodEnd.slice(0, 10);
+        const year = parseInt(day.slice(0, 4), 10);
+        const prevRow = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as
+          | { hash: string }
+          | undefined;
+        const prev = prevRow?.hash ?? GENESIS_Z_HASH;
+        const zNumber = `Z-${year}-${pad6(bumpSeq(db, 'Z', year))}`;
+        const hash = computeZHashDb(prev, zNumber, day, agg.ttc, agg.timbre);
+        db.prepare(
+          `INSERT INTO z_reports (report_number, day, opening_time, closing_time,
+            total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
+            tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
+            especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
+            credit_collected_ct, first_invoice_number, last_invoice_number,
+            prev_hash, hash, finalized)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        ).run(
+          zNumber, day, s.opened_at, periodEnd,
+          agg.n, agg.ht, agg.b9, agg.a9, agg.b19, agg.a19, agg.a9 + agg.a19,
+          agg.timbre, agg.ttc, agg.cash, agg.cib, agg.dah, agg.cred, settled.t,
+          agg.first ?? '', agg.last ?? '', prev, hash,
+        );
+        db.prepare(
+          `UPDATE cash_sessions SET status = 'CLOSED', closed_at = ?, closing_counted_ct = ?,
+             theoretical_cash_ct = ?, cash_diff_ct = ?, z_report_id = ?, notes = COALESCE(?, notes)
+           WHERE id = ?`,
+        ).run(periodEnd, countedCashCt, theoretical, diff, zNumber, notes ?? null, sessionId);
+        db.exec('COMMIT');
+        return {
+          zNumber, sessionId, cashierName: s.cashier_name, periodStart: s.opened_at, periodEnd,
+          totalHtCt: agg.ht, totalTva9Ct: agg.a9, totalTva19Ct: agg.a19, totalTimbreCt: agg.timbre,
+          totalTtcCt: agg.ttc, salesCount: agg.n, cashSalesCt: agg.cash, cibSalesCt: agg.cib,
+          dahabiyaSalesCt: agg.dah, creditSalesCt: agg.cred, settlementsCashCt: settled.t,
+          depositsCt: moves.dep, withdrawalsCt: moves.wit, expensesCt: moves.exp,
+          openingFloatCt: s.opening_float_ct, theoreticalCashCt: theoretical,
+          closingCountedCt: countedCashCt, cashDiffCt: diff, hash, prevHash: prev,
+        };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    recordVoidLog(entry: VoidLogEntry): VoidLogRecord {
+      const valid: ProtectedActionType[] = ['LINE_VOID', 'CART_CLEAR', 'MANUAL_DISCOUNT', 'DRAWER_KICK'];
+      if (!valid.includes(entry.actionType)) {
+        throw new Error(`[db] void action must be LINE_VOID|CART_CLEAR|MANUAL_DISCOUNT|DRAWER_KICK (got ${entry.actionType})`);
+      }
+      assertIntegerCentimes(entry.amountCt, 'amountCt');
+      if (entry.amountCt < 0) throw new Error('[db] void amountCt must be >= 0');
+      if (!entry.cashierName?.trim()) throw new Error('[db] void cashierName is required');
+      if (!entry.reason?.trim()) throw new Error('[db] void reason is required');
+      const createdAt = new Date().toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const r = db.prepare(
+          `INSERT INTO void_log (action_type, product_id, product_name, amount_ct,
+            cashier_name, manager_name, reason, session_id, voided_by, voided_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          entry.actionType, entry.productId ?? null, entry.productName ?? null, entry.amountCt,
+          entry.cashierName.trim(), entry.managerApprovedBy?.trim() ?? null, entry.reason.trim(),
+          entry.sessionId ?? null, entry.cashierName.trim(), createdAt, createdAt,
+        );
+        db.exec('COMMIT');
+        return {
+          ...entry, id: String(r.lastInsertRowid),
+          cashierName: entry.cashierName.trim(), reason: entry.reason.trim(), createdAt,
+        };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    getVoidLogs(filters?: { fromDate?: string; toDate?: string; reason?: string; limit?: number }): VoidLogRecord[] {
+      const where: string[] = ['action_type IS NOT NULL'];
+      const args: (string | number)[] = [];
+      if (filters?.fromDate) { where.push('created_at >= ?'); args.push(filters.fromDate); }
+      if (filters?.toDate) { where.push('created_at <= ?'); args.push(filters.toDate); }
+      if (filters?.reason) { where.push('reason = ?'); args.push(filters.reason); }
+      const limit = filters?.limit ?? 100;
+      if (!Number.isInteger(limit) || limit <= 0) throw new Error(`[db] void log limit must be > 0 (got ${limit})`);
+      const rows = db.prepare(
+        `SELECT id, action_type, product_id, product_name, amount_ct, cashier_name,
+           manager_name, reason, session_id, created_at
+         FROM void_log WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ?`,
+      ).all(...args, limit) as unknown as {
+        id: number; action_type: ProtectedActionType; product_id: number | null; product_name: string | null;
+        amount_ct: number; cashier_name: string; manager_name: string | null;
+        reason: string; session_id: string | null; created_at: string;
+      }[];
+      return rows.map(r => ({
+        actionType: r.action_type, productId: r.product_id ?? undefined,
+        productName: r.product_name ?? undefined, amountCt: r.amount_ct,
+        cashierName: r.cashier_name ?? '', managerApprovedBy: r.manager_name ?? undefined,
+        reason: r.reason, sessionId: r.session_id ?? undefined,
+        id: String(r.id), createdAt: r.created_at,
+      }));
+    },
+
+    getVoidSummaryBySession(sessionId?: string): VoidSummary {
+      const row = (sessionId === undefined
+        ? db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(amount_ct), 0) AS t FROM void_log WHERE action_type IS NOT NULL")
+        : db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(amount_ct), 0) AS t FROM void_log WHERE action_type IS NOT NULL AND session_id = ?')
+      ).get(...(sessionId === undefined ? [] : [sessionId])) as { n: number; t: number };
+      return { totalVoidCount: row.n, totalVoidAmountCt: row.t };
+    },
+
+    setManagerPin(newPin: string): void {
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+        .run(MANAGER_PIN_META_KEY, createPinHash(newPin));
+    },
+
+    verifyManagerPinDb(inputPin: string): boolean {
+      const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(MANAGER_PIN_META_KEY) as
+        | { value: string }
+        | undefined;
+      return verifyPin(inputPin, row?.value);
+    },
+
+    createDatabaseBackup(options?: { destinationDir?: string; label?: string }): BackupMetadata {
+      const dir = path.resolve(options?.destinationDir ?? 'data/backups');
+      fs.mkdirSync(dir, { recursive: true });
+      const d = new Date();
+      const p2 = (n: number): string => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+      const label = (options?.label ?? '').replace(/[^A-Za-z0-9-_]/g, '').slice(0, 24);
+      let n = 0;
+      let filename = `baraka-backup-${stamp}${label ? `-${label}` : ''}.sqlite`;
+      while (fs.existsSync(path.join(dir, filename))) {
+        n += 1;
+        filename = `baraka-backup-${stamp}${label ? `-${label}` : ''}-${n}.sqlite`;
+      }
+      const filePath = path.join(dir, filename);
+      // Hot snapshot: atomic, non-blocking under WAL (readers keep serving).
+      db.exec(`VACUUM INTO '${filePath.replace(/'/g, "''")}'`);
+      const snap = new DatabaseSync(filePath);
+      try {
+        const check = snap.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
+        if (check.integrity_check !== 'ok') throw new Error(`[db] snapshot integrity_check failed: ${check.integrity_check}`);
+        const sales = (snap.prepare('SELECT COUNT(*) AS n FROM sales').get() as { n: number }).n;
+        const products = (snap.prepare('SELECT COUNT(*) AS n FROM products').get() as { n: number }).n;
+        const sha256 = createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+        const size = fs.statSync(filePath).size;
+        const createdAt = new Date().toISOString();
+        const id = randomUUID();
+        db.prepare(
+          `INSERT INTO backups_log (id, filename, file_path, file_size_bytes, sha256_checksum,
+            sales_count, products_count, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?)`,
+        ).run(id, filename, filePath, size, sha256, sales, products, createdAt);
+        return {
+          id, filename, filePath, fileSizeBytes: size, sha256Checksum: sha256,
+          salesCount: sales, productsCount: products, status: 'VERIFIED', createdAt,
+        };
+      } finally {
+        snap.close();
+      }
+    },
+
+    listDatabaseBackups(): BackupMetadata[] {
+      const rows = db.prepare('SELECT * FROM backups_log ORDER BY created_at DESC, rowid DESC').all() as unknown as {
+        id: string; filename: string; file_path: string; file_size_bytes: number;
+        sha256_checksum: string; sales_count: number; products_count: number;
+        status: string; created_at: string;
+      }[];
+      const out: BackupMetadata[] = [];
+      for (const r of rows) {
+        if (!fs.existsSync(r.file_path)) continue;
+        const actual = createHash('sha256').update(fs.readFileSync(r.file_path)).digest('hex');
+        if (actual !== r.sha256_checksum) {
+          db.prepare("UPDATE backups_log SET status = 'CORRUPT' WHERE id = ?").run(r.id);
+          continue;
+        }
+        out.push({
+          id: r.id, filename: r.filename, filePath: r.file_path, fileSizeBytes: r.file_size_bytes,
+          sha256Checksum: r.sha256_checksum, salesCount: r.sales_count, productsCount: r.products_count,
+          status: r.status as BackupMetadata['status'], createdAt: r.created_at,
+        });
+      }
+      return out;
+    },
+
+    validateBackupForRestore(backupPath: string): BackupValidationReport {
+      const errors: string[] = [];
+      const resolved = path.resolve(backupPath);
+      let size = 0;
+      if (!fs.existsSync(resolved)) errors.push('file does not exist');
+      else {
+        size = fs.statSync(resolved).size;
+        if (size === 0) errors.push('file is empty');
+        else {
+          const magic = fs.readFileSync(resolved).subarray(0, 16).toString('latin1');
+          if (magic !== 'SQLite format 3\0') errors.push('bad SQLite header magic');
+        }
+      }
+      let sha256 = '';
+      let salesCount = 0;
+      let tableCount = 0;
+      let integrity = 'not-run';
+      if (errors.length === 0) {
+        sha256 = createHash('sha256').update(fs.readFileSync(resolved)).digest('hex');
+        const snap = new DatabaseSync(resolved);
+        try {
+          const check = snap.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
+          integrity = check.integrity_check;
+          if (integrity !== 'ok') errors.push(`integrity_check: ${integrity}`);
+          tableCount = (snap.prepare(
+            "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+          ).get() as { n: number }).n;
+          if (tableCount === 0) errors.push('no user tables found');
+          try {
+            salesCount = (snap.prepare('SELECT COUNT(*) AS n FROM sales').get() as { n: number }).n;
+          } catch {
+            errors.push('sales table unreadable');
+          }
+        } catch (e) {
+          errors.push(`snapshot open failed: ${(e as Error).message}`);
+        } finally {
+          snap.close();
+        }
+      }
+      return {
+        isValid: errors.length === 0, sha256, fileSizeBytes: size, salesCount,
+        tableCount, integrityCheckResult: integrity, errors,
+      };
+    },
+
+    restoreBackupSafely(backupPath: string): RestoreResult {
+      const report = (this as unknown as BarakaDb).validateBackupForRestore(backupPath);
+      if (!report.isValid) {
+        throw new Error(`[db] BACKUP_INTEGRITY_FAILED: ${report.errors.join('; ')}`);
+      }
+      if (dbPath === ':memory:') throw new Error('[db] cannot restore over a :memory: database');
+      const qdir = path.resolve('data/quarantine');
+      fs.mkdirSync(qdir, { recursive: true });
+      const d = new Date();
+      const p2 = (n: number): string => String(n).padStart(2, '0');
+      const qfile = path.join(
+        qdir, `pre-restore-quarantine-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.sqlite`,
+      );
+      db.exec(`VACUUM INTO '${qfile.replace(/'/g, "''")}'`);
+      const qsnap = new DatabaseSync(qfile);
+      try {
+        const check = qsnap.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
+        if (check.integrity_check !== 'ok') throw new Error('[db] quarantine snapshot failed integrity_check');
+      } finally {
+        qsnap.close();
+      }
+      const target = path.resolve(backupPath);
+      db.close();
+      // Live handle is now closed; the caller MUST reopen (server re-provisions,
+      // tests open a fresh handle) before issuing further queries.
+      const livePath = path.resolve(dbPath);
+      fs.copyFileSync(target, livePath);
+      const mark = new DatabaseSync(livePath);
+      try {
+        // The snapshot predates its own log row, so the restore journals a
+        // fresh RESTORED entry recomputed from the restored file.
+        const sha = createHash('sha256').update(fs.readFileSync(livePath)).digest('hex');
+        const size = fs.statSync(livePath).size;
+        const sales = (mark.prepare('SELECT COUNT(*) AS n FROM sales').get() as { n: number }).n;
+        const products = (mark.prepare('SELECT COUNT(*) AS n FROM products').get() as { n: number }).n;
+        mark.prepare(
+          `INSERT INTO backups_log (id, filename, file_path, file_size_bytes, sha256_checksum,
+            sales_count, products_count, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'RESTORED', ?)`,
+        ).run(randomUUID(), path.basename(target), target, size, sha, sales, products, new Date().toISOString());
+      } finally {
+        mark.close();
+      }
+      return {
+        success: true, quarantineBackupPath: qfile,
+        restoredBackupPath: path.resolve(dbPath), restoredAt: new Date().toISOString(),
+      };
     },
 
     nextInvoiceNumber(year: number): string {
