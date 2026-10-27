@@ -1,40 +1,32 @@
 import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
-  computeHwid, collectBrowserFingerprint, generateActivationKey,
+  computeHwid, collectBrowserFingerprint,
   validateLicense, evaluateTrial,
 } from '../../core/licensing';
 import { getOrCreateMachineSeed, getInstallEpochMs, loadStoredLicense, saveStoredLicense } from '../../core/license-store';
 import {
   KeyRound,
   ShieldCheck,
-  Cpu,
-  Database,
-  CheckCircle2,
   Copy,
   Check,
-  RefreshCw,
-  HardDrive,
-  Zap,
 } from 'lucide-react';
 
 export const LicenseManagerView: React.FC = () => {
-  const { language, sales } = useApp();
+  const { language, sales, storeProfile } = useApp();
   const isAr = language === 'ar';
 
   // Gate-03 TASK 3: real deterministic HWID (stable seed + platform fingerprint).
   const seed = useMemo(() => getOrCreateMachineSeed(), []);
   const hardwareId = useMemo(() => computeHwid(collectBrowserFingerprint(seed)), [seed]);
-  const [storeName, setStoreName] = useState(() => loadStoredLicense()?.storeName ?? '');
+  const [storeName, setStoreName] = useState(() => loadStoredLicense()?.storeName ?? storeProfile.store_name ?? '');
   const [inputKey, setInputKey] = useState('');
   const [stored, setStored] = useState(() => loadStoredLicense());
   const [activationError, setActivationError] = useState('');
   const [copiedKey, setCopiedKey] = useState(false);
 
-  // Key generator for BarakaDEV support (store name is part of the signature).
-  const [keygenStore, setKeygenStore] = useState('');
-  const [keygenInputHWID, setKeygenInputHWID] = useState('');
-  const [generatedResult, setGeneratedResult] = useState('');
+  // Key generation lives EXCLUSIVELY in scripts/keygen.ts (BarakaDEV staff CLI).
+  // Nothing vendor-side is imported, rendered, or bundled in this client view.
 
   const trial = evaluateTrial(
     stored?.status ?? 'TRIAL',
@@ -64,14 +56,6 @@ export const LicenseManagerView: React.FC = () => {
     } else {
       setActivationError(isAr ? 'مفتاح غير صالح لهذا المحل/الجهاز' : 'Clé invalide pour ce magasin / HWID');
     }
-  };
-
-  const handleGenerateKey = (e: React.FormEvent) => {
-    e.preventDefault();
-    let hwid = keygenInputHWID.trim().toUpperCase();
-    if (!hwid || !keygenStore.trim()) return;
-    if (!hwid.startsWith('BM-')) hwid = `BM-${hwid}`;
-    setGeneratedResult(generateActivationKey(keygenStore, hwid));
   };
 
   return (
@@ -130,41 +114,77 @@ export const LicenseManagerView: React.FC = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Machine Hardware ID & Status */}
-        <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 shadow-xl space-y-4">
-          <h3 className="text-sm font-bold text-white flex items-center gap-2">
-            <Cpu className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'بيانات هذا الجهاز والعتاد (Poste POS)' : 'Empreinte de ce Terminal (HWID)'}</span>
-          </h3>
+      {/* Luxe épuré activation sanctuary — single centered card, zero vendor tools. */}
+      <div className="flex justify-center">
+        <div className="w-full max-w-2xl bg-[#111722] border border-amber-500/25 rounded-2xl shadow-2xl overflow-hidden">
+          <div className="text-center px-6 pt-6 pb-4 border-b border-[#1e293b] relative">
+            <div aria-hidden={true} className="pointer-events-none absolute inset-x-16 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />
+            <div className="text-base md:text-lg font-black tracking-wide text-white">
+              BARAKA MARKET — {isAr ? 'تفعيل النظام' : 'ACTIVATION DU SYSTÈME'}
+            </div>
+            <div className="text-[11px] text-amber-300/90 mt-0.5">ETS MOHAMED EL-BARAKA / BarakaDEV</div>
+          </div>
 
-          <div className="space-y-3">
+          <div className="p-6 space-y-5">
+            {/* System status */}
+            <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${isActivated ? 'bg-emerald-950/60 border-emerald-800/60' : 'bg-amber-950/40 border-amber-800/50'}`}>
+              <ShieldCheck className={`w-7 h-7 shrink-0 ${isActivated ? 'text-emerald-400' : 'text-amber-400'}`} />
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                  {isAr ? 'حالة النظام' : 'État du système'}
+                </div>
+                <div className="text-sm font-black text-white">
+                  {isActivated
+                    ? (isAr ? '● رخصة دائمة مدى الحياة' : '● LICENCE PERPÉTUELLE À VIE')
+                    : (isAr
+                      ? `● نسخة تجريبية — متبقي ${trial.salesRemaining} بيعة / ${trial.daysRemaining} يوم`
+                      : `● Version d'essai — ${trial.salesRemaining} ventes / ${trial.daysRemaining} j restants`)}
+                </div>
+              </div>
+            </div>
+
+            {/* Step 1 — HWID */}
             <div>
-              <label className="text-xs text-slate-400 block mb-1">
-                {isAr ? 'معرف بصمة الجهاز (Hardware ID):' : 'Identifiant Unique Machine (HWID):'}
-              </label>
+              <div className="text-xs font-bold text-white mb-1.5">
+                {isAr ? '1. البصمة الفريدة لصندوقك (HWID):' : '1. EMPREINTE UNIQUE DE VOTRE CAISSE (HWID):'}
+              </div>
               <div className="flex items-center gap-2">
                 <input
                   type="text"
                   readOnly
                   value={hardwareId}
-                  className="flex-1 bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-sm text-amber-300 font-mono font-bold outline-none"
+                  className="flex-1 bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2.5 text-sm text-amber-300 font-mono font-bold outline-none"
                 />
                 <button
                   onClick={() => handleCopy(hardwareId)}
-                  className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] hover:border-amber-500/50 text-slate-300 font-semibold rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors"
+                  className="px-4 py-2.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
                 >
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>{isAr ? 'نسخ' : 'Copier'}</span>
+                  {copiedKey ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{isAr ? 'نسخ' : 'COPIER'}</span>
                 </button>
               </div>
             </div>
 
+            {/* Activation instructions */}
+            <div className="bg-[#0b0f17] border border-[#233145] rounded-xl p-3.5 text-xs text-slate-300 leading-relaxed space-y-1">
+              <div className="font-bold text-amber-300 text-[11px] uppercase tracking-wide">
+                {isAr ? 'إرشادات التفعيل السريع' : "Instructions d'activation rapide"}
+              </div>
+              <p>
+                {isAr
+                  ? 'للحصول على مفتاح التفعيل الدائم، يرجى إرسال هذا الكود (HWID) مع اسم المحل عبر واتساب أو الهاتف إلى مصلحة الدعم الفني لشركة BarakaDEV:'
+                  : 'Pour obtenir la clé définitive, envoyez ce code (HWID) avec le nom du magasin via WhatsApp ou téléphone au support BarakaDEV:'}
+              </p>
+              <p className="font-mono text-white">📞 Téléphone / WhatsApp: +213 (0) XX XX XX XX</p>
+              <p>💰 {isAr ? 'سعر الرخصة: 5,000 دج (دفعة واحدة مدى الحياة)' : 'Tarif de la licence: 5,000 DZD (Paiement unique à vie)'}</p>
+            </div>
+
+            {/* Steps 2+3 — store identity + activation key */}
             <form onSubmit={handleActivate} className="space-y-3">
               <div>
-                <label className="text-xs text-slate-300 block mb-1">
-                  {isAr ? 'اسم المحل (كما في السجل التجاري):' : 'Nom du magasin (registre de commerce):'}
-                </label>
+                <div className="text-xs font-bold text-white mb-1.5">
+                  {isAr ? '2. اسم المحل (كما في السجل التجاري):' : '2. NOM DU MAGASIN (registre de commerce):'}
+                </div>
                 <input
                   type="text"
                   value={storeName}
@@ -174,26 +194,16 @@ export const LicenseManagerView: React.FC = () => {
                 />
               </div>
               <div>
-                <label className="text-xs text-slate-300 block mb-1">
-                  {isAr ? 'مفتاح التفعيل:' : 'Clé d\'activation (AK-XXXX-XXXX-XXXX-XXXX):'}
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={inputKey}
-                    onChange={e => setInputKey(e.target.value.toUpperCase())}
-                    placeholder="AK-XXXX-XXXX-XXXX-XXXX"
-                    className="flex-1 bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-sm text-emerald-400 font-mono font-bold uppercase outline-none focus:border-emerald-500"
-                  />
-                  <button
-                    onClick={() => handleCopy(inputKey || stored?.key || '')}
-                    type="button"
-                    className="px-3 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] hover:border-amber-500/50 text-slate-300 font-semibold rounded-xl text-xs flex items-center gap-1 cursor-pointer transition-colors"
-                  >
-                    {copiedKey ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedKey ? (isAr ? 'تم' : 'Copié') : (isAr ? 'نسخ' : 'Copier')}</span>
-                  </button>
+                <div className="text-xs font-bold text-white mb-1.5">
+                  {isAr ? '3. أدخل مفتاح التفعيل المستلم:' : "3. SAISIR LA CLÉ D'ACTIVATION REÇUE:"}
                 </div>
+                <input
+                  type="text"
+                  value={inputKey}
+                  onChange={e => setInputKey(e.target.value.toUpperCase())}
+                  placeholder="AK-XXXX-XXXX-XXXX-XXXX"
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2.5 text-sm text-emerald-400 font-mono font-bold uppercase outline-none focus:border-emerald-500"
+                />
               </div>
               {activationError && <p className="text-[11px] text-rose-400">{activationError}</p>}
               {isActivated && (
@@ -201,143 +211,16 @@ export const LicenseManagerView: React.FC = () => {
               )}
               <button
                 type="submit"
-                className="w-full py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-emerald-950/40 flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full py-3 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white rounded-xl text-sm font-black shadow-lg shadow-emerald-950/40 flex items-center justify-center gap-2 cursor-pointer"
               >
                 <KeyRound className="w-4 h-4" />
-                <span>{isAr ? 'تفعيل الرخصة الدائمة' : 'Activer la Licence'}</span>
+                <span>{isAr ? 'تفعيل النظام نهائياً' : 'ACTIVER DÉFINITIVEMENT LE SYSTÈME'}</span>
               </button>
             </form>
           </div>
 
-          <div className="pt-2 border-t border-[#1e293b] space-y-2 text-xs text-slate-400">
-            <div className="flex items-center justify-between">
-              <span>{isAr ? 'نموذج التسعير الاستراتيجي:' : 'Modèle Économique:'}</span>
-              <span className="font-bold text-white">5,000 DZD {isAr ? '(دفعة واحدة دائمة)' : '(Paiement unique)'}</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>{isAr ? 'حجم حزمة التثبيت الصامتة:' : 'Taille de l\'Installateur:'}</span>
-              <span className="font-mono text-slate-300">~ 48 MB (Inno Setup)</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>{isAr ? 'محرك البيانات المقاوم للانقطاع:' : 'Moteur de Données:'}</span>
-              <span className="font-mono text-emerald-400">SQLite 3 (WAL Mode Active)</span>
-            </div>
-          </div>
-        </div>
-
-        {/* BarakaDEV Developer Keygen Tool */}
-        <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 shadow-xl space-y-4">
-          <h3 className="text-sm font-bold text-amber-400 flex items-center gap-2">
-            <KeyRound className="w-4 h-4" />
-            <span>{isAr ? 'مولد مفاتيح التفعيل لموزعي BarakaDEV' : 'Générateur de Clés BarakaDEV'}</span>
-          </h3>
-
-          <p className="text-xs text-slate-400">
-            {isAr
-              ? 'أداة تقنية مدمجة لفريق المبيعات لتوليد كود التفعيل للزبون عند إرساله لمعرف جهازه (HWID) بعد استلام 5,000 دج.'
-              : 'Outil interne pour générer instantanément la clé permanente à fournir au client après paiement des 5,000 DZD.'}
-          </p>
-
-          <form onSubmit={handleGenerateKey} className="space-y-3">
-            <div>
-              <label className="text-xs text-slate-300 block mb-1">
-                {isAr ? 'اسم محل الزبون:' : 'Nom du magasin client:'}
-              </label>
-              <input
-                type="text"
-                required
-                value={keygenStore}
-                onChange={e => setKeygenStore(e.target.value)}
-                placeholder={isAr ? 'اسم المحل' : 'Nom du magasin'}
-                className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-amber-500"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-slate-300 block mb-1">
-                {isAr ? 'أدخل معرف عتاد الزبون (HWID):' : 'Saisir le HWID du Client:'}
-              </label>
-              <input
-                type="text"
-                required
-                value={keygenInputHWID}
-                onChange={e => setKeygenInputHWID(e.target.value.toUpperCase())}
-                placeholder="BM-XXXX-XXXX-XXXX-XXXX"
-                className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white font-mono uppercase outline-none focus:border-amber-500"
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-2.5 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-amber-950/40 flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Zap className="w-4 h-4" />
-              <span>{isAr ? 'توليد مفتاح التفعيل الدائم' : 'Calculer Clé d\'Activation'}</span>
-            </button>
-          </form>
-
-          {generatedResult && (
-            <div className="p-3 bg-[#0b0f17] border border-amber-500/40 rounded-xl space-y-1 animate-in fade-in">
-              <span className="text-[10px] text-amber-300/80 font-semibold uppercase">
-                {isAr ? 'كود التفعيل المتولد للزبون:' : 'Clé Générée Prête à Transmettre:'}
-              </span>
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-mono font-bold text-amber-300">
-                  {generatedResult}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => handleCopy(generatedResult)}
-                  className="p-1 text-slate-400 hover:text-white"
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Technical Architecture Guarantees */}
-      <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 shadow-xl">
-        <h3 className="text-sm font-bold text-white mb-3">
-          {isAr ? 'المعايير الهندسية لضمان الاستقرار في الجزائر (Architecture Highlights)' : 'Garanties d\'Exploitation & Zéro Maintenance'}
-        </h3>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs text-slate-300">
-          <div className="bg-[#162030] p-3.5 rounded-xl border border-[#233145] space-y-1">
-            <div className="font-bold text-emerald-400 flex items-center gap-1.5">
-              <Zap className="w-4 h-4" />
-              <span>Power-Failure Resilience</span>
-            </div>
-            <p className="text-slate-400 leading-relaxed text-[11px]">
-              {isAr
-                ? 'حماية كاملة من انقطاع الكهرباء المفاجئ بفضل معمارية SQLite WAL وحفظ المسودات اللحظي (Instant Draft Save).'
-                : 'Préservation intégrale des transactions en cours lors des coupures de courant imprévues.'}
-            </p>
-          </div>
-
-          <div className="bg-[#162030] p-3.5 rounded-xl border border-[#233145] space-y-1">
-            <div className="font-bold text-amber-400 flex items-center gap-1.5">
-              <Database className="w-4 h-4" />
-              <span>Zero-Config Self-Healing</span>
-            </div>
-            <p className="text-slate-400 leading-relaxed text-[11px]">
-              {isAr
-                ? 'بدون الحاجة لتنصيب خوادم SQL خارجية معقدة؛ تشغيل فوري بنقرة واحدة وتكلفة دعم فني تقارب الصفر.'
-                : 'Aucune dépendance externe ni configuration complexe de serveur SQL distant.'}
-            </p>
-          </div>
-
-          <div className="bg-[#162030] p-3.5 rounded-xl border border-[#233145] space-y-1">
-            <div className="font-bold text-sky-400 flex items-center gap-1.5">
-              <HardDrive className="w-4 h-4" />
-              <span>Pilote ESC/POS Direct</span>
-            </div>
-            <p className="text-slate-400 leading-relaxed text-[11px]">
-              {isAr
-                ? 'دعم الطابعات الحرارية عبر منافذ USB/COM والموازين الإلكترونية ببروتوكول ESC/POS القياسي.'
-                : 'Impression ultra-rapide sur ticket thermique 80mm/58mm sans boîte de dialogue encombrante.'}
-            </p>
+          <div className="px-6 py-3 border-t border-[#1e293b] text-center text-[10px] text-slate-500">
+            {isAr ? 'الأمان: تشفير محلي SHA-256 | لا يتطلب اتصالاً بالإنترنت' : 'Sécurité: Chiffrement Local SHA-256 | Aucune connexion Internet requise'}
           </div>
         </div>
       </div>

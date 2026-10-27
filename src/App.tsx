@@ -25,6 +25,7 @@ const MainLayout: React.FC = () => {
     lastSettlementQuittance,
     language,
     needsStoreSetup,
+    isFiscalMode,
   } = useApp();
 
   // Global hotkeys: Ctrl+L to toggle language
@@ -61,10 +62,21 @@ const MainLayout: React.FC = () => {
           <span className="text-slate-300 font-medium">Amine (Caisse 01)</span>
         </span>
         <span className="flex items-center gap-2">
-          <span className="flex items-center gap-1 text-emerald-400">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-            WAL
-          </span>
+          {isFiscalMode ? (
+            <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+              ● REGISTRE FISCAL ACTIF (SQLITE WAL)
+            </span>
+          ) : (
+            <>
+              <span className="flex items-center gap-1 text-emerald-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                WAL
+              </span>
+              <span className="text-slate-600">|</span>
+              <span className="text-amber-400/90 font-semibold">PROVISOIRE</span>
+            </>
+          )}
           <span className="text-slate-600">|</span>
           <span className="uppercase tracking-widest text-amber-400/80">v1.0-rc1</span>
         </span>

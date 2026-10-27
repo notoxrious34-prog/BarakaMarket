@@ -198,14 +198,10 @@ export const PosView: React.FC = () => {
 
   return (
     <div className="flex flex-col h-[calc(100vh-80px)] bg-[#0b0f17] overflow-hidden">
-      {/* Authority banner: green FISCAL in native shell, amber provisional in browser. */}
-      {isFiscalMode ? (
-        <div className="px-4 py-1.5 bg-emerald-950/80 border-b border-emerald-500/40 text-center text-[11px] font-bold text-emerald-300 tracking-wide" role="status">
-          {isAr
-            ? '● الوضع الجبائي النشط (SQLite WAL — تسلسل أحادي)'
-            : '● MODE FISCAL ACTIF (SQLITE WAL MONOTONIC)'}
-        </div>
-      ) : (
+      {/* Authority banner: provisional ONLY in a loose browser without SQLite.
+          In the Tauri desktop shell the fiscal state lives subtly in the
+          status bar — never a conflicting full-width badge. */}
+      {!isFiscalMode && (
         <div className="px-4 py-1.5 bg-amber-950/80 border-b border-amber-500/40 text-center text-[11px] font-bold text-amber-300 tracking-wide" role="alert">
           {isAr
             ? '⚠ بيئة اختبار غير جبائية — الأرقام مؤقتة (التسلسل الأحادي من SQLite هو المرجع)'
