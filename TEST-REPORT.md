@@ -26,11 +26,16 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Void audit + PIN gate | src/db/void-log.test.ts | 9 | ✅ 9/9 |
 | Manager PIN + override | src/core/security.test.ts | 4 | ✅ 4/4 |
 | Online backup + restore | src/db/backup.test.ts | 7 | ✅ 7/7 |
-| **Total** | **23 files** | **186** | **✅ 186/186, 0 fail** |
+| Reference catalog (28 cats, 257 tpl, BiDi, search) | src/core/reference-catalog.test.ts | 8 | ✅ 8/8 |
+| Reference templates REST lane | server/index.test.ts | +1 | ✅ 1/1 |
+| **Total** | **24 files** | **195** | **✅ 195/195, 0 fail** |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 186/186 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 195/195 holds.
+- ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
+  28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
+  product-modal autofill, standalone Owner keygen GUI with seal self-check.
 - ADR-015-MKT (2026-10-27): VACUUM INTO hot snapshots with SHA-256 journal,
   tamper-evident catalog, magic-bytes + integrity pre-flight, quarantine-first
   restore drill with server re-provisioning, 4 backup REST lanes.

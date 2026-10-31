@@ -16,6 +16,7 @@ import { buildThermalSettlementQuittance, buildThermalZReport } from '../src/har
 import { isValidPinFormat } from '../src/core/security.js';
 import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
+import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
 
 export function createApp(dbPath: string): { app: express.Express; baraka: BarakaDb } {
   let baraka = openBarakaDb(dbPath);
@@ -384,6 +385,21 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     try {
       const q = req.query as { sessionId?: string };
       res.json(baraka.getVoidSummaryBySession(q.sessionId));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // TASK-BRK-016-MKT: Algerian reference catalog autofill.
+  app.get('/api/reference/templates', (req, res) => {
+    try {
+      const q = req.query as { q?: string; limit?: string };
+      const hits = baraka.searchProductTemplates(q.q ?? '', q.limit !== undefined ? Number(q.limit) : 8);
+      res.json(hits.map(t => ({
+        id: t.id, brandName: t.brandName, nameFr: t.suggestedNameFr, nameAr: t.suggestedNameAr,
+        categoryCode: t.categoryCode, productCategory: REF_TO_PRODUCT_CATEGORY[t.categoryCode] ?? 'epicerie',
+        defaultTva: t.defaultTva, isWeighable: t.isWeighable, defaultUnit: t.defaultUnit,
+      })));
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

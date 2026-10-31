@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, TVARate } from '../../types';
 import { formatDZD } from '../../core/display';
@@ -45,6 +45,44 @@ export const ProductsStockView: React.FC = () => {
   const [scaleItemCode, setScaleItemCode] = useState('00040');
   const [hasExpiry, setHasExpiry] = useState(false);
   const [expiryDate, setExpiryDate] = useState('');
+
+  // TASK-BRK-016-MKT: reference catalog autofill (type "elio"/"ايليو" → pick).
+  interface TemplateHit {
+    id: number; brandName: string; nameFr: string; nameAr: string;
+    categoryCode: string; productCategory: string; defaultTva: TVARate;
+    isWeighable: boolean; defaultUnit: 'PIECE' | 'KG' | 'LITRE';
+  }
+  const [tplHits, setTplHits] = useState<TemplateHit[]>([]);
+  const [tplOpen, setTplOpen] = useState(false);
+  const buyPriceRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!showProductModal || editingProduct || nameFr.trim().length < 2) {
+      setTplHits([]); setTplOpen(false); return;
+    }
+    let live = true;
+    const t = setTimeout(() => {
+      fetch(`http://127.0.0.1:3100/api/reference/templates?q=${encodeURIComponent(nameFr.trim())}&limit=8`)
+        .then(r => (r.ok ? r.json() : []))
+        .then((rows: TemplateHit[]) => {
+          if (!live) return;
+          setTplHits(Array.isArray(rows) ? rows : []);
+          setTplOpen(true);
+        })
+        .catch(() => { if (live) { setTplHits([]); setTplOpen(false); } });
+    }, 220);
+    return () => { live = false; clearTimeout(t); };
+  }, [nameFr, showProductModal, editingProduct]);
+
+  const applyTemplate = (t: TemplateHit) => {
+    setNameFr(t.nameFr);
+    setNameAr(t.nameAr);
+    setTvaRate(t.defaultTva);
+    setUnit(t.defaultUnit);
+    if (initialCategories.some(c => c.id === t.productCategory)) setCategoryId(t.productCategory);
+    setTplHits([]); setTplOpen(false);
+    setTimeout(() => { buyPriceRef.current?.focus(); buyPriceRef.current?.select(); }, 0);
+  };
 
   // Perishable items check (< 30 days)
   const today = new Date();
@@ -94,6 +132,7 @@ export const ProductsStockView: React.FC = () => {
     setScaleItemCode('00045');
     setHasExpiry(false);
     setExpiryDate('');
+    setTplHits([]); setTplOpen(false);
     setShowProductModal(true);
   };
 
@@ -416,14 +455,41 @@ export const ProductsStockView: React.FC = () => {
                 <label className="text-xs font-semibold text-slate-300 block mb-1">
                   {isAr ? 'الاسم بالفرنسية:' : 'Nom (Français):'}
                 </label>
-                <input
-                  type="text"
-                  required
-                  value={nameFr}
-                  onChange={e => setNameFr(e.target.value)}
-                  placeholder="Ex: HUILE ELIO 5L"
-                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white"
-                />
+                <div className="relative">
+                  <input
+                    type="text"
+                    required
+                    value={nameFr}
+                    onChange={e => setNameFr(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Escape') setTplOpen(false); }}
+                    onBlur={() => setTimeout(() => setTplOpen(false), 120)}
+                    onFocus={() => { if (tplHits.length) setTplOpen(true); }}
+                    placeholder="Ex: HUILE ELIO 5L"
+                    autoComplete="off"
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white"
+                  />
+                  {tplOpen && tplHits.length > 0 && (
+                    <ul className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto bg-[#101a28] border border-[#2b3a4f] rounded-lg shadow-xl">
+                      {tplHits.map(t => (
+                        <li key={t.id}>
+                          <button
+                            type="button"
+                            onMouseDown={e => { e.preventDefault(); applyTemplate(t); }}
+                            className="w-full text-left px-3 py-1.5 hover:bg-[#1c2f45] flex items-center justify-between gap-2"
+                          >
+                            <span>
+                              <span className="block text-xs text-white font-semibold">{t.nameFr}</span>
+                              <span className="block text-[11px] text-slate-400" dir="rtl">{t.nameAr}</span>
+                            </span>
+                            <span className="shrink-0 text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300">
+                              {t.brandName} · {t.defaultTva}%
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -449,6 +515,7 @@ export const ProductsStockView: React.FC = () => {
                   <input
                     type="number"
                     required
+                    ref={buyPriceRef}
                     value={buyPrice}
                     onChange={e => setBuyPrice(parseFloat(e.target.value) || 0)}
                     className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white font-mono"

@@ -280,3 +280,24 @@ test('api: POST /backups/verify validates snapshots and rejects garbage', async 
   });
   assert.equal(((await bad.json()) as { isValid: boolean }).isValid, false);
 });
+
+test('api: GET /reference/templates autofills elio/tango in FR + AR', async () => {
+  type Hit = {
+    id: number; brandName: string; nameFr: string; nameAr: string; categoryCode: string;
+    productCategory: string; defaultTva: number; isWeighable: boolean; defaultUnit: string;
+  };
+  const get = async (q: string): Promise<Hit[]> =>
+    (await (await fetch(`${base}/api/reference/templates?q=${encodeURIComponent(q)}`)).json()) as Hit[];
+  const elio = await get('elio');
+  assert.ok(elio.length > 0 && elio[0].brandName === 'Elio');
+  assert.equal(elio[0].productCategory, 'epicerie');
+  assert.equal(elio[0].defaultTva, 0);
+  const tango = await get('طانغو');
+  assert.ok(tango.length > 0 && tango[0].brandName === 'Tango');
+  const ze = await get('زيت');
+  assert.ok(ze.length > 0 && ze.every(h => h.nameFr.includes('HUILE') || h.nameAr.includes('زيت')));
+  const empty = await get('');
+  assert.deepEqual(empty, []);
+  const limited = await (await fetch(`${base}/api/reference/templates?q=a&limit=2`)).json() as Hit[];
+  assert.ok(limited.length <= 2);
+});

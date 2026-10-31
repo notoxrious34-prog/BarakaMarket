@@ -329,3 +329,28 @@ CREATE TABLE IF NOT EXISTS backups_log (
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_backups_created ON backups_log (created_at);
+
+-- TASK-BRK-016-MKT: Algerian reference catalog (read-only lookup tables).
+CREATE TABLE IF NOT EXISTS ref_categories (
+  code         TEXT PRIMARY KEY,
+  name_fr      TEXT NOT NULL,
+  name_ar      TEXT NOT NULL,
+  default_tva  INTEGER NOT NULL DEFAULT 19
+);
+
+CREATE TABLE IF NOT EXISTS ref_templates (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  brand_id          TEXT NOT NULL,
+  brand_name        TEXT NOT NULL,
+  brand_name_ar     TEXT NOT NULL,
+  manufacturer      TEXT NOT NULL DEFAULT '',
+  category_code     TEXT NOT NULL REFERENCES ref_categories(code),
+  suggested_name_fr TEXT NOT NULL,
+  suggested_name_ar TEXT NOT NULL,
+  search_aliases    TEXT NOT NULL DEFAULT '',
+  is_weighable      INTEGER NOT NULL DEFAULT 0,
+  default_unit      TEXT NOT NULL DEFAULT 'PIECE'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ref_templates_lookup
+  ON ref_templates(brand_name, category_code);

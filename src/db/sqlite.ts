@@ -26,6 +26,7 @@ import type {
   BackupMetadata, BackupValidationReport, RestoreResult,
 } from '../types';
 import { createPinHash, verifyPin, MANAGER_PIN_META_KEY } from '../core/security.js';
+import { loadReferenceCatalog, searchCatalog, type ProductTemplate } from '../core/reference-catalog.js';
 
 export type Unit = 'PIECE' | 'KG' | 'LITRE';
 
@@ -194,6 +195,8 @@ export interface BarakaDb {
   listDatabaseBackups(): BackupMetadata[];
   validateBackupForRestore(backupPath: string): BackupValidationReport;
   restoreBackupSafely(backupPath: string): RestoreResult;
+  /** TASK-BRK-016-MKT: Algerian reference catalog autofill search. */
+  searchProductTemplates(query: string, limit?: number): ProductTemplate[];
   nextInvoiceNumber(year: number): string;
   nextTicketNumber(year: number): string;
   recordSale(header: SaleHeaderInput, items: SaleItemInput[]): { id: string; invoice_number: string; ticket_number: string };
@@ -295,6 +298,29 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       db.exec('ALTER TABLE seq_new RENAME TO seq');
     }
   } catch { /* fresh DB already has Q */ }
+  // TASK-BRK-016-MKT: seed the Algerian reference catalog once (idempotent —
+  // pre-seeded DBs are detected by row count, never re-inserted).
+  try {
+    const seeded = (db.prepare('SELECT COUNT(*) AS n FROM ref_categories').get() as { n: number }).n;
+    if (seeded === 0) {
+      const { cats, templates } = loadReferenceCatalog();
+      const tx = db.prepare(
+        'INSERT INTO ref_categories (code, name_fr, name_ar, default_tva) VALUES (?, ?, ?, ?)');
+      const tt = db.prepare(
+        `INSERT INTO ref_templates (brand_id, brand_name, brand_name_ar, manufacturer,
+          category_code, suggested_name_fr, suggested_name_ar, search_aliases, is_weighable, default_unit)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const c of cats) tx.run(c.code, c.nameFr, c.nameAr, c.defaultTva);
+        for (const t of templates) {
+          tt.run(t.brandId, t.brandName, t.brandNameAr, t.manufacturer, t.categoryCode,
+            t.suggestedNameFr, t.suggestedNameAr, t.searchAliases, t.isWeighable ? 1 : 0, t.defaultUnit);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+    }
+  } catch { /* tables missing on exotic pre-seeds — search falls back to JSON */ }
 
   const pragmas = () => ({
     journal_mode: (db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode,
@@ -1046,6 +1072,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         });
       }
       return out;
+    },
+
+    searchProductTemplates(query: string, limit = 8): ProductTemplate[] {
+      return searchCatalog(loadReferenceCatalog().templates, query, limit);
     },
 
     validateBackupForRestore(backupPath: string): BackupValidationReport {

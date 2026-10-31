@@ -218,6 +218,9 @@ export interface ZClosureResult {
 
 /** ADR-010-MKT: shelf-edge label types (canonical in core/shelf-labels). */
 export type { ShelfLabelItem, A4LabelOptions } from '../core/shelf-labels.js';
+/** TASK-BRK-016-MKT: reference catalog types (canonical in core/reference-search). */
+export type { RefCategory, ProductTemplate } from '../core/reference-search.js';
+export { REF_TO_PRODUCT_CATEGORY } from '../core/reference-search.js';
 
 export interface StoreProfile {
   id: number;

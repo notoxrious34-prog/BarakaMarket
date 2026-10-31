@@ -15,6 +15,7 @@
     "bench": "tsx scripts/bench-core.ts",
     "test:all": "tsx --test src/core/*.test.ts src/hardware/*.test.ts src/utils/*.test.ts src/db/*.test.ts server/*.test.ts",
     "test": "npm run test:all",
+    "keygen:gui": "tsx scripts/keygen-gui.ts",
     "verify:release": "tsx scripts/verify-release.ts",
     "tauri": "tauri"
   },

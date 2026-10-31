@@ -2,7 +2,7 @@
  * Baraka Market — Gold Master release verification (ADR-016-MKT).
  * Usage: npm run verify:release   (exits 0 = READY, 1 = BLOCKED)
  *
- * Checks: key hygiene, schema bootstrap (20 tables), offline bundle
+ * Checks: key hygiene, schema bootstrap (22 tables), offline bundle
  * purity, then the full gates (lint / build / test:all >= 186).
  */
 import { execSync } from 'node:child_process';
@@ -40,7 +40,7 @@ const walk = (dir: string, out: string[] = []): string[] => {
   check('Ed25519 Public Licensing Seal', !!m, m ? `${m[1].slice(0, 12)}…` : 'missing');
 }
 
-// 2. Schema bootstrap: fresh DB, integrity, 20 tables, profile, seq.
+// 2. Schema bootstrap: fresh DB, integrity, 22 tables, profile, seq.
 {
   const b = openBarakaDb(':memory:');
   try {
@@ -51,7 +51,7 @@ const walk = (dir: string, out: string[] = []): string[] => {
     const expected = ['meta', 'store_profile', 'products', 'product_barcodes', 'inventory_losses',
       'clients', 'suppliers', 'seq', 'sales', 'sale_items', 'client_settlements', 'active_cart_draft',
       'purchases', 'purchase_items', 'supplier_payments', 'z_reports', 'void_log',
-      'cash_sessions', 'cash_movements', 'backups_log'];
+      'cash_sessions', 'cash_movements', 'backups_log', 'ref_categories', 'ref_templates'];
     const missing = expected.filter(t => !tables.includes(t));
     check(`Complete Schema Bootstrap (${expected.length - missing.length}/${expected.length} tables verified)`,
       integ === 'ok' && missing.length === 0, missing.length ? `missing: ${missing.join(',')}` : `integrity=${integ}`);
