@@ -1,6 +1,6 @@
 [package]
 name = "baraka-market"
-version = "1.0.0"
+version = "1.0.1"
 description = "Baraka Market - Supermarket POS Shell (Tauri v2)"
 edition = "2021"
 
