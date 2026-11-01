@@ -170,6 +170,11 @@ fn main() {
         Err(e) => eprintln!("[baraka] db provisioning FAILED: {e}"),
     }
     tauri::Builder::default()
+        // T9 (ADR-032): silent updater — no dialog. The UI drives check/
+        // download/install explicitly (AR/FR) so a cashier never gets a
+        // surprise restart mid-shift.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             db_status,
             loopback_token,

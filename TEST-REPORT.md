@@ -47,7 +47,8 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | T8 users lane: verify + owner-only create + lockout + audit | server/index.test.ts | +1 | ✅ 1/1 |
 | T8 self-auth without token; rest stays 401-gated | server/index.test.ts | +1 | ✅ 1/1 |
 | CORS preflight 204 + `*` on reads (T8, ADR-031) | server/index.test.ts | +1 | ✅ 1/1 |
-| **Total** | **35 files** | **258** | **✅ 258/258, 0 fail** |
+| Update lane: semver math + native-only degrade (T9, ADR-032) | src/core/update-lane.test.ts | +2 | ✅ 2/2 |
+| **Total** | **36 files** | **260** | **✅ 260/260, 0 fail** |
 
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
@@ -63,7 +64,7 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 258/258 + Rust 11/11 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 260/260 + Rust 11/11 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

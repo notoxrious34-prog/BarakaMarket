@@ -85,7 +85,8 @@ export function isSessionLive(s: Session, now = Date.now(), idleMs = SESSION_IDL
 /** Security audit actions (T8). Transactional audit is T10. */
 export type AuditAction =
   | 'login.ok' | 'login.fail' | 'login.locked' | 'logout' | 'session.lock' | 'session.unlock'
-  | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset';
+  | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
+  | 'update.check' | 'update.install';
 
 export interface AuditEvent {
   actor: string;

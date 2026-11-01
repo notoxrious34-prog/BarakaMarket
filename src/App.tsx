@@ -9,6 +9,7 @@ import { LicenseManagerView } from './components/License/LicenseManagerView';
 import { LoginScreen } from './components/Session/LoginScreen';
 import { UsersManagerView } from './components/Session/UsersManagerView';
 import { AuditLogView } from './components/Session/AuditLogView';
+import { UpdateManagerView } from './components/Settings/UpdateManagerView';
 import { StoreProfileView } from './components/Settings/StoreProfileView';
 import { SuppliersPurchasesView } from './components/Suppliers/SuppliersPurchasesView';
 import { CashSessionsView } from './components/Cash/CashSessionsView';
@@ -67,6 +68,7 @@ const MainLayout: React.FC = () => {
         {activeView === 'settings' && (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             <StoreProfileView />
+            <UpdateManagerView />
             <UsersManagerView />
             <AuditLogView />
             <BackupManagerView />

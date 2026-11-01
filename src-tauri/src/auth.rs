@@ -241,7 +241,12 @@ pub fn user_verify(conn: &Connection, username: &str, pin: &str) -> Result<Value
 
 /// T8: client-side security events (logout, session lock/unlock) — both
 /// lanes audit verify server-side already; this covers the local-only ones.
-pub fn audit_log(conn: &Connection, actor: &str, action: &str, detail: &str) -> Result<Value, String> {
+pub fn audit_log(
+    conn: &Connection,
+    actor: &str,
+    action: &str,
+    detail: &str,
+) -> Result<Value, String> {
     audit(conn, actor, action, detail);
     Ok(json!({ "ok": true }))
 }

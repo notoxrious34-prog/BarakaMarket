@@ -24,12 +24,23 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' asset: data: blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:3100"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' asset: data: blob:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:3100 https://github.com https://objects.githubusercontent.com"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "endpoints": [
+        "https://github.com/notoxrious34-prog/BarakaMarket/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdFMEUwNDY2MkM3MDlCNDgKUldSSW0zQXNaZ1FPZnNwelZ4ODBBby9RSnZTSXdFd1h2SDBYLzEyVllPMXlqWFhLdXc2cFFKRVMK"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico", "icons/icon.png", "../public/brand/baraka-mark-256.png"],
     "category": "Business",
     "shortDescription": "Système de caisse POS — TVA Algérie, SQLite WAL, Zero-Cloud",

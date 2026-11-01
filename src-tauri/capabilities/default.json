@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Baraka Market v1 shell — no privileged APIs yet (localStorage lane)",
   "windows": ["main"],
-  "permissions": []
+  "permissions": ["updater:default", "process:default"]
 }
