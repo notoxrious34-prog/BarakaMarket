@@ -81,10 +81,9 @@ export async function listSessionUsers(): Promise<SessionUser[] | null> {
 
 /** Change own PIN (old PIN required). False when neither lane answers. */
 export async function changeSessionPin(userId: number, oldPin: string, newPin: string): Promise<boolean> {
+  // T12: the native lane owns PIN change (the exe has no loopback server).
   const native = await invokeNative<{ ok?: boolean }>('change_pin', { userId, oldPin, newPin });
   if (native && native.ok) return true;
-  // No native change_pin command: the exe lane changes via... (T8 scope:
-  // loopback lane; native change_pin arrives with user management T8b).
   if (isTauriRuntime()) return false;
   return (await postLoopback<{ ok?: boolean }>('/api/users/pin', { userId, oldPin, newPin }))?.ok === true;
 }

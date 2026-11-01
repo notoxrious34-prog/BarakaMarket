@@ -20,8 +20,9 @@ the update check — Zero-Cloud holds.
 2. **Check free, install gated.** Every role may CHECK (information);
    download+install is manager+ (`role !== 'cashier'`). Both audited
    (`update.check` / `update.install` — union extended in `rbac.ts`).
-3. **Signing keypair generated locally** (`D:/baraka-secrets/baraka-updater.key`,
-   OUTSIDE the repo, no password for non-interactive release signing).
+3. **Signing keypair generated locally** (`.secrets/baraka-updater.key`,
+   INSIDE the repo folder but gitignored — the repo is public, so the key
+   must never be committed or pushed),
    Public key pinned in `tauri.conf.json`. The private key file MUST be backed
    up to USB by the owner — losing it orphans every installed copy (it will
    reject all future updates). Release signing: `TAURI_SIGNING_PRIVATE_KEY`

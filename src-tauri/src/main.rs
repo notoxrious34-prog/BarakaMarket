@@ -111,6 +111,15 @@ fn user_verify(username: String, pin: String) -> Result<serde_json::Value, Strin
     auth::user_verify(&conn, &username, &pin)
 }
 
+/// T12 fix: native PIN change. The exe never had this command — forced-change
+/// died with "check the connection" because no loopback runs in the shell.
+#[tauri::command]
+fn change_pin(userId: i64, oldPin: String, newPin: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::user_change_pin(&conn, userId, &oldPin, &newPin)
+}
+
 /// T8: native safe user list (secrets never leave the DAL).
 #[tauri::command]
 fn user_list() -> Result<serde_json::Value, String> {
@@ -184,6 +193,7 @@ fn main() {
             product_list,
             product_search,
             user_verify,
+            change_pin,
             user_list,
             audit_list,
             audit_log

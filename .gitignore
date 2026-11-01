@@ -13,6 +13,9 @@ coverage/
 *.db-shm
 # ADR-002: owner Ed25519 private key — NEVER commit.
 *.pem
+# T12: updater signing key lives in-repo but gitignored (public repo —
+# a leaked key lets anyone sign trojan updates for every shop install).
+.secrets/
 setup/
 *.nsis.exe
 releases/

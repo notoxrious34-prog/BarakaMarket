@@ -65,12 +65,13 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Legacy climb restores triggers on v5 (T11, ADR-034) | src-tauri/src/fiscal.rs | +1 (climb assert) | ✅ |
 | Raw-SQL abuse blocked: deletes + CANCELLED resurrection (T11) | src-tauri/src/fiscal.rs | +1 | ✅ |
 | Audit/users append-only under direct SQL (T11) | src-tauri/src/auth.rs | +1 | ✅ |
-| **Total Rust** | **3 files** | **13** | **✅ 13/13, 0 fail** |
+| Native PIN change: wrong-old/format rejected, flag cleared (T12, ADR-035) | src-tauri/src/auth.rs | +1 | ✅ |
+| **Total Rust** | **3 files** | **14** | **✅ 14/14, 0 fail** |
 | `cargo check --offline` | main.rs + fiscal.rs | compile | ✅ clean |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 265/265 + Rust 13/13 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 266/266 + Rust 14/14 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

@@ -239,6 +239,44 @@ pub fn user_verify(conn: &Connection, username: &str, pin: &str) -> Result<Value
     Ok(json!({ "ok": false, "locked": nlocked > now_ms }))
 }
 
+/// T12 fix: native PIN change (the exe never had this command — forced-change
+/// died with "check the connection" because no loopback runs in the shell).
+/// The old PIN must verify; no lockout counting here (identity was just proven
+/// via verify, or the session is mid forced-change); rejections stay generic.
+pub fn user_change_pin(
+    conn: &Connection,
+    user_id: i64,
+    old_pin: &str,
+    new_pin: &str,
+) -> Result<Value, String> {
+    if !verify_pin_format(new_pin) {
+        return Err("[auth] new PIN must be 4-8 digits".to_string());
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT username, pin_verifier FROM users WHERE id = ?1 AND active = 1",
+            [user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((uname, verifier)) = row else {
+        return Err("[auth] unknown or inactive user".to_string());
+    };
+    if !verify_pin_verifier(old_pin, &verifier) {
+        audit(conn, &uname, "pin.change", "rejected: old mismatch");
+        return Err("[auth] current PIN is incorrect".to_string());
+    }
+    let v = mint_verifier(new_pin)?;
+    conn.execute(
+        "UPDATE users SET pin_verifier = ?1, must_change_pin = 0 WHERE id = ?2",
+        rusqlite::params![v, user_id],
+    )
+    .map_err(|e| e.to_string())?;
+    audit(conn, &uname, "pin.change", "");
+    Ok(json!({ "ok": true }))
+}
+
 /// T8: client-side security events (logout, session lock/unlock) — both
 /// lanes audit verify server-side already; this covers the local-only ones.
 pub fn audit_log(
@@ -358,5 +396,23 @@ mod tests {
             .execute("UPDATE audit_log SET detail = 'x'", [])
             .is_err());
         assert!(conn.execute("DELETE FROM users", []).is_err());
+    }
+
+    #[test]
+    fn change_pin_verifies_old_clears_forced_flag() {
+        // T12: the forced-change screen died in the exe for lack of this lane.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        migrate_v4(&conn).unwrap();
+        // Wrong old PIN rejected, nothing rewritten.
+        assert!(super::user_change_pin(&conn, 1, "0000", "5678").is_err());
+        // Bad format rejected.
+        assert!(super::user_change_pin(&conn, 1, "1234", "12").is_err());
+        // Correct change: ok, forced flag cleared, new PIN verifies.
+        let out = super::user_change_pin(&conn, 1, "1234", "5678").unwrap();
+        assert_eq!(out["ok"], true);
+        let v = super::user_verify(&conn, "owner", "5678").unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["user"]["must_change_pin"], 0);
     }
 }

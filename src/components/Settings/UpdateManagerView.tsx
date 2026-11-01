@@ -22,7 +22,7 @@ export const UpdateManagerView: React.FC = () => {
   const [done, setDone] = useState<string | null>(null);
 
   const canInstall = !!session && session.role !== 'cashier';
-  const current = '1.0.1'; // bumped with package.json + tauri.conf.json per release
+  const current = '1.1.0'; // bumped with package.json + tauri.conf.json per release
 
   const check = async () => {
     setBusy(true);

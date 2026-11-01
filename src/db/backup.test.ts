@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { openBarakaDb } from './sqlite.js';
+import { calculateSaleTotalsCt } from '../core/fiscal.centimes.js';
 
 const TMP = path.resolve('data/.tmp-tests/backups');
 const tmpDb = (name: string): string => {
@@ -112,6 +113,41 @@ test('backup: invalid restore target aborts, live DB untouched', () => {
   assert.equal(b.getProduct(46).name_fr, 'PROD 46');
   assert.throws(() => openBarakaDb(':memory:').restoreBackupSafely(dbPath), /:memory:/);
   b.close();
+});
+
+test('backup §11: sale → backup → void → restore → identical journal', () => {
+  // Shop-ready definition: the journal after restore is EXACTLY the journal
+  // at backup time — same invoice, same active count, void gone.
+  const dbPath = tmpDb('shopready.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(47, '6130000000474'));
+  const line = {
+    product_id: 47, barcode: '6130000000474', name_fr: 'PROD 47', name_ar: '',
+    unit_price_ct: 1500, qty_milli: 1000, unit: 'PIECE' as const, tva_rate: 0 as const,
+    discount_bp: 0, line_ht_ct: 1500, line_tva_ct: 0, line_ttc_ct: 1500,
+  };
+  const totals = calculateSaleTotalsCt(
+    [{ tva_rate: 0 as const, total_line_ht_ct: 1500, total_line_tva_ct: 0, total_line_ttc_ct: 1500 }],
+    'ESPECES',
+  );
+  const hdr = {
+    cashier_id: 'U-1', cashier_name: 'Shop', payment_method: 'ESPECES' as const,
+    amount_paid_ct: 1500, amount_returned_ct: 0, totals, created_at: '2026-11-01T12:00:00.000Z',
+  };
+  const kept = b.recordSale({ ...hdr, client_sale_id: 'SHOP-1' }, [line]);
+  const meta = b.createDatabaseBackup({ destinationDir: TMP, label: 'shopready' });
+  const doomed = b.recordSale({ ...hdr, client_sale_id: 'SHOP-2' }, [line]);
+  b.voidSale(doomed.id, 'post-backup void', 'Shop');
+  assert.equal(b.activeSalesCount(), 1);
+  const out = b.restoreBackupSafely(meta.filePath);
+  assert.equal(out.success, true);
+  const fresh = openBarakaDb(dbPath);
+  assert.equal(fresh.activeSalesCount(), 1);
+  const rows = fresh.db.prepare('SELECT invoice_number AS n FROM sales').all() as { n: string }[];
+  assert.deepEqual(rows.map(r => r.n), [kept.invoice_number]);
+  fresh.close();
+  fs.rmSync(out.quarantineBackupPath);
+  fs.rmSync(meta.filePath);
 });
 
 test('backup: catalog lists newest-first, tampered files flagged CORRUPT', () => {
