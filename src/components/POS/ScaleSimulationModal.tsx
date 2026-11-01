@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Scale, Barcode, CheckCircle, X, ShoppingBag } from 'lucide-react';
+import { Scale, Barcode, CheckCircle, X, ShoppingBag, Cable } from 'lucide-react';
 import { formatDZD } from '../../core/display';
+import { connectLiveScale, type ScaleLiveStatus } from '../../hardware/scale';
 
 interface ScaleSimulationModalProps {
   onClose: () => void;
@@ -16,6 +17,34 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
     scaleProducts.length > 0 ? scaleProducts[0].id : 4
   );
   const [weightKg, setWeightKg] = useState<number>(1.45); // default 1.45 kg matching prompt receipt example
+
+  // T6 (ADR-029): live RS-232/USB scale via Web Serial. Streams into the
+  // same simulated weight so the rest of the flow (barcode + POS) is
+  // identical; abort on close/unmount. Absent serial => button explains.
+  const [liveStatus, setLiveStatus] = useState<ScaleLiveStatus | 'idle'>('idle');
+  const [liveStable, setLiveStable] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  const handleLiveConnect = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+      setLiveStatus('idle');
+      return;
+    }
+    const ctl = new AbortController();
+    abortRef.current = ctl;
+    void connectLiveScale(
+      (grams, stable) => {
+        setWeightKg(Math.round(grams) / 1000);
+        setLiveStable(stable);
+      },
+      ctl.signal,
+      { onStatus: (s) => { setLiveStatus(s); if (s === 'closed' || s === 'error') abortRef.current = null; } },
+    ).then((st) => {
+      if (st === 'unsupported') setLiveStatus('unsupported');
+    });
+  };
 
   const selectedProduct = products.find(p => p.id === selectedProductId) || scaleProducts[0];
 
@@ -123,6 +152,22 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
                 </button>
               ))}
             </div>
+
+            {/* T6 live scale lane */}
+            <button
+              type="button"
+              onClick={handleLiveConnect}
+              className="w-full mt-1 flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold border cursor-pointer border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+            >
+              <Cable className="w-4 h-4" />
+              {liveStatus === 'live'
+                ? (isAr ? `ميزان حي: ${(weightKg).toFixed(3)} kg ${liveStable ? '— ثابت' : '…'}` : `Live: ${weightKg.toFixed(3)} kg ${liveStable ? 'STABLE' : '…'}`)
+                : liveStatus === 'connecting'
+                  ? (isAr ? 'اختر منفذ الميزان…' : 'Pick the scale port…')
+                  : liveStatus === 'unsupported'
+                    ? (isAr ? 'لا Serial في هذا المتصفح' : 'No Web Serial here')
+                    : (isAr ? 'ربط الميزان الحي RS-232/USB' : 'Connect live scale RS-232/USB')}
+            </button>
           </div>
 
           {/* Barcode Output Preview */}
