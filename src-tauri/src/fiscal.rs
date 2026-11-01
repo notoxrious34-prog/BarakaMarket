@@ -10,7 +10,7 @@
 use rusqlite::Connection;
 use serde_json::Value;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 3;
+pub const LATEST_SCHEMA_VERSION: i64 = 4;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -79,6 +79,12 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
            ON client_settlements(client_settlement_key) WHERE client_settlement_key IS NOT NULL;",
     )
     .map_err(|e| e.to_string())?;
+    // v3 → v4: T8 users + audit_log (mirrors TS migrateSchemaVersion).
+    if v < 4 {
+        crate::auth::migrate_v4(conn)?;
+        conn.execute_batch("PRAGMA user_version = 4;")
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -542,7 +548,8 @@ mod tests {
     fn migrate_climbs_legacy_file() {
         // Faithful v1 file: strip BOTH key columns from the DDL (production
         // legacy files never had them — no DROP COLUMN simulation needed).
-        let legacy = SCHEMA
+        // Also drop the trailing T8 block: v1 predates users/audit entirely.
+        let mut legacy = SCHEMA
             .replace(
                 "  created_at        TEXT    NOT NULL,\n  -- T1 (ADR-021): idempotency key minted by the checkout at finalize time.\n  -- Retried POSTs with the same key return the original row, never a new seq.\n  client_sale_id    TEXT\n);",
                 "  created_at        TEXT    NOT NULL\n);",
@@ -553,6 +560,11 @@ mod tests {
             );
         assert!(!legacy.contains("client_sale_id"));
         assert!(!legacy.contains("client_settlement_key"));
+        let cut = legacy
+            .find("-- T8 (ADR-031)")
+            .expect("T8 block must trail schema.sql");
+        legacy.truncate(cut);
+        assert!(!legacy.contains("CREATE TABLE users"));
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&legacy).unwrap();
         conn.execute_batch("PRAGMA user_version = 1;").unwrap();
@@ -560,7 +572,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         // Both key columns now exist after the climb.
         let cols: Vec<String> = conn
             .prepare("PRAGMA table_info(sales)")

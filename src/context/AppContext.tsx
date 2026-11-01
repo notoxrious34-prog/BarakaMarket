@@ -30,6 +30,8 @@ import {
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
+import { SESSION_IDLE_MS, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative } from '../core/product-authority';
@@ -154,6 +156,23 @@ interface AppContextType {
   generateDailyZReport: () => DailyZReport;
   setHardwareScaleActive: (active: boolean) => void;
   setScaleWeightGrams: (grams: number) => void;
+  /**
+   * T8 (ADR-031): authenticated session. null = nobody logged in — the UI
+   * gates the whole shop behind the PIN screen while null. The fiscal lane
+   * stamps cashier_id/cashier_name from this, never from constants.
+   */
+  session: Session | null;
+  sessionLocked: boolean;
+  sessionUsers: SessionUser[];
+  lockSession: () => void;
+  login: (username: string, pin: string) => Promise<
+    | { ok: true }
+    | { ok: false; locked: boolean; mustChange?: { userId: number; username: string } }
+  >;
+  logout: () => Promise<void>;
+  unlockSession: (pin: string) => Promise<boolean>;
+  changeOwnPin: (oldPin: string, newPin: string) => Promise<boolean>;
+  refreshSessionUsers: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -328,6 +347,114 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isFiscalMode = authority === 'FISCAL_SQLITE';
   const authorityRef = useRef<AuthorityStatus>('PROVISIONAL');
   authorityRef.current = authority;
+
+  // T8 (ADR-031): authenticated session. Persisted across reloads (never the
+  // PIN — only the verified identity + timestamps). Stale sessions die by
+  // idle timeout, never by wall clock: lastActivityAt refreshes on every
+  // fiscal commit, login and unlock.
+  const SESSION_KEY = 'baraka_session_v1';
+  const [session, setSession] = useState<Session | null>(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_KEY);
+      if (!saved) return null;
+      const s = JSON.parse(saved) as Session;
+      if (typeof s.userId !== 'number' || typeof s.username !== 'string' || !s.role) return null;
+      return s.lastActivityAt > 0 ? s : null;
+    } catch {
+      return null;
+    }
+  });
+  const [sessionLocked, setSessionLocked] = useState(false);
+  const [sessionUsers, setSessionUsers] = useState<SessionUser[]>([]);
+  const sessionRef = useRef<Session | null>(session);
+  sessionRef.current = session;
+
+  useEffect(() => {
+    try {
+      if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      else localStorage.removeItem(SESSION_KEY);
+    } catch { /* private mode */ }
+  }, [session]);
+
+  const touchSession = () => {
+    setSession(prev => (prev ? { ...prev, lastActivityAt: Date.now() } : prev));
+  };
+
+  // T8: idle lock — 60s ticker, locks when the session outlives SESSION_IDLE_MS.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const s = sessionRef.current;
+      if (!s) return;
+      if (Date.now() - s.lastActivityAt > SESSION_IDLE_MS) {
+        setSessionLocked(true);
+        void auditSessionEvent(s.username, 'session.lock', 'idle-timeout');
+      }
+    }, 60_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const login = async (username: string, pin: string) => {
+    const r = await loginUser(username.trim(), pin);
+    if (!r.ok) return r;
+    if (r.user.must_change_pin === 1) {
+      return { ok: false as const, locked: false, mustChange: { userId: r.user.id, username: r.user.username } };
+    }
+    setSessionLocked(false);
+    setSession({
+      userId: r.user.id, username: r.user.username, displayName: r.user.display_name,
+      role: r.user.role, loginAt: Date.now(), lastActivityAt: Date.now(),
+    });
+    return { ok: true as const };
+  };
+
+  const logout = async (): Promise<void> => {
+    const s = sessionRef.current;
+    if (s) await auditSessionEvent(s.username, 'logout');
+    setSessionLocked(false);
+    setSession(null);
+    setSessionUsers([]);
+  };
+
+  const unlockSession = async (pin: string): Promise<boolean> => {
+    const s = sessionRef.current;
+    if (!s) return false;
+    const r = await loginUser(s.username, pin);
+    if (!r.ok) return false;
+    if (r.user.must_change_pin === 1) return false; // forced change goes through changeOwnPin
+    setSession({ ...s, loginAt: Date.now(), lastActivityAt: Date.now() });
+    setSessionLocked(false);
+    await auditSessionEvent(s.username, 'session.unlock');
+    return true;
+  };
+
+  const changeOwnPin = async (oldPin: string, newPin: string): Promise<boolean> => {
+    const s = sessionRef.current;
+    if (!s) return false;
+    const ok = await changeSessionPin(s.userId, oldPin, newPin);
+    if (ok) await auditSessionEvent(s.username, 'pin.change');
+    return ok;
+  };
+
+  const refreshSessionUsers = async (): Promise<void> => {
+    const list = await listSessionUsers();
+    if (list) setSessionUsers(list);
+  };
+
+  const lockSession = (): void => {
+    const s = sessionRef.current;
+    if (!s) return;
+    setSessionLocked(true);
+    void auditSessionEvent(s.username, 'session.lock', 'manual');
+  };
+
+  // T8: the operator stamp every fiscal AND provisional row carries.
+  const cashierStamp = () => {
+    const s = sessionRef.current;
+    return {
+      cashier_id: s ? `U-${s.userId}` : 'C-00',
+      cashier_name: s ? s.displayName : '—',
+    };
+  };
 
   // Gate-02 TASK 1: probe native shell / loopback once on mount.
   useEffect(() => {
@@ -685,8 +812,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       id: `SALE-${Date.now()}`,
       invoice_number: invoiceNumber,
       ticket_number: ticketNumber,
-      cashier_id: 'C-01',
-      cashier_name: 'Amine',
+      ...cashierStamp(),
       client_id: selectedClient.id,
       client_name: selectedClient.name,
       client_nif: selectedClient.nif,
@@ -809,6 +935,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amountPaid: number,
     isFactureReglementaire = false,
   ): Promise<Sale> => {
+    // T8: no anonymous money. The UI gates behind the PIN screen; this guard
+    // is the second wall (programmatic callers included).
+    if (!sessionRef.current) throw new Error('[sale] login required');
+    touchSession();
     if (currentCart.length === 0) {
       return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
     }
@@ -850,8 +980,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }));
       const fiscalHeader: AuthorityHeaderInput = {
         client_sale_id: saleKey,
-        cashier_id: 'C-01',
-        cashier_name: 'Amine',
+        ...cashierStamp(),
         client_id: selectedClient.id,
         client_name: selectedClient.name,
         payment_method: paymentMethod,
@@ -891,8 +1020,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         id: out.id,
         invoice_number: out.invoice_number,
         ticket_number: out.ticket_number,
-        cashier_id: 'C-01',
-        cashier_name: 'Amine',
+        ...cashierStamp(),
         client_id: selectedClient.id,
         client_name: selectedClient.name,
         items: [...currentCart],
@@ -948,6 +1076,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     paymentMethod: PaymentMethod,
     note?: string
   ): Promise<DebtSettlement> => {
+    if (!sessionRef.current) throw new Error('[settle] login required');
+    touchSession();
     const client = clients.find(c => c.id === clientId);
     const clientName = client ? client.name : `Client #${clientId}`;
     const prevBalance = client ? client.credit_balance : amount;
@@ -1427,6 +1557,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         generateDailyZReport,
         setHardwareScaleActive,
         setScaleWeightGrams,
+        session,
+        sessionLocked,
+        sessionUsers,
+        lockSession,
+        login,
+        logout,
+        unlockSession,
+        changeOwnPin,
+        refreshSessionUsers,
       }}
     >
       {children}

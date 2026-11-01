@@ -40,8 +40,14 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Unified print lane: spool contract + Lane B fallback (T5, ADR-028) | src/core/print-lane.test.ts | +5 | ✅ 5/5 |
 | Scale frames + stability voter + serial guard (T6, ADR-029) | src/hardware/scale.test.ts | +7 | ✅ 7/7 |
 | Power-cut drill: real kill, clean recovery, replay-once (T7, ADR-030) | src/db/powercut-drill.test.ts | +2 | ✅ 2/2 |
+| RBAC core: hierarchy + lockout/backoff math + session liveness (T8, ADR-031) | src/core/rbac.test.ts | +3 | ✅ 3/3 |
+| Session bridge: verify shape + lockout surface + down-lane safety (T8, ADR-031) | src/core/session-authority.test.ts | +3 | ✅ 3/3 |
+| Users DAL: seed + verify/lockout + CRUD + audit + legacy climb (T8, ADR-031) | src/db/rbac.test.ts | +4 | ✅ 4/4 |
 | Pole spool routing `spool: pole-display-spool.bin` (T5, ADR-028) | server/index.test.ts | +1 | ✅ 1/1 |
-| **Total** | **33 files** | **243** | **✅ 243/243, 0 fail** |
+| T8 users lane: verify + owner-only create + lockout + audit | server/index.test.ts | +1 | ✅ 1/1 |
+| T8 self-auth without token; rest stays 401-gated | server/index.test.ts | +1 | ✅ 1/1 |
+| CORS preflight 204 + `*` on reads (T8, ADR-031) | server/index.test.ts | +1 | ✅ 1/1 |
+| **Total** | **35 files** | **258** | **✅ 258/258, 0 fail** |
 
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
@@ -49,14 +55,15 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Native sale commit + dedupe by key (stock drains once) | src-tauri/src/fiscal.rs | 1 | ✅ |
 | Broken invariant rejected, zero rows written | src-tauri/src/fiscal.rs | 1 | ✅ |
 | Native settlement commit + dedupe + balance | src-tauri/src/fiscal.rs | 1 | ✅ |
-| Faithful v1 DDL climbs to v3 (dual-lane migration) | src-tauri/src/fiscal.rs | 1 | ✅ |
+| Faithful v1 DDL climbs to v4 + owner seed (dual-lane migration, T8) | src-tauri/src/fiscal.rs | 1 | ✅ |
 | Native product upsert/list/search (T4c, ADR-027) | src-tauri/src/product.rs | +3 | ✅ |
-| **Total Rust** | **2 files** | **7** | **✅ 7/7, 0 fail** |
+| SHA-256 NIST vectors + verifier round-trip + native lockout + migrate_v4 seed (T8, ADR-031) | src-tauri/src/auth.rs | +4 | ✅ |
+| **Total Rust** | **3 files** | **11** | **✅ 11/11, 0 fail** |
 | `cargo check --offline` | main.rs + fiscal.rs | compile | ✅ clean |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 243/243 + Rust 7/7 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 258/258 + Rust 11/11 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

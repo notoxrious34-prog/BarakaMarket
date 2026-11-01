@@ -6,6 +6,9 @@ import { ProductsStockView } from './components/Inventory/ProductsStockView';
 import { CarnetDetteView } from './components/Clients/CarnetDetteView';
 import { DailyZReportView } from './components/Reports/DailyZReportView';
 import { LicenseManagerView } from './components/License/LicenseManagerView';
+import { LoginScreen } from './components/Session/LoginScreen';
+import { UsersManagerView } from './components/Session/UsersManagerView';
+import { AuditLogView } from './components/Session/AuditLogView';
 import { StoreProfileView } from './components/Settings/StoreProfileView';
 import { SuppliersPurchasesView } from './components/Suppliers/SuppliersPurchasesView';
 import { CashSessionsView } from './components/Cash/CashSessionsView';
@@ -28,6 +31,8 @@ const MainLayout: React.FC = () => {
     language,
     needsStoreSetup,
     isFiscalMode,
+    session,
+    sessionLocked,
   } = useApp();
 
   // Global hotkeys: Ctrl+L to toggle language
@@ -41,6 +46,10 @@ const MainLayout: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [toggleLanguage]);
+
+  // T8 (ADR-031): no session (or a locked one) = no shop. The PIN screen is
+  // a full takeover — no view, no footer, no hotkey surface behind it.
+  if (!session || sessionLocked) return <LoginScreen />;
 
   return (
     <div className="min-h-screen bg-[#0b0f17] text-slate-100 flex flex-col font-sans select-none antialiased">
@@ -58,6 +67,8 @@ const MainLayout: React.FC = () => {
         {activeView === 'settings' && (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             <StoreProfileView />
+            <UsersManagerView />
+            <AuditLogView />
             <BackupManagerView />
           </div>
         )}
@@ -67,7 +78,9 @@ const MainLayout: React.FC = () => {
       <footer className="px-4 py-1 bg-slate-100 dark:bg-[#070a0f] border-t border-slate-200 dark:border-[#162030] text-[10px] text-slate-600 dark:text-slate-500 flex items-center justify-between gap-2 select-none transition-colors">
         <span>
           {language === 'ar' ? 'الكاشير:' : 'Caissier:'}{' '}
-          <span className="text-slate-800 dark:text-slate-300 font-medium">Amine (Caisse 01)</span>
+          <span className="text-slate-800 dark:text-slate-300 font-medium">
+            {session ? `${session.displayName} (${session.role})` : '—'}
+          </span>
         </span>
         <span className="flex items-center gap-2">
           {isFiscalMode ? (

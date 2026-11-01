@@ -333,3 +333,57 @@ test('api: GET /reference/templates autofills elio/tango in FR + AR', async () =
   const limited = await (await fetch(`${base}/api/reference/templates?q=a&limit=2`)).json() as Hit[];
   assert.ok(limited.length <= 2);
 });
+
+test('api: T8 users lane — verify, owner-only create, lockout, audit', async () => {
+  const post = async (p: string, body: unknown) =>
+    fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // Seeded owner verifies with the default PIN.
+  const v = (await (await post('/api/users/verify', { username: 'owner', pin: '1234' })).json()) as { ok: boolean; user: { role: string; must_change_pin: number } };
+  assert.equal(v.ok, true);
+  assert.equal(v.user.role, 'owner');
+  assert.equal(v.user.must_change_pin, 1);
+  // Non-owner cannot create users.
+  const denied = await post('/api/users', { username: 'sara', role: 'manager', pin: '5678', requesterRole: 'cashier' });
+  assert.equal(denied.status, 403);
+  // Owner creates a manager; manager verifies.
+  const created = await post('/api/users', { username: 'sara', display_name: 'Sara', role: 'manager', pin: '5678', requesterRole: 'owner', actor: 'owner' });
+  assert.equal(created.status, 201);
+  const vm = await (await post('/api/users/verify', { username: 'sara', pin: '5678' })).json() as { ok: boolean };
+  assert.equal(vm.ok, true);
+  // Five wrong PINs lock the account.
+  for (let i = 0; i < 5; i++) await post('/api/users/verify', { username: 'sara', pin: '0000' });
+  const locked = await (await post('/api/users/verify', { username: 'sara', pin: '5678' })).json() as { ok: boolean; locked: boolean };
+  assert.equal(locked.ok, false);
+  assert.equal(locked.locked, true);
+  // Audit trail records the security events.
+  const audit = await (await fetch(`${base}/api/audit?limit=50`)).json() as { action: string }[];
+  const actions = audit.map(a => a.action);
+  for (const a of ['user.create', 'login.ok', 'login.fail', 'login.locked']) assert.ok(actions.includes(a), `audit has ${a}`);
+});
+
+test('api: T8 self-auth posts work WITHOUT the loopback token; the rest stay gated', async () => {
+  // Negative path: _rawFetch bypasses the file's token-injecting fetch shim.
+  const bare = (p: string, body: unknown) =>
+    _rawFetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // verify without token: owner still has PIN 1234 in the test DB seed path
+  // (fresh DB per file run) — must_change_pin forces the shape, not a 401.
+  const v = await bare('/api/users/verify', { username: 'owner', pin: '1234' });
+  assert.notEqual(v.status, 401);
+  const j = (await v.json()) as { ok: boolean; user?: { must_change_pin: number } };
+  assert.equal(j.ok, true);
+  assert.equal(j.user?.must_change_pin, 1);
+  // wrong PIN without token => 401 verdict (locked:false), NOT "token required".
+  const w = ((await (await bare('/api/users/verify', { username: 'owner', pin: '0000' })).json()) as { locked: boolean; ok: boolean });
+  assert.equal(w.ok, false);
+  // create WITHOUT token stays 401 even with owner role claimed.
+  const c = await bare('/api/users', { username: 'mallory', role: 'manager', pin: '1111', requesterRole: 'owner' });
+  assert.equal(c.status, 401);
+});
+
+test('api: CORS preflight passes on the loopback; token gate intact', async () => {
+  const pre = await _rawFetch(`${base}/api/users/verify`, { method: 'OPTIONS' });
+  assert.equal(pre.status, 204);
+  assert.equal(pre.headers.get('access-control-allow-origin'), '*');
+  const get = await _rawFetch(`${base}/api/users`);
+  assert.equal(get.headers.get('access-control-allow-origin'), '*');
+});

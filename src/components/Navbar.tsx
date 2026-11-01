@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { can, type Permission } from '../core/rbac';
 import {
   ShoppingCart,
   Package,
@@ -18,6 +19,8 @@ import {
   Banknote,
   Sun,
   Moon,
+  Lock,
+  LogOut,
 } from 'lucide-react';
 import { formatDZD } from '../core/display';
 
@@ -37,11 +40,38 @@ export const Navbar: React.FC = () => {
     isHardwareScaleActive,
     setHardwareScaleActive,
     scaleWeightGrams,
+    session,
+    logout,
+    lockSession,
   } = useApp();
 
   const [showHeldDropdown, setShowHeldDropdown] = useState(false);
 
   const isAr = language === 'ar';
+
+  // T8 (ADR-031): the nav shows only what the session role may touch.
+  // Defense in depth — every lane re-checks server-side; hiding buttons is UX.
+  const role = session?.role ?? 'cashier';
+  const tabs: { view: 'pos' | 'products' | 'suppliers' | 'clients' | 'accounting' | 'reports' | 'shifts' | 'license'; perm: Permission; icon: React.ReactNode; label: string; title?: string; amber?: boolean }[] = [
+    { view: 'pos', perm: 'sell', icon: <ShoppingCart className="w-4 h-4 flex-shrink-0" />, label: isAr ? 'الكاشير' : 'Caisse' },
+    { view: 'products', perm: 'products.edit', icon: <Package className="w-4 h-4" />, label: isAr ? 'المخزون' : 'Stock' },
+    { view: 'suppliers', perm: 'products.edit', icon: <Truck className="w-4 h-4 text-amber-400" />, label: isAr ? 'الموردون' : 'Fournisseurs', title: isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats' },
+    { view: 'clients', perm: 'settle', icon: <BookOpen className="w-4 h-4" />, label: isAr ? 'الديون (F9)' : 'Dettes (F9)', title: isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)' },
+    { view: 'accounting', perm: 'accounting.view', icon: <PieChart className="w-4 h-4 text-emerald-400" />, label: isAr ? 'المحاسبة' : 'Compta', title: isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF' },
+    { view: 'reports', perm: 'accounting.view', icon: <FileText className="w-4 h-4" />, label: isAr ? 'تقرير Z' : 'Rapport Z', title: isAr ? 'تقرير Z اليومي' : 'Rapport Z journalier' },
+    { view: 'shifts', perm: 'z.close', icon: <Banknote className="w-4 h-4 text-amber-400" />, label: isAr ? 'إغلاق' : 'Clôture', title: isAr ? 'إغلاق الصندوق وتقرير Z' : 'Caisse & Clôture / Z' },
+    { view: 'license', perm: 'settings.edit', icon: <KeyRound className="w-4 h-4 text-amber-400" />, label: isAr ? 'الرخصة' : 'Licence', amber: true },
+  ];
+  const visibleTabs = tabs.filter(t => can(role, t.perm));
+  const showSettings = can(role, 'settings.edit') || can(role, 'audit.view');
+
+  // Role change (or a fresh login) never strands the UI on a hidden view.
+  useEffect(() => {
+    if (!session) return;
+    const ok = visibleTabs.some(t => t.view === activeView) || (activeView === 'settings' && showSettings);
+    if (!ok) setActiveView('pos');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.role, activeView]);
 
   return (
     <header className="bg-[#0b0f17] border-b border-[#1e293b] text-slate-200 select-none sticky top-0 z-40 transition-colors">
@@ -78,123 +108,68 @@ export const Navbar: React.FC = () => {
 
         {/* Navigation Tabs */}
         <nav className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto no-scrollbar">
-          <button
-            onClick={() => setActiveView('pos')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'pos'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <ShoppingCart className="w-4 h-4 flex-shrink-0" />
-            <span>{isAr ? 'الكاشير' : 'Caisse'}</span>
-          </button>
+          {visibleTabs.map(t => (
+            <button
+              key={t.view}
+              onClick={() => setActiveView(t.view)}
+              title={t.title}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
+                activeView === t.view
+                  ? t.amber
+                    ? 'bg-amber-600 text-white shadow-md shadow-amber-900/40'
+                    : 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
+                  : t.amber
+                    ? 'text-amber-400/90 hover:bg-[#162030] hover:text-amber-300'
+                    : 'text-slate-300 hover:bg-[#162030] hover:text-white'
+              }`}
+            >
+              {t.icon}
+              <span>{t.label}</span>
+            </button>
+          ))}
 
-          <button
-            onClick={() => setActiveView('products')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'products'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <Package className="w-4 h-4" />
-            <span>{isAr ? 'المخزون' : 'Stock'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('suppliers')}
-            title={isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'suppliers'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <Truck className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'الموردون' : 'Fournisseurs'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('clients')}
-            title={isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'clients'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <BookOpen className="w-4 h-4" />
-            <span>{isAr ? 'الديون (F9)' : 'Dettes (F9)'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('accounting')}
-            title={isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'accounting'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <PieChart className="w-4 h-4 text-emerald-400" />
-            <span>{isAr ? 'المحاسبة' : 'Compta'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('reports')}
-            title={isAr ? 'تقرير Z اليومي' : 'Rapport Z journalier'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'reports'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            <span>{isAr ? 'تقرير Z' : 'Rapport Z'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('shifts')}
-            title={isAr ? 'إغلاق الصندوق وتقرير Z' : 'Caisse & Clôture / Z'}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'shifts'
-                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
-                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
-            }`}
-          >
-            <Banknote className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'إغلاق' : 'Clôture'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('license')}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
-              activeView === 'license'
-                ? 'bg-amber-600 text-white shadow-md shadow-amber-900/40'
-                : 'text-amber-400/90 hover:bg-[#162030] hover:text-amber-300'
-            }`}
-          >
-            <KeyRound className="w-4 h-4 text-amber-400" />
-            <span>{isAr ? 'الرخصة' : 'Licence'}</span>
-          </button>
-
-          <button
-            onClick={() => setActiveView('settings')}
-            className={`p-2 rounded-lg text-xs font-medium transition-all cursor-pointer flex-shrink-0 ${
-              activeView === 'settings'
-                ? 'bg-slate-700 text-white'
-                : 'text-slate-400 hover:bg-[#162030] hover:text-white'
-            }`}
-            title={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
-            aria-label={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
-          >
-            <Settings className="w-4 h-4" />
-          </button>
+          {showSettings && (
+            <button
+              onClick={() => setActiveView('settings')}
+              className={`p-2 rounded-lg text-xs font-medium transition-all cursor-pointer flex-shrink-0 ${
+                activeView === 'settings'
+                  ? 'bg-slate-700 text-white'
+                  : 'text-slate-400 hover:bg-[#162030] hover:text-white'
+              }`}
+              title={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
+              aria-label={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+          )}
         </nav>
 
         {/* Hardware & Tools Right Bar */}
         <div className="flex items-center gap-2 shrink-0">
+          {/* T8: who is holding the till — lock + logout one tap away. */}
+          {session && (
+            <span className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 bg-[#162030] border border-[#2b3a4f] rounded-lg text-xs">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
+              <span className="text-slate-200 font-medium max-w-24 truncate">{session.displayName}</span>
+              <span className={`px-1 rounded text-[10px] font-bold ${session.role === 'owner' ? 'bg-amber-500/20 text-amber-300' : session.role === 'manager' ? 'bg-sky-500/20 text-sky-300' : 'bg-slate-500/20 text-slate-300'}`}>
+                {session.role}
+              </span>
+              <button
+                onClick={() => lockSession()}
+                className="text-slate-400 hover:text-amber-300 transition-colors cursor-pointer"
+                title={isAr ? 'قفل الجلسة' : 'Verrouiller'}
+              >
+                <Lock className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => { setShowHeldDropdown(false); void logout(); }}
+                className="text-slate-400 hover:text-red-300 transition-colors cursor-pointer"
+                title={isAr ? 'تسجيل الخروج' : 'Déconnexion'}
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </span>
+          )}
           {/* Day / Night Theme Toggle */}
           <button
             onClick={toggleTheme}

@@ -15,6 +15,7 @@ import type {
 } from '../src/types/index.js';
 import { buildThermalSettlementQuittance, buildThermalZReport } from '../src/hardware/escpos.js';
 import { isValidPinFormat } from '../src/core/security.js';
+import { can, type Role } from '../src/core/rbac.js';
 import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
@@ -44,16 +45,114 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
 
   // T4 (ADR-025): loopback write token. First boot mints 256-bit hex beside
   // the DB file; the native shell relays it via invoke('loopback_token').
-  // GETs stay open (read-only); every mutating /api/* call needs the header.
+  // GETs stay open (read-only); every mutating /api/* call needs the header —
+  // EXCEPT verify/changePin (T8): the PIN itself is the credential there
+  // (old PIN required, 5-strike lockout + audit are the brute-force shield),
+  // so the login screen works on every lane including the dev browser.
+  // NOTE: inside app.use('/api') the mount is stripped, so paths are
+  // '/users/verify' — not '/api/users/verify' (guarded by a test below).
+  const SELF_AUTH_POSTS = new Set(['/users/verify', '/users/pin']);
   const token = ensureLoopbackToken(path.dirname(path.resolve(dbPath)));
+  // T8b-CORS (ADR-031): the loopback binds 127.0.0.1 only, but the dev
+  // browser (preview :4173, Tauri WebView) is a different origin. Without
+  // CORS every lane fetch dies at preflight and the browser is stuck
+  // provisional forever — the FISCAL_SQLITE probe can never answer.
+  // Safe to open: writes still need the loopback token (verify/pin are
+  // self-auth by PIN+lockout), and no endpoint ever RETURNS the token.
   app.use('/api', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, x-baraka-loopback');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
     if (req.method === 'GET') return next();
+    if (req.method === 'POST' && SELF_AUTH_POSTS.has(req.path)) return next();
     if (req.headers['x-baraka-loopback'] === token) return next();
     res.status(401).json({ error: 'loopback token required' });
   });
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, db: path.resolve(dbPath), ...baraka.pragmas() });
+  });
+
+  // T8 (ADR-031): users + security audit. verify/changePin are open to the
+  // local lane (the PIN itself is the credential); user management requires
+  // the requester's owner role, enforced here — not just in the UI.
+  app.post('/api/users/verify', (req, res) => {
+    try {
+      const { username, pin } = req.body as { username?: string; pin?: string };
+      if (!username || typeof pin !== 'string') { res.status(400).json({ error: 'body must be {username, pin}' }); return; }
+      const out = baraka.verifyUser(username, pin);
+      if (!out.ok) { res.status(401).json(out); return; }
+      res.json(out);
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/users', (_req, res) => {
+    res.json(baraka.listUsers());
+  });
+
+  app.post('/api/users', (req, res) => {
+    try {
+      const { username, display_name, role, pin, requesterRole } = req.body as {
+        username?: string; display_name?: string; role?: Role; pin?: string; requesterRole?: Role;
+      };
+      if (requesterRole !== 'owner' || !can('owner', 'users.manage')) {
+        res.status(403).json({ error: 'owner role required' }); return;
+      }
+      if (!username || !role || typeof pin !== 'string') { res.status(400).json({ error: 'body must be {username, role, pin}' }); return; }
+      const actor = typeof req.body.actor === 'string' ? (req.body as { actor: string }).actor : 'local';
+      res.status(201).json(baraka.createUser({ username, display_name, role, pin }, actor));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/users/active', (req, res) => {
+    try {
+      const { id, active, requesterRole, actor } = req.body as {
+        id?: number; active?: boolean; requesterRole?: Role; actor?: string;
+      };
+      if (requesterRole !== 'owner') { res.status(403).json({ error: 'owner role required' }); return; }
+      if (typeof id !== 'number' || typeof active !== 'boolean') { res.status(400).json({ error: 'body must be {id, active}' }); return; }
+      baraka.setUserActive(id, active, typeof actor === 'string' ? actor : 'local');
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/users/pin', (req, res) => {
+    try {
+      const { userId, oldPin, newPin } = req.body as { userId?: number; oldPin?: string; newPin?: string };
+      if (typeof userId !== 'number' || typeof oldPin !== 'string' || typeof newPin !== 'string') {
+        res.status(400).json({ error: 'body must be {userId, oldPin, newPin}' }); return;
+      }
+      baraka.changePin(userId, oldPin, newPin);
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // T8: client-side security events the DAL cannot see (logout, session lock).
+  app.post('/api/audit', (req, res) => {
+    try {
+      const { actor, action, detail } = req.body as { actor?: string; action?: string; detail?: string };
+      if (typeof actor !== 'string' || typeof action !== 'string') {
+        res.status(400).json({ error: 'body must be {actor, action}' }); return;
+      }
+      baraka.logAudit({ actor, action: action as never, detail });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/audit', (req, res) => {
+    const limit = Math.max(1, Math.min(500, parseInt(String(req.query.limit ?? '100'), 10) || 100));
+    res.json(baraka.listAudit(limit));
   });
 
   app.get('/api/products', (_req, res) => {

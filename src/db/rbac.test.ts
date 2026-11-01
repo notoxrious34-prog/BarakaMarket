@@ -1,0 +1,113 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { openBarakaDb, LATEST_SCHEMA_VERSION } from './sqlite.js';
+
+// T8 (ADR-031): users + lockout + audit live in the DAL.
+// NOTE: C: is 100% full -> test DBs live under repo data/.tmp-tests (D:).
+const TMP = path.join(process.cwd(), 'data', '.tmp-tests');
+fs.mkdirSync(TMP, { recursive: true });
+let n = 0;
+const tmpFile = (tag: string) => {
+  n += 1;
+  const p = path.join(TMP, `${tag}-${process.pid}-${n}.db`);
+  for (const suf of ['', '-wal', '-shm', '-journal']) {
+    try { fs.unlinkSync(p + suf); } catch { /* fresh */ }
+  }
+  return p;
+};
+const cleanup = (p: string) => {
+  for (const suf of ['', '-wal', '-shm', '-journal']) {
+    try { fs.unlinkSync(p + suf); } catch { /* ignore */ }
+  }
+};
+
+test('T8: fresh DB seeds the owner at schema v4', () => {
+  const p = tmpFile('rbac');
+  try {
+    const b = openBarakaDb(p);
+    assert.equal(LATEST_SCHEMA_VERSION, 4);
+    const users = b.listUsers();
+    assert.equal(users.length, 1);
+    assert.equal(users[0].username, 'owner');
+    assert.equal(users[0].role, 'owner');
+    assert.equal(users[0].must_change_pin, 1);
+    assert.ok(!('pin_verifier' in users[0]), 'secrets never cross the DAL');
+    b.close();
+  } finally {
+    cleanup(p);
+  }
+});
+
+test('T8: verify ok, five strikes lock, expiry unlocks', () => {
+  const p = tmpFile('rbac');
+  try {
+    const b = openBarakaDb(p);
+    const ok = b.verifyUser('owner', '1234');
+    assert.equal(ok.ok, true);
+    for (let i = 0; i < 4; i++) {
+      const r = b.verifyUser('owner', '0000');
+      assert.equal(r.ok, false);
+      if (!r.ok) assert.equal(r.locked, false);
+    }
+    const fifth = b.verifyUser('owner', '0000');
+    assert.equal(fifth.ok, false);
+    if (!fifth.ok) assert.equal(fifth.locked, true);
+    // Still locked with the RIGHT pin.
+    const during = b.verifyUser('owner', '1234');
+    assert.equal(during.ok, false);
+    // Simulate backoff expiry.
+    b.db.prepare('UPDATE users SET locked_until_ms = 0 WHERE username = ?').run('owner');
+    const after = b.verifyUser('owner', '1234');
+    assert.equal(after.ok, true);
+    b.close();
+  } finally {
+    cleanup(p);
+  }
+});
+
+test('T8: create/list/deactivate/changePin with audit trail', () => {
+  const p = tmpFile('rbac');
+  try {
+    const b = openBarakaDb(p);
+    const m = b.createUser({ username: 'Sara', display_name: 'Sara', role: 'manager', pin: '5678' }, 'owner');
+    assert.equal(m.username, 'sara');
+    assert.equal(m.role, 'manager');
+    assert.throws(() => b.createUser({ username: 'sara', role: 'cashier', pin: '1111' }, 'owner'), /taken/);
+    assert.throws(() => b.createUser({ username: 'x', role: 'cashier', pin: '1111' }, 'owner'), /username/);
+    assert.throws(() => b.createUser({ username: 'bob', role: 'super' as never, pin: '1111' }, 'owner'), /role/);
+    assert.throws(() => b.createUser({ username: 'bob', role: 'cashier', pin: '12' }, 'owner'), /PIN/);
+    const v = b.verifyUser('sara', '5678');
+    assert.equal(v.ok, true);
+    b.setUserActive(m.id, false, 'owner');
+    assert.equal(b.verifyUser('sara', '5678').ok, false);
+    assert.throws(() => b.setUserActive(1, false, 'owner'), /owner/);
+    b.changePin(m.id, '5678', '8765');
+    assert.throws(() => b.changePin(m.id, '0000', '1111'), /wrong/);
+    const audit = b.listAudit(50).map(a => a.action);
+    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change'] as const) {
+      assert.ok(audit.includes(a), `audit must contain ${a}`);
+    }
+    b.close();
+  } finally {
+    cleanup(p);
+  }
+});
+
+test('T8: legacy v3 file climbs to v4 and reseeds the owner', () => {
+  const p = tmpFile('rbac');
+  try {
+    const b = openBarakaDb(p);
+    b.db.exec('DROP TABLE users; DROP TABLE audit_log; PRAGMA user_version = 3;');
+    b.close();
+    const c = openBarakaDb(p);
+    const users = c.listUsers();
+    assert.equal(users.length, 1);
+    assert.equal(users[0].username, 'owner');
+    assert.equal(c.verifyUser('owner', '1234').ok, true);
+    c.close();
+  } finally {
+    cleanup(p);
+  }
+});

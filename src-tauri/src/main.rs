@@ -7,6 +7,7 @@
 
 use std::{fs, path::PathBuf};
 
+mod auth;
 mod fiscal;
 mod product;
 
@@ -102,6 +103,55 @@ fn product_search(query: String) -> Result<serde_json::Value, String> {
     product::product_search(&conn, &query)
 }
 
+/// T8 (ADR-031): native user verification (salted SHA-256, lockout, audit).
+#[tauri::command]
+fn user_verify(username: String, pin: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::user_verify(&conn, &username, &pin)
+}
+
+/// T8: native safe user list (secrets never leave the DAL).
+#[tauri::command]
+fn user_list() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::user_list(&conn)
+}
+
+/// T8: native audit read for the manager lane.
+#[tauri::command]
+fn audit_list(limit: u32) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    let n = limit.clamp(1, 500) as i64;
+    let mut st = conn
+        .prepare("SELECT id, ts, actor, action, entity, entity_id, detail FROM audit_log ORDER BY id DESC LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([n], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?, "ts": r.get::<_, String>(1)?, "actor": r.get::<_, String>(2)?,
+                "action": r.get::<_, String>(3)?, "entity": r.get::<_, String>(4)?,
+                "entity_id": r.get::<_, String>(5)?, "detail": r.get::<_, String>(6)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+/// T8: client-side security events (logout, lock) for the native lane.
+#[tauri::command]
+fn audit_log(actor: String, action: String, detail: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::audit_log(&conn, &actor, &action, &detail)
+}
+
 /// Gate-02 TASK 1: native authority probe. The frontend calls this via
 /// `invoke('db_status')`; success flips the POS into MODE FISCAL ACTIF.
 #[tauri::command]
@@ -127,7 +177,11 @@ fn main() {
             record_settlement,
             product_upsert,
             product_list,
-            product_search
+            product_search,
+            user_verify,
+            user_list,
+            audit_list,
+            audit_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");

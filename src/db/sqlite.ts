@@ -25,7 +25,8 @@ import type {
   ProtectedActionType, VoidLogEntry, VoidLogRecord, VoidSummary,
   BackupMetadata, BackupValidationReport, RestoreResult,
 } from '../types';
-import { createPinHash, verifyPin, MANAGER_PIN_META_KEY } from '../core/security.js';
+import { createPinHash, verifyPin, MANAGER_PIN_META_KEY, isValidPinFormat as isValidP } from '../core/security.js';
+import { isRole, registerAttempt, type Role, type AuditAction, type AuditEvent } from '../core/rbac.js';
 import { loadReferenceCatalog, searchCatalog, type ProductTemplate } from '../core/reference-catalog.js';
 
 export type Unit = 'PIECE' | 'KG' | 'LITRE';
@@ -158,10 +159,56 @@ function schemaSql(): string {
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 3;
+export const LATEST_SCHEMA_VERSION = 4;
 
 function schemaVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+}
+
+export function logAuditRow(db: DatabaseSync, e: AuditEvent): void {
+  db.prepare(
+    'INSERT INTO audit_log (ts, actor, action, entity, entity_id, detail) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(e.at ?? new Date().toISOString(), e.actor, e.action, e.entity ?? '', e.entityId ?? '', e.detail ?? '');
+}
+
+export interface SafeUser {
+  id: number; username: string; display_name: string; role: Role;
+  must_change_pin: number; active: number;
+}
+
+export interface AuditRow {
+  id: number; ts: string; actor: string; action: string;
+  entity: string; entity_id: string; detail: string;
+}
+
+interface UserRow extends SafeUser {
+  pin_verifier: string; failed_attempts: number; locked_until_ms: number; lock_cycles: number;
+}
+
+/** Fetch a full user row or throw (internal — never leaves the DAL). */
+function userRow(db: DatabaseSync, id: number): UserRow {
+  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as unknown as UserRow | undefined;
+  if (!row) throw new Error(`[db] user not found: ${id}`);
+  return row;
+}
+
+/** Strip secrets before a user crosses the DAL boundary. */
+const safeUser = (r: UserRow): SafeUser => ({
+  id: r.id, username: r.username, display_name: r.display_name,
+  role: r.role, must_change_pin: r.must_change_pin, active: r.active,
+});
+
+/** First-boot owner (PIN 1234, forced change). Idempotent, never rewrites. */
+function seedOwnerIfEmpty(db: DatabaseSync): void {
+  try {
+    const n = (db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
+    if (n > 0) return;
+    db.prepare(
+      `INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, created_at)
+       VALUES ('owner', 'Gérant', 'owner', ?, 1, ?)`,
+    ).run(createPinHash('1234'), new Date().toISOString());
+    logAuditRow(db, { actor: 'system', action: 'user.create', entity: 'users', entityId: 'owner', detail: 'first-owner seed' });
+  } catch { /* users table missing on exotic files — a later open retries */ }
 }
 
 export function migrateSchemaVersion(db: DatabaseSync): void {
@@ -188,6 +235,13 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     }
     db.exec('PRAGMA user_version = 3');
     v = 3;
+  }
+  // v3 → v4: T8 users + audit_log (DDL rides schema.sql at open; the step
+  // stamps legacy files and seeds the first owner when the table is empty).
+  if (v < 4) {
+    seedOwnerIfEmpty(db);
+    db.exec('PRAGMA user_version = 4');
+    v = 4;
   }
   // Always-ensured: partial unique index lives here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
@@ -280,6 +334,14 @@ export interface BarakaDb {
   /** Gate-03 TASK 3 — license + machine seed in meta KV. */
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
+  /** T8 (ADR-031) — users + security audit. */
+  createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string): SafeUser;
+  verifyUser(username: string, pin: string): { ok: true; user: SafeUser } | { ok: false; locked: boolean };
+  listUsers(): SafeUser[];
+  setUserActive(id: number, active: boolean, actor: string): void;
+  changePin(userId: number, oldPin: string, newPin: string): void;
+  listAudit(limit?: number): AuditRow[];
+  logAudit(e: AuditEvent): void;
 }
 
 function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z', year: number): number {
@@ -1473,6 +1535,75 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     },
     setMeta(key: string, value: string) {
       db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, value);
+    },
+    createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string): SafeUser {
+      const username = input.username.trim().toLowerCase();
+      if (!/^[a-z0-9._-]{3,20}$/.test(username)) throw new Error('[db] bad username (3-20 chars: a-z 0-9 . _ -)');
+      if (!isRole(input.role)) throw new Error(`[db] bad role: ${input.role}`);
+      if (!isValidP(input.pin)) throw new Error('[db] PIN must be 4-8 numeric digits');
+      try {
+        const r = db.prepare(
+          'INSERT INTO users (username, display_name, role, pin_verifier, created_at) VALUES (?, ?, ?, ?, ?)',
+        ).run(username, input.display_name ?? username, input.role, createPinHash(input.pin), new Date().toISOString());
+        logAuditRow(db, { actor, action: 'user.create', entity: 'users', entityId: username, detail: `role=${input.role}` });
+        return safeUser(userRow(db, Number(r.lastInsertRowid)));
+      } catch (e) {
+        if (String((e as Error)?.message ?? e).includes('UNIQUE')) throw new Error(`[db] username taken: ${username}`);
+        throw e;
+      }
+    },
+    verifyUser(username: string, pin: string): { ok: true; user: SafeUser } | { ok: false; locked: boolean } {
+      const name = username.trim().toLowerCase();
+      const row = db.prepare('SELECT * FROM users WHERE username = ?').get(name) as UserRow | undefined;
+      const now = Date.now();
+      if (!row || !row.active) {
+        logAuditRow(db, { actor: name, action: 'login.fail', detail: 'unknown-or-inactive' });
+        return { ok: false as const, locked: false };
+      }
+      if (row.locked_until_ms > now) {
+        logAuditRow(db, { actor: name, action: 'login.locked' });
+        return { ok: false as const, locked: true };
+      }
+      const ok = verifyPin(pin, row.pin_verifier);
+      const next = registerAttempt(
+        { failedAttempts: row.failed_attempts, lockedUntil: row.locked_until_ms || null, lockCycles: row.lock_cycles },
+        ok, now,
+      );
+      db.prepare('UPDATE users SET failed_attempts = ?, locked_until_ms = ?, lock_cycles = ? WHERE id = ?')
+        .run(next.failedAttempts, next.lockedUntil ?? 0, next.lockCycles, row.id);
+      if (!ok) {
+        logAuditRow(db, { actor: name, action: 'login.fail' });
+        return { ok: false as const, locked: (next.lockedUntil ?? 0) > now };
+      }
+      db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
+      logAuditRow(db, { actor: name, action: 'login.ok' });
+      return { ok: true as const, user: safeUser(row) };
+    },
+    listUsers(): SafeUser[] {
+      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active FROM users ORDER BY id').all() as unknown as SafeUser[]);
+    },
+    setUserActive(id: number, active: boolean, actor: string): void {
+      const row = userRow(db, id); // throws when missing
+      if (row.role === 'owner') throw new Error('[db] the owner account cannot be deactivated');
+      db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, id);
+      logAuditRow(db, { actor, action: 'user.deactivate', entity: 'users', entityId: row.username, detail: active ? 'reactivated' : 'deactivated' });
+    },
+    changePin(userId: number, oldPin: string, newPin: string): void {
+      const row = userRow(db, userId);
+      if (!verifyPin(oldPin, row.pin_verifier)) {
+        logAuditRow(db, { actor: row.username, action: 'login.fail', detail: 'pin-change denied' });
+        throw new Error('[db] current PIN is wrong');
+      }
+      if (!isValidP(newPin)) throw new Error('[db] PIN must be 4-8 numeric digits');
+      db.prepare('UPDATE users SET pin_verifier = ?, must_change_pin = 0 WHERE id = ?').run(createPinHash(newPin), userId);
+      logAuditRow(db, { actor: row.username, action: 'pin.change' });
+    },
+    listAudit(limit = 100): AuditRow[] {
+      const n = Math.max(1, Math.min(500, Math.floor(limit)));
+      return db.prepare('SELECT id, ts, actor, action, entity, entity_id, detail FROM audit_log ORDER BY id DESC LIMIT ?').all(n) as unknown as AuditRow[];
+    },
+    logAudit(e: AuditEvent): void {
+      logAuditRow(db, e);
     },
     getLatestZHash(): string {
       const row = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as { hash: string } | undefined;

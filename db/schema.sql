@@ -363,3 +363,33 @@ CREATE INDEX IF NOT EXISTS idx_ref_templates_lookup
 -- Schema version is managed by migrateSchemaVersion() in src/db/sqlite.ts
 -- (it stamps fresh DBs and climbs old files). NEVER stamp user_version here:
 -- a stamp would clobber old files before the migrator reads their version.
+
+-- T8 (ADR-031): users + security audit (v4). PINs are salted SHA-256
+-- (node:crypto TS lane, pinned implementation Rust lane — T8b upgrades
+-- to scrypt/argon2 when vendored crates are available).
+CREATE TABLE IF NOT EXISTS users (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  username          TEXT    NOT NULL UNIQUE,
+  display_name      TEXT    NOT NULL DEFAULT '',
+  role              TEXT    NOT NULL CHECK (role IN ('cashier', 'manager', 'owner')),
+  -- `saltHex:hashHex` per src/core/security.ts (SHA-256(salt:pin)).
+  pin_verifier      TEXT    NOT NULL,
+  active            INTEGER NOT NULL DEFAULT 1,
+  must_change_pin   INTEGER NOT NULL DEFAULT 0,
+  failed_attempts   INTEGER NOT NULL DEFAULT 0,
+  locked_until_ms   INTEGER NOT NULL DEFAULT 0,
+  lock_cycles       INTEGER NOT NULL DEFAULT 0,
+  created_at        TEXT    NOT NULL DEFAULT '',
+  last_login_at     TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT    NOT NULL,
+  actor      TEXT    NOT NULL DEFAULT '',
+  action     TEXT    NOT NULL,
+  entity     TEXT    NOT NULL DEFAULT '',
+  entity_id  TEXT    NOT NULL DEFAULT '',
+  detail     TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
