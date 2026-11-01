@@ -10,7 +10,7 @@
 use rusqlite::Connection;
 use serde_json::Value;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 4;
+pub const LATEST_SCHEMA_VERSION: i64 = 5;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -84,6 +84,43 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         crate::auth::migrate_v4(conn)?;
         conn.execute_batch("PRAGMA user_version = 4;")
             .map_err(|e| e.to_string())?;
+    }
+    // v4 → v5: T11 append-only + terminal-state triggers (ADR-034).
+    // Fresh files get them from schema.sql at provision; legacy files climb here.
+    if v < 5 {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS trg_sales_no_delete
+             BEFORE DELETE ON sales BEGIN
+               SELECT RAISE(ABORT, 'append-only: sales rows are never deleted (void instead)');
+             END;
+             CREATE TRIGGER IF NOT EXISTS trg_sale_items_no_delete
+             BEFORE DELETE ON sale_items BEGIN
+               SELECT RAISE(ABORT, 'append-only: sale_items rows are never deleted');
+             END;
+             CREATE TRIGGER IF NOT EXISTS trg_settlements_no_delete
+             BEFORE DELETE ON client_settlements BEGIN
+               SELECT RAISE(ABORT, 'append-only: settlements are never deleted');
+             END;
+             CREATE TRIGGER IF NOT EXISTS trg_sales_terminal
+             BEFORE UPDATE OF status ON sales
+             WHEN OLD.status = 'CANCELLED' AND NEW.status <> 'CANCELLED' BEGIN
+               SELECT RAISE(ABORT, 'terminal: a CANCELLED sale can never be resurrected');
+             END;
+             CREATE TRIGGER IF NOT EXISTS trg_users_no_delete
+             BEFORE DELETE ON users BEGIN
+               SELECT RAISE(ABORT, 'append-only: users deactivate, never delete');
+             END;
+             CREATE TRIGGER IF NOT EXISTS trg_audit_no_delete
+             BEFORE DELETE ON audit_log BEGIN
+               SELECT RAISE(ABORT, 'append-only: audit_log is immutable');
+             END;
+             CREATE TRIGGER IF NOT EXISTS trg_audit_no_update
+             BEFORE UPDATE ON audit_log BEGIN
+               SELECT RAISE(ABORT, 'append-only: audit_log rows are never modified');
+             END;
+             PRAGMA user_version = 5;",
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -572,7 +609,22 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
+        // T11: the climb also restores the append-only triggers on legacy files.
+        let trig: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|t| t.unwrap())
+            .collect();
+        for t in [
+            "trg_sales_no_delete",
+            "trg_sales_terminal",
+            "trg_audit_no_update",
+        ] {
+            assert!(trig.contains(&t.to_string()), "trigger {t} restored");
+        }
         // Both key columns now exist after the climb.
         let cols: Vec<String> = conn
             .prepare("PRAGMA table_info(sales)")
@@ -590,5 +642,27 @@ mod tests {
             .map(|c| c.unwrap())
             .collect();
         assert!(cols2.contains(&"client_settlement_key".to_string()));
+    }
+
+    #[test]
+    fn triggers_block_raw_sql_abuse() {
+        // T11 (ADR-034): even direct SQL cannot delete fiscal rows or resurrect
+        // a CANCELLED sale. The legal void path has no native command yet —
+        // the trigger guards the invariant at the storage layer regardless.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("TRG-1")), &sale_items()).unwrap();
+        assert!(db.execute("DELETE FROM sales", []).is_err());
+        assert!(db.execute("DELETE FROM sale_items", []).is_err());
+        db.execute("UPDATE sales SET status = 'CANCELLED'", [])
+            .unwrap();
+        assert!(db
+            .execute("UPDATE sales SET status = 'COMPLETED'", [])
+            .is_err());
+        let st = serde_json::json!({"id": "st1", "client_id": 1, "client_name": "Zed",
+            "amount_ct": 100000, "payment_method": "ESPECES",
+            "timbre_ct": 1000, "total_collected_ct": 101000,
+            "client_settlement_key": "TRG-ST", "date": "2026-11-01T12:00:00.000Z", "note": null});
+        record_settlement(&mut db, &st).unwrap();
+        assert!(db.execute("DELETE FROM client_settlements", []).is_err());
     }
 }

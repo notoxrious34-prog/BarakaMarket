@@ -345,4 +345,18 @@ mod tests {
             "secrets never listed"
         );
     }
+
+    #[test]
+    fn audit_and_users_are_append_only() {
+        // T11 (ADR-034): the security trail cannot be edited or erased, and
+        // operators deactivate instead of deleting — even via direct SQL.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        migrate_v4(&conn).unwrap();
+        assert!(conn.execute("DELETE FROM audit_log", []).is_err());
+        assert!(conn
+            .execute("UPDATE audit_log SET detail = 'x'", [])
+            .is_err());
+        assert!(conn.execute("DELETE FROM users", []).is_err());
+    }
 }

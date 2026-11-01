@@ -23,11 +23,11 @@ const cleanup = (p: string) => {
   }
 };
 
-test('T8: fresh DB seeds the owner at schema v4', () => {
+test('T8/T11: fresh DB seeds the owner at latest schema (v5)', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
-    assert.equal(LATEST_SCHEMA_VERSION, 4);
+    assert.equal(LATEST_SCHEMA_VERSION, 5);
     const users = b.listUsers();
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
@@ -95,17 +95,22 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
   }
 });
 
-test('T8: legacy v3 file climbs to v4 and reseeds the owner', () => {
+test('T8/T11: legacy v3 file climbs to v5 and reseeds the owner', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
-    b.db.exec('DROP TABLE users; DROP TABLE audit_log; PRAGMA user_version = 3;');
+    b.db.exec(`DROP TABLE users; DROP TABLE audit_log;
+      DROP TRIGGER IF EXISTS trg_sales_no_delete; DROP TRIGGER IF EXISTS trg_sale_items_no_delete;
+      DROP TRIGGER IF EXISTS trg_settlements_no_delete; DROP TRIGGER IF EXISTS trg_sales_terminal;
+      DROP TRIGGER IF EXISTS trg_users_no_delete; DROP TRIGGER IF EXISTS trg_audit_no_delete;
+      DROP TRIGGER IF EXISTS trg_audit_no_update; PRAGMA user_version = 3;`);
     b.close();
     const c = openBarakaDb(p);
     const users = c.listUsers();
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
     assert.equal(c.verifyUser('owner', '1234').ok, true);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
     c.close();
   } finally {
     cleanup(p);

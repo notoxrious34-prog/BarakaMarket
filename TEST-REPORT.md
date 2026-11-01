@@ -50,7 +50,8 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Update lane: semver math + native-only degrade (T9, ADR-032) | src/core/update-lane.test.ts | +2 | ✅ 2/2 |
 | T10 void → sale.void audit row (actor + reason) | server/index.test.ts | +1 | ✅ 1/1 |
 | T10 close-and-z → z.close audit row (actor + Z + diff) | server/index.test.ts | +1 | ✅ 1/1 |
-| **Total** | **36 files** | **262** | **✅ 262/262, 0 fail** |
+| T11 triggers: append-only + terminal-state, legacy v4→v5 climb (ADR-034) | src/db/triggers.test.ts | +3 | ✅ 3/3 |
+| **Total** | **37 files** | **265** | **✅ 265/265, 0 fail** |
 
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
@@ -61,12 +62,15 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Faithful v1 DDL climbs to v4 + owner seed (dual-lane migration, T8) | src-tauri/src/fiscal.rs | 1 | ✅ |
 | Native product upsert/list/search (T4c, ADR-027) | src-tauri/src/product.rs | +3 | ✅ |
 | SHA-256 NIST vectors + verifier round-trip + native lockout + migrate_v4 seed (T8, ADR-031) | src-tauri/src/auth.rs | +4 | ✅ |
-| **Total Rust** | **3 files** | **11** | **✅ 11/11, 0 fail** |
+| Legacy climb restores triggers on v5 (T11, ADR-034) | src-tauri/src/fiscal.rs | +1 (climb assert) | ✅ |
+| Raw-SQL abuse blocked: deletes + CANCELLED resurrection (T11) | src-tauri/src/fiscal.rs | +1 | ✅ |
+| Audit/users append-only under direct SQL (T11) | src-tauri/src/auth.rs | +1 | ✅ |
+| **Total Rust** | **3 files** | **13** | **✅ 13/13, 0 fail** |
 | `cargo check --offline` | main.rs + fiscal.rs | compile | ✅ clean |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 262/262 + Rust 11/11 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 265/265 + Rust 13/13 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

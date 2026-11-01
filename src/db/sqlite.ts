@@ -159,7 +159,7 @@ function schemaSql(): string {
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 4;
+export const LATEST_SCHEMA_VERSION = 5;
 
 function schemaVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
@@ -197,6 +197,41 @@ const safeUser = (r: UserRow): SafeUser => ({
   id: r.id, username: r.username, display_name: r.display_name,
   role: r.role, must_change_pin: r.must_change_pin, active: r.active,
 });
+
+/** T11 (ADR-034): append-only + terminal-state guards. Mirrors schema.sql tail;
+ * kept here (not schema.sql) for the v4→v5 climb so legacy files — whose open
+ * predates the triggers — converge without failing at open. */
+const APPEND_ONLY_TRIGGERS: string[] = [
+  `CREATE TRIGGER IF NOT EXISTS trg_sales_no_delete
+   BEFORE DELETE ON sales BEGIN
+     SELECT RAISE(ABORT, 'append-only: sales rows are never deleted (void instead)');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_sale_items_no_delete
+   BEFORE DELETE ON sale_items BEGIN
+     SELECT RAISE(ABORT, 'append-only: sale_items rows are never deleted');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_settlements_no_delete
+   BEFORE DELETE ON client_settlements BEGIN
+     SELECT RAISE(ABORT, 'append-only: settlements are never deleted');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_sales_terminal
+   BEFORE UPDATE OF status ON sales
+   WHEN OLD.status = 'CANCELLED' AND NEW.status <> 'CANCELLED' BEGIN
+     SELECT RAISE(ABORT, 'terminal: a CANCELLED sale can never be resurrected');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_users_no_delete
+   BEFORE DELETE ON users BEGIN
+     SELECT RAISE(ABORT, 'append-only: users deactivate, never delete');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_audit_no_delete
+   BEFORE DELETE ON audit_log BEGIN
+     SELECT RAISE(ABORT, 'append-only: audit_log is immutable');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_audit_no_update
+   BEFORE UPDATE ON audit_log BEGIN
+     SELECT RAISE(ABORT, 'append-only: audit_log rows are never modified');
+   END`,
+];
 
 /** First-boot owner (PIN 1234, forced change). Idempotent, never rewrites. */
 function seedOwnerIfEmpty(db: DatabaseSync): void {
@@ -242,6 +277,13 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     seedOwnerIfEmpty(db);
     db.exec('PRAGMA user_version = 4');
     v = 4;
+  }
+  // v4 → v5: T11 append-only + terminal-state triggers (ADR-034). Fresh files
+  // get them from schema.sql at open; legacy files climb here, idempotent.
+  if (v < 5) {
+    for (const t of APPEND_ONLY_TRIGGERS) db.exec(t);
+    db.exec('PRAGMA user_version = 5');
+    v = 5;
   }
   // Always-ensured: partial unique index lives here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.

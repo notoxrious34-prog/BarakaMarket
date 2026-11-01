@@ -393,3 +393,37 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail     TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log (ts);
+
+-- T11 (ADR-034): append-only + terminal-state guards. All IF NOT EXISTS so
+-- legacy files climb via the v5 migration step; fresh files get them at open.
+-- Application code already honors these — triggers are the last line that even
+-- raw SQL cannot cross.
+CREATE TRIGGER IF NOT EXISTS trg_sales_no_delete
+BEFORE DELETE ON sales BEGIN
+  SELECT RAISE(ABORT, 'append-only: sales rows are never deleted (void instead)');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_sale_items_no_delete
+BEFORE DELETE ON sale_items BEGIN
+  SELECT RAISE(ABORT, 'append-only: sale_items rows are never deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_settlements_no_delete
+BEFORE DELETE ON client_settlements BEGIN
+  SELECT RAISE(ABORT, 'append-only: settlements are never deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_sales_terminal
+BEFORE UPDATE OF status ON sales
+WHEN OLD.status = 'CANCELLED' AND NEW.status <> 'CANCELLED' BEGIN
+  SELECT RAISE(ABORT, 'terminal: a CANCELLED sale can never be resurrected');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_users_no_delete
+BEFORE DELETE ON users BEGIN
+  SELECT RAISE(ABORT, 'append-only: users deactivate, never delete');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_audit_no_delete
+BEFORE DELETE ON audit_log BEGIN
+  SELECT RAISE(ABORT, 'append-only: audit_log is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_audit_no_update
+BEFORE UPDATE ON audit_log BEGIN
+  SELECT RAISE(ABORT, 'append-only: audit_log rows are never modified');
+END;

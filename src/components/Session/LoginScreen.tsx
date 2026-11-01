@@ -54,6 +54,29 @@ export const LoginScreen: React.FC = () => {
     }
     setPin('');
   };
+  // T11: physical-keyboard parity — Backspace erases one digit (the pad's C
+  // wipes all). Zero-Mouse holds on the lock screen too.
+  const back = () => {
+    setError(null);
+    if (mustChange) {
+      if (phase === 'confirm') setConfirmPin(p => p.slice(0, -1));
+      else setNewPin(p => p.slice(0, -1));
+      return;
+    }
+    setPin(p => p.slice(0, -1));
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (/^[0-9]$/.test(e.key)) { e.preventDefault(); press(e.key); }
+      else if (e.key === 'Backspace') { e.preventDefault(); back(); }
+      else if (e.key === 'Enter') { e.preventDefault(); advanceOrSubmit(); }
+      else if (e.key === 'Escape') { e.preventDefault(); clear(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pin, newPin, confirmPin, phase, mustChange, busy, username, sessionLocked]);
 
   const advanceOrSubmit = () => {
     // OK key: in change mode it steps new -> confirm -> submit.
