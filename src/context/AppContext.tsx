@@ -31,6 +31,8 @@ import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
+import { syncCatalogToNative } from '../core/product-authority';
+import { isTauriRuntime } from '../core/fiscal-authority';
 
 /** localStorage-backed StorageLike for the sale outbox (never throws). */
 const lsStore: StorageLike = {
@@ -779,6 +781,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // loopback restart, first mount with the server already up).
   useEffect(() => {
     if (authority === 'FISCAL_SQLITE') void drainOutbox();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authority]);
+
+  /**
+   * T4c (ADR-027): one-way catalog mirror, exe lane only, once per session.
+   * Pushes the UI catalog into native SQLite so Rust sale commits decrement
+   * MATCHED rows. Failure is silent by design — the sale lane NULLs unknown
+   * FKs exactly as before, and the next session retries.
+   */
+  const nativeSyncRef = useRef(false);
+  useEffect(() => {
+    if (authority !== 'FISCAL_SQLITE' || nativeSyncRef.current || !isTauriRuntime()) return;
+    nativeSyncRef.current = true;
+    void syncCatalogToNative(products).catch(() => { nativeSyncRef.current = false; });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authority]);
 

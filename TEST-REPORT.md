@@ -35,7 +35,8 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Outbox kind routing + backward compat (T2b) | src/core/sale-outbox.test.ts | +2 | ✅ 2/2 |
 | Loopback write token: 401/401/200 gate (T4, ADR-025) | server/index.test.ts | +1 | ✅ 1/1 |
 | Native-first commit lane: fallback/id-forwarding/down→null (T4b, ADR-026) | src/core/commit-lane.test.ts | +4 | ✅ 4/4 |
-| **Total** | **28 files** | **219** | **✅ 219/219, 0 fail** |
+| Product mirror mapping + no-op contract (T4c, ADR-027) | src/core/product-authority.test.ts | +3 | ✅ 3/3 |
+| **Total** | **29 files** | **222** | **✅ 222/222, 0 fail** |
 
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
@@ -44,12 +45,13 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Broken invariant rejected, zero rows written | src-tauri/src/fiscal.rs | 1 | ✅ |
 | Native settlement commit + dedupe + balance | src-tauri/src/fiscal.rs | 1 | ✅ |
 | Faithful v1 DDL climbs to v3 (dual-lane migration) | src-tauri/src/fiscal.rs | 1 | ✅ |
-| **Total Rust** | **1 file** | **4** | **✅ 4/4, 0 fail** |
+| Native product upsert/list/search (T4c, ADR-027) | src-tauri/src/product.rs | +3 | ✅ |
+| **Total Rust** | **2 files** | **7** | **✅ 7/7, 0 fail** |
 | `cargo check --offline` | main.rs + fiscal.rs | compile | ✅ clean |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 219/219 + Rust 4/4 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 222/222 + Rust 7/7 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

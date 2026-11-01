@@ -8,6 +8,7 @@
 use std::{fs, path::PathBuf};
 
 mod fiscal;
+mod product;
 
 /// Frozen fiscal schema — the SAME file the Node lane is tested against.
 const SCHEMA: &str = include_str!("../../db/schema.sql");
@@ -77,6 +78,30 @@ fn record_settlement(input: serde_json::Value) -> Result<serde_json::Value, Stri
     fiscal::record_settlement(&mut conn, &input)
 }
 
+/// T4c (ADR-027): native product mirror — upsert one row (explicit UI id).
+#[tauri::command]
+fn product_upsert(product: serde_json::Value) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    product::product_upsert(&conn, &product)
+}
+
+/// T4c: native product mirror — full list for stock-truth reads.
+#[tauri::command]
+fn product_list() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    product::product_list(&conn)
+}
+
+/// T4c: native product mirror — POS lookup (barcode exact-first).
+#[tauri::command]
+fn product_search(query: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    product::product_search(&conn, &query)
+}
+
 /// Gate-02 TASK 1: native authority probe. The frontend calls this via
 /// `invoke('db_status')`; success flips the POS into MODE FISCAL ACTIF.
 #[tauri::command]
@@ -99,7 +124,10 @@ fn main() {
             db_status,
             loopback_token,
             record_sale,
-            record_settlement
+            record_settlement,
+            product_upsert,
+            product_list,
+            product_search
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");
