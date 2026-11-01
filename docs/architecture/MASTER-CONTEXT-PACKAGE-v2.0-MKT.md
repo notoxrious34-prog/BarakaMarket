@@ -70,4 +70,5 @@ cut `1D 56 42 00`), cash drawer, scale barcodes 20/21/22/28/29, A4 3×8 sheets.
 `npm run verify:release` (Gold Master) · `npm run tauri build` (NSIS).
 Tags: `v2.0.0-mkt` (charter seal) → `v1.0.1-mkt` (commercial).
 Keygen: `scripts\generate-license.cmd "Name" "BM-XXXX-…"`. Installer:
-`src-tauri/target/release/bundle/nsis/Baraka Market_1.0.1_x64-setup.exe`.
+`$CARGO_TARGET_DIR/release/bundle/nsis/Baraka Market_1.0.1_x64-setup.exe`
+(shop machine: `CARGO_HOME`/`CARGO_TARGET_DIR` on D:, C: is full).

@@ -44,3 +44,9 @@ scale barcodes (prefixes 20/21/22/28/29) · ESC/POS purity (no binary assets).
 `reference-search` (Latin/Arabic scorer), `csv-importer` (preflight),
 `barcode-svg` (EAN-13), `shelf-labels` (A4/80mm), `escpos`, `sound` (WebAudio),
 `sha256`, `licensing` (verify-only), `zreport`, `license-store`.
+
+## 7. Build environment (shop machine)
+C: is full — never use it for caches/targets. `CARGO_HOME` +
+`CARGO_TARGET_DIR` on D: (`D:/cargo`, `D:/cargo-target`), `RUSTUP_HOME`
+default (toolchain on C:), npm cache `D:/npm-cache` + `TMPDIR=D:/npm-tmp`.
+WebView2 ≥ 155 required at runtime (evergreen on Win10/11).
