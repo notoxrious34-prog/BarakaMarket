@@ -28,11 +28,12 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Online backup + restore | src/db/backup.test.ts | 7 | ✅ 7/7 |
 | Reference catalog (28 cats, 257 tpl, BiDi, search) | src/core/reference-catalog.test.ts | 8 | ✅ 8/8 |
 | Reference templates REST lane | server/index.test.ts | +1 | ✅ 1/1 |
-| **Total** | **24 files** | **195** | **✅ 195/195, 0 fail** |
+| Idempotent commit + v1→v2 migration (T1 slice A, ADR-021) | src/db/idempotency.test.ts | 4 | ✅ 4/4 |
+| **Total** | **25 files** | **199** | **✅ 199/199, 0 fail** |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 195/195 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 199/199 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

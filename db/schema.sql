@@ -152,7 +152,10 @@ CREATE TABLE IF NOT EXISTS sales (
   amount_returned_ct INTEGER NOT NULL DEFAULT 0,
   status            TEXT    NOT NULL DEFAULT 'COMPLETED' CHECK (status IN ('COMPLETED', 'CANCELLED')),
   is_facture        INTEGER NOT NULL DEFAULT 0,
-  created_at        TEXT    NOT NULL
+  created_at        TEXT    NOT NULL,
+  -- T1 (ADR-021): idempotency key minted by the checkout at finalize time.
+  -- Retried POSTs with the same key return the original row, never a new seq.
+  client_sale_id    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sale_items (
@@ -354,3 +357,7 @@ CREATE TABLE IF NOT EXISTS ref_templates (
 
 CREATE INDEX IF NOT EXISTS idx_ref_templates_lookup
   ON ref_templates(brand_name, category_code);
+
+-- Schema version is managed by migrateSchemaVersion() in src/db/sqlite.ts
+-- (it stamps fresh DBs and climbs old files). NEVER stamp user_version here:
+-- a stamp would clobber old files before the migrator reads their version.

@@ -81,7 +81,7 @@ touches shop config. Offline-first: update NEVER blocks checkout.
    violations fail review.
 
 ## 10. Task map (approved, flexible)
-T1 sale commit · T2 single-lane seq · T3 migrations · T4 loopback token ·
+T1 sale commit · **slice A DONE (ADR-021: idempotent commit + migrations, 199/199)** → slice B (client outbox+replay) next · T2 single-lane seq · T3 migrations · T4 loopback token ·
 T5 pro printing + pole display · T6 RS-232 scale · T7 power-cut drill ·
 T8 full RBAC · T9 updater · T10 light audit · T11 soak/keyboard/triggers ·
 T12 gold-master rehearsal + v1.1.0 tag.

@@ -65,6 +65,9 @@ export interface SaleHeaderInput {
   totals: SaleTotalsCt;
   is_facture?: number;
   created_at?: string;
+  /** T1 (ADR-021): checkout-minted idempotency key. Retried commits with the
+   *  same key return the original row — seq is never consumed twice. */
+  client_sale_id?: string | null;
 }
 
 export interface SaleItemInput {
@@ -147,6 +150,38 @@ export function effectivePackPriceCt(sellPriceCt: number, multiplier: number, pr
 function schemaSql(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   return fs.readFileSync(path.join(here, '..', '..', 'db', 'schema.sql'), 'utf8');
+}
+
+/**
+ * T3 foundation (ADR-021): versioned migrations. Fresh DBs are born at
+ * LATEST_SCHEMA_VERSION via schema.sql; older files climb step by step.
+ * Each step is idempotent (column/index existence checks) so a half-opened
+ * DB can safely re-enter. NEVER delete/rename user rows in a migration.
+ */
+export const LATEST_SCHEMA_VERSION = 2;
+
+function schemaVersion(db: DatabaseSync): number {
+  return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
+}
+
+export function migrateSchemaVersion(db: DatabaseSync): void {
+  let v = schemaVersion(db);
+  if (v > LATEST_SCHEMA_VERSION) {
+    throw new Error(`[db] database is newer than this build (v${v} > v${LATEST_SCHEMA_VERSION}) — update the app`);
+  }
+  // v0/v1 → v2: T1 idempotency key on sales.
+  if (v < 2) {
+    const cols = db.prepare('PRAGMA table_info(sales)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'client_sale_id')) {
+      db.exec('DROP INDEX IF EXISTS idx_sales_client_sale_id');
+      db.exec('ALTER TABLE sales ADD COLUMN client_sale_id TEXT');
+    }
+    db.exec('PRAGMA user_version = 2');
+    v = 2;
+  }
+  // Always-ensured: partial unique index lives here (not in schema.sql) so
+  // old files that predate the column never hit "no such column" at open.
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
 }
 
 export interface BarakaDb {
@@ -298,6 +333,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       db.exec('ALTER TABLE seq_new RENAME TO seq');
     }
   } catch { /* fresh DB already has Q */ }
+  // T3 foundation (ADR-021): climb older files to LATEST_SCHEMA_VERSION.
+  migrateSchemaVersion(db);
   // TASK-BRK-016-MKT: seed the Algerian reference catalog once (idempotent —
   // pre-seeded DBs are detected by row count, never re-inserted).
   try {
@@ -1226,6 +1263,18 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const createdAt = header.created_at ?? new Date().toISOString();
       const year = parseInt(createdAt.slice(0, 4), 10);
       const id = header.id ?? randomUUID();
+      const clientSaleId = header.client_sale_id ?? null;
+
+      // T1 (ADR-021): idempotent commit. A retried POST (double click, replay
+      // after a dropped connection) returns the ORIGINAL row — seq, stock and
+      // ledger are never consumed twice.
+      const byKey = (k: string) => db.prepare(
+        'SELECT id, invoice_number, ticket_number FROM sales WHERE client_sale_id = ?',
+      ).get(k) as { id: string; invoice_number: string; ticket_number: string } | undefined;
+      if (clientSaleId) {
+        const existing = byKey(clientSaleId);
+        if (existing) return { id: existing.id, invoice_number: existing.invoice_number, ticket_number: existing.ticket_number };
+      }
 
       db.exec('BEGIN IMMEDIATE');
       try {
@@ -1237,8 +1286,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
             tva0_base_ct, tva0_amt_ct, tva0_ttc_ct, tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
             tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
-            payment_method, amount_paid_ct, amount_returned_ct, status, is_facture, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?)`,
+            payment_method, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
+            client_sale_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)`,
         ).run(
           id, invoice, ticket, header.cashier_id, header.cashier_name, header.client_id ?? null,
           header.client_name ?? null, header.client_nif ?? null, header.client_nis ?? null,
@@ -1248,7 +1298,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           t.tva_breakdown[9].base_ht_ct, t.tva_breakdown[9].tva_amount_ct, t.tva_breakdown[9].total_ttc_ct,
           t.tva_breakdown[19].base_ht_ct, t.tva_breakdown[19].tva_amount_ct, t.tva_breakdown[19].total_ttc_ct,
           header.payment_method, header.amount_paid_ct, header.amount_returned_ct,
-          header.is_facture ?? 0, createdAt,
+          header.is_facture ?? 0, createdAt, clientSaleId,
         );
         const insItem = db.prepare(
           `INSERT INTO sale_items (sale_id, product_id, barcode, name_fr, name_ar, unit_price_ct,
@@ -1265,6 +1315,12 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         return { id, invoice_number: invoice, ticket_number: ticket };
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        // T1 race net: two checkouts with the same key racing each other —
+        // the loser returns the winner's row instead of an error.
+        if (clientSaleId && /UNIQUE constraint failed: sales\.client_sale_id|idx_sales_client_sale_id/.test((e as Error).message)) {
+          const winner = byKey(clientSaleId);
+          if (winner) return { id: winner.id, invoice_number: winner.invoice_number, ticket_number: winner.ticket_number };
+        }
         throw e;
       }
     },
