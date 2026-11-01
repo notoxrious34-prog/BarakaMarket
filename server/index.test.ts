@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './index.js';
+import { loopbackTokenPath } from './index.js';
 import { dzdToCentimes } from '../src/core/money.js';
 import { calculateLineTotalsCt, calculateSaleTotalsCt } from '../src/core/fiscal.centimes.js';
 
@@ -24,6 +25,18 @@ const server = app.listen(0, '127.0.0.1');
 await new Promise<void>(r => server.once('listening', r));
 const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 test.after(() => new Promise<void>((r, e) => { server.close((err) => err ? e(err) : r()); baraka.close(); }));
+
+// T4 (ADR-025): the loopback now requires a token for writes. The harness
+// auto-attaches it to every same-base POST through a fetch shim, so the 18
+// existing write sites stay untouched; negative tests use _rawFetch.
+const TOKEN = fs.readFileSync(loopbackTokenPath(TMP), 'utf8').trim();
+const _rawFetch = globalThis.fetch.bind(globalThis);
+globalThis.fetch = ((url: unknown, init?: RequestInit) => {
+  if (typeof url === 'string' && url.startsWith(base) && init?.method === 'POST') {
+    init = { ...init, headers: { ...(init.headers as Record<string, string>), 'x-baraka-loopback': TOKEN } };
+  }
+  return _rawFetch(url as string, init);
+}) as typeof fetch;
 
 const items = [
   { product_id: 1, barcode: 'a', name_fr: 'LAIT', name_ar: '', unit_price_ct: 18000, qty_milli: 2000, unit: 'PIECE', tva_rate: 9, discount_bp: 0, line_ht_ct: 33028, line_tva_ct: 2972, line_ttc_ct: 36000 },
@@ -50,6 +63,16 @@ test('api: health reports WAL', async () => {
   const j = await r.json() as Record<string, unknown>;
   assert.equal(j.ok, true);
   assert.equal(String(j.journal_mode).toLowerCase(), 'wal');
+});
+
+test('api: T4 unauthenticated writes rejected (401), reads stay open', async () => {
+  const noAuth: RequestInit = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ header, items }) };
+  const denied = await _rawFetch(`${base}/api/sales`, noAuth);
+  assert.equal(denied.status, 401);
+  const deniedPrint = await _rawFetch(`${base}/api/raw-print`, { ...noAuth, body: JSON.stringify({ hex: '1b700019fa' }) });
+  assert.equal(deniedPrint.status, 401);
+  const open = await _rawFetch(`${base}/api/products`);
+  assert.equal(open.status, 200);
 });
 
 test('api: POST /sales records golden receipt with atomic numbers', async () => {

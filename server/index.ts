@@ -8,6 +8,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { openBarakaDb, type BarakaDb, type ProductRow } from '../src/db/sqlite.js';
 import type {
   LossReason, ImportProductRow, ShelfLabelItem, SupplierDeliveryReceipt, ClientSettlementPayload,
@@ -18,10 +19,38 @@ import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
 
+/** T4 (ADR-025): stable 256-bit loopback write token, stored beside the DB. */
+export function loopbackTokenPath(dbDir: string): string {
+  return path.join(dbDir, '.loopback.token');
+}
+
+export function ensureLoopbackToken(dbDir: string): string {
+  const p = loopbackTokenPath(dbDir);
+  try {
+    const t = fs.readFileSync(p, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/.test(t)) return t;
+  } catch { /* first boot — mint below */ }
+  const t = randomBytes(32).toString('hex');
+  fs.mkdirSync(dbDir, { recursive: true });
+  fs.writeFileSync(p, t, { mode: 0o600 });
+  console.log(`[loopback] write token issued at ${p} (delete to rotate)`);
+  return t;
+}
+
 export function createApp(dbPath: string): { app: express.Express; baraka: BarakaDb } {
   let baraka = openBarakaDb(dbPath);
   const app = express();
   app.use(express.json({ limit: '2mb' }));
+
+  // T4 (ADR-025): loopback write token. First boot mints 256-bit hex beside
+  // the DB file; the native shell relays it via invoke('loopback_token').
+  // GETs stay open (read-only); every mutating /api/* call needs the header.
+  const token = ensureLoopbackToken(path.dirname(path.resolve(dbPath)));
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'GET') return next();
+    if (req.headers['x-baraka-loopback'] === token) return next();
+    res.status(401).json({ error: 'loopback token required' });
+  });
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, db: path.resolve(dbPath), ...baraka.pragmas() });

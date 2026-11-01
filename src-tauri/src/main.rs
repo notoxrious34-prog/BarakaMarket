@@ -30,6 +30,23 @@ fn provision_db() -> Result<PathBuf, String> {
     Ok(db)
 }
 
+/// T4 (ADR-025): relay the loopback write token (minted by the server beside
+/// the DB) to the frontend. Absent until the server boots once — the client
+/// treats that as the no-token path (writes queue in the outbox).
+#[tauri::command]
+fn loopback_token() -> Result<String, String> {
+    let p = data_dir().join(".loopback.token");
+    let t = fs::read_to_string(&p)
+        .map(|s| s.trim().to_string())
+        .map_err(|_| {
+            "loopback server has not issued a token yet (start the loopback first)".to_string()
+        })?;
+    if t.len() < 16 {
+        return Err("loopback token file is corrupt (delete it to rotate)".to_string());
+    }
+    Ok(t)
+}
+
 /// Gate-02 TASK 1: native authority probe. The frontend calls this via
 /// `invoke('db_status')`; success flips the POS into MODE FISCAL ACTIF.
 #[tauri::command]
@@ -48,7 +65,7 @@ fn main() {
         Err(e) => eprintln!("[baraka] db provisioning FAILED: {e}"),
     }
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![db_status])
+        .invoke_handler(tauri::generate_handler![db_status, loopback_token])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");
 }

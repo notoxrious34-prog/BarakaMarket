@@ -104,6 +104,27 @@ export interface AuthorityHeaderInput {
   client_sale_id?: string | null;
 }
 
+/** T4 (ADR-025): loopback write token, relayed by the native shell via
+ * invoke('loopback_token'). Cached in module memory only — never persisted.
+ * Null outside Tauri (browser preview) or before the server mints it. */
+let cachedToken: string | null | undefined;
+export async function getLoopbackToken(): Promise<string | null> {
+  if (cachedToken !== undefined) return cachedToken;
+  if (!isTauriRuntime()) { cachedToken = null; return null; }
+  try {
+    const mod = await import('@tauri-apps/api/core');
+    const t = (await mod.invoke('loopback_token')) as unknown;
+    cachedToken = typeof t === 'string' && t.length >= 16 ? t : null;
+  } catch {
+    cachedToken = null;
+  }
+  return cachedToken;
+}
+
+function authHeaders(token: string | null): Record<string, string> {
+  return token ? { 'x-baraka-loopback': token } : {};
+}
+
 /**
  * POST a computed sale to the authoritative SQLite lane.
  * @returns authoritative {id, invoice_number, ticket_number} or null.
@@ -114,11 +135,12 @@ export async function postSaleToLoopback(
   timeoutMs = 4000,
 ): Promise<{ id: string; invoice_number: string; ticket_number: string } | null> {
   try {
+    const token = await getLoopbackToken();
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     const r = await fetch(`${LOOPBACK_BASE}/api/sales`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
       body: JSON.stringify({ header, items }),
       signal: ctrl.signal,
     });
@@ -143,11 +165,12 @@ export async function postSettlementToLoopback(
   timeoutMs = 4000,
 ): Promise<{ id: string; receipt_number: string } | null> {
   try {
+    const token = await getLoopbackToken();
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
     const r = await fetch(`${LOOPBACK_BASE}/api/settlements`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
       body: JSON.stringify(input),
       signal: ctrl.signal,
     });
@@ -160,11 +183,12 @@ export async function postSettlementToLoopback(
 }
 
 /** Fire-and-forget 5-byte drawer-kick via the raw-print spool endpoint. */
-export function kickDrawerViaLoopback(): void {
+export async function kickDrawerViaLoopback(): Promise<void> {
   try {
+    const token = await getLoopbackToken();
     void fetch(`${LOOPBACK_BASE}/api/raw-print`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
       body: JSON.stringify({ hex: '1b700019fa', label: 'drawer-kick' }),
     }).catch(() => {});
   } catch {

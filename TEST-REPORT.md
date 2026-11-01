@@ -33,11 +33,12 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Single-lane numbering guard, DRAFT refs (T2 sale lane, ADR-023) | src/context/browser-lane.test.ts | 3 | ✅ 3/3 → 4/4 |
 | Settlement idempotency + v2→v3 migration (T2b, ADR-024) | src/db/idempotency.test.ts | +3 | ✅ 3/3 |
 | Outbox kind routing + backward compat (T2b) | src/core/sale-outbox.test.ts | +2 | ✅ 2/2 |
-| **Total** | **27 files** | **214** | **✅ 214/214, 0 fail** |
+| Loopback write token: 401/401/200 gate (T4, ADR-025) | server/index.test.ts | +1 | ✅ 1/1 |
+| **Total** | **27 files** | **215** | **✅ 215/215, 0 fail** |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 214/214 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 215/215 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.
