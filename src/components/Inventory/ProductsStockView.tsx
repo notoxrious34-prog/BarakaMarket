@@ -16,8 +16,31 @@ import {
   Sparkles,
   TrendingUp,
   Percent,
+  Upload,
+  Printer,
 } from 'lucide-react';
 import { initialCategories } from '../../data/seedData';
+import rawCatalog from '../../data/algerian-catalog.json';
+import { searchCatalog, REF_TO_PRODUCT_CATEGORY, ProductTemplate } from '../../core/reference-search.js';
+import { CsvImportModal, ShelfLabelsDialog, LossModal } from './ProductToolModals';
+
+// Compact on-disk catalog → shared ProductTemplate kernel rows (cached, browser-safe).
+interface CompactTemplate { b: string; bar?: string; m?: string; c: string; fr: string; ar?: string; a?: string; w?: number; u?: string }
+let localCatalogCache: ProductTemplate[] | null = null;
+const getLocalCatalog = (): ProductTemplate[] => {
+  if (localCatalogCache) return localCatalogCache;
+  const data = rawCatalog as { categories: { code: string; tva: 0 | 9 | 19 }[]; templates: CompactTemplate[] };
+  const tvaOf = Object.fromEntries(data.categories.map(c => [c.code, c.tva]));
+  localCatalogCache = data.templates.map((t, i) => ({
+    id: i, brandId: t.b, brandName: t.b, brandNameAr: t.bar ?? '',
+    manufacturer: t.m ?? '', categoryCode: t.c,
+    suggestedNameFr: t.fr, suggestedNameAr: t.ar ?? '',
+    searchAliases: t.a ?? '', isWeighable: t.w === 1,
+    defaultUnit: (t.u === 'KG' || t.u === 'LITRE' ? t.u : 'PIECE') as 'PIECE' | 'KG' | 'LITRE',
+    defaultTva: (tvaOf[t.c] ?? 19) as 0 | 9 | 19,
+  }));
+  return localCatalogCache;
+};
 
 export const ProductsStockView: React.FC = () => {
   const { products, addProduct, updateProduct, deleteProduct, language } = useApp();
@@ -47,14 +70,29 @@ export const ProductsStockView: React.FC = () => {
   const [expiryDate, setExpiryDate] = useState('');
 
   // TASK-BRK-016-MKT: reference catalog autofill (type "elio"/"ايليو" → pick).
+  // TASK-BRK-019-MKT: loopback first, local bundled catalog fallback (offline-safe).
   interface TemplateHit {
     id: number; brandName: string; nameFr: string; nameAr: string;
     categoryCode: string; productCategory: string; defaultTva: TVARate;
     isWeighable: boolean; defaultUnit: 'PIECE' | 'KG' | 'LITRE';
   }
+  const toHit = (t: { id: number; brandName: string; suggestedNameFr: string; suggestedNameAr: string; categoryCode: string; defaultTva: TVARate; isWeighable: boolean; defaultUnit: 'PIECE' | 'KG' | 'LITRE' }): TemplateHit => ({
+    id: t.id, brandName: t.brandName, nameFr: t.suggestedNameFr, nameAr: t.suggestedNameAr,
+    categoryCode: t.categoryCode, productCategory: REF_TO_PRODUCT_CATEGORY[t.categoryCode] ?? 'epicerie',
+    defaultTva: t.defaultTva, isWeighable: t.isWeighable, defaultUnit: t.defaultUnit,
+  });
   const [tplHits, setTplHits] = useState<TemplateHit[]>([]);
   const [tplOpen, setTplOpen] = useState(false);
   const buyPriceRef = useRef<HTMLInputElement>(null);
+
+  // TASK-BRK-019-MKT: CSV / labels / casse tool dialogs.
+  const [csvOpen, setCsvOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
+  const [lossOpen, setLossOpen] = useState(false);
+  const handleLossRecorded = (productId: number, qtyUnits: number) => {
+    const p = products.find(x => x.id === productId);
+    if (p) updateProduct(productId, { stock_qty: Math.max(0, p.stock_qty - qtyUnits) });
+  };
 
   useEffect(() => {
     if (!showProductModal || editingProduct || nameFr.trim().length < 2) {
@@ -62,14 +100,27 @@ export const ProductsStockView: React.FC = () => {
     }
     let live = true;
     const t = setTimeout(() => {
-      fetch(`http://127.0.0.1:3100/api/reference/templates?q=${encodeURIComponent(nameFr.trim())}&limit=8`)
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 1200);
+      fetch(`http://127.0.0.1:3100/api/reference/templates?q=${encodeURIComponent(nameFr.trim())}&limit=8`, { signal: ctrl.signal })
         .then(r => (r.ok ? r.json() : []))
         .then((rows: TemplateHit[]) => {
+          clearTimeout(to);
           if (!live) return;
-          setTplHits(Array.isArray(rows) ? rows : []);
+          if (Array.isArray(rows) && rows.length > 0) {
+            setTplHits(rows);
+          } else {
+            // Local bundled fallback: same scorer, same 257 templates.
+            setTplHits(searchCatalog(getLocalCatalog(), nameFr.trim(), 8).map(toHit));
+          }
           setTplOpen(true);
         })
-        .catch(() => { if (live) { setTplHits([]); setTplOpen(false); } });
+        .catch(() => {
+          clearTimeout(to);
+          if (!live) return;
+          setTplHits(searchCatalog(getLocalCatalog(), nameFr.trim(), 8).map(toHit));
+          setTplOpen(true);
+        });
     }, 220);
     return () => { live = false; clearTimeout(t); };
   }, [nameFr, showProductModal, editingProduct]);
@@ -255,6 +306,33 @@ export const ProductsStockView: React.FC = () => {
               className="w-full bg-[#111722] border border-[#233145] rounded-xl ps-9 pe-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
             />
           </div>
+
+          <button
+            onClick={() => setCsvOpen(true)}
+            title={isAr ? 'استيراد CSV بالجملة' : 'Importer CSV (ADR-009)'}
+            className="px-4 py-2 bg-[#111722] hover:bg-[#162030] text-slate-200 border border-[#233145] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
+          >
+            <Upload className="w-4 h-4 text-sky-400" />
+            <span>{isAr ? 'CSV' : 'Importer CSV'}</span>
+          </button>
+
+          <button
+            onClick={() => setLabelsOpen(true)}
+            title={isAr ? 'ملصقات الرفوف' : 'Étiquettes rayon (ADR-010)'}
+            className="px-4 py-2 bg-[#111722] hover:bg-[#162030] text-slate-200 border border-[#233145] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
+          >
+            <Printer className="w-4 h-4 text-amber-400" />
+            <span>{isAr ? 'ملصقات' : 'Étiquettes'}</span>
+          </button>
+
+          <button
+            onClick={() => setLossOpen(true)}
+            title={isAr ? 'إعلان خسارة / كسر' : 'Déclarer perte / casse (ADR-006)'}
+            className="px-4 py-2 bg-[#111722] hover:bg-[#162030] text-slate-200 border border-[#233145] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
+          >
+            <Trash2 className="w-4 h-4 text-rose-400" />
+            <span>{isAr ? 'كسر' : 'Perte'}</span>
+          </button>
 
           <button
             onClick={handleOpenAddModal}
@@ -669,6 +747,10 @@ export const ProductsStockView: React.FC = () => {
           </div>
         </div>
       )}
+      {/* TASK-BRK-019-MKT: CSV / labels / casse tool dialogs */}
+      {csvOpen && <CsvImportModal isAr={isAr} onClose={() => setCsvOpen(false)} />}
+      {labelsOpen && <ShelfLabelsDialog isAr={isAr} products={products} onClose={() => setLabelsOpen(false)} />}
+      {lossOpen && <LossModal isAr={isAr} products={products} onClose={() => setLossOpen(false)} onLossRecorded={handleLossRecorded} />}
     </div>
   );
 };

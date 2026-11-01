@@ -15,6 +15,7 @@ import {
   PlayCircle,
   Truck,
   PieChart,
+  Banknote,
   Sun,
   Moon,
 } from 'lucide-react';
@@ -157,6 +158,7 @@ export const Navbar: React.FC = () => {
 
           <button
             onClick={() => setActiveView('reports')}
+            title={isAr ? 'تقرير Z اليومي' : 'Rapport Z journalier'}
             className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
               activeView === 'reports'
                 ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
@@ -165,6 +167,19 @@ export const Navbar: React.FC = () => {
           >
             <FileText className="w-4 h-4" />
             <span>{isAr ? 'تقرير Z' : 'Rapport Z'}</span>
+          </button>
+
+          <button
+            onClick={() => setActiveView('shifts')}
+            title={isAr ? 'إغلاق الصندوق وتقرير Z' : 'Caisse & Clôture / Z'}
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
+              activeView === 'shifts'
+                ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
+                : 'text-slate-300 hover:bg-[#162030] hover:text-white'
+            }`}
+          >
+            <Banknote className="w-4 h-4 text-amber-400" />
+            <span>{isAr ? 'إغلاق' : 'Clôture'}</span>
           </button>
 
           <button

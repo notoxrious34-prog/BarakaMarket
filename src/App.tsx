@@ -8,6 +8,8 @@ import { DailyZReportView } from './components/Reports/DailyZReportView';
 import { LicenseManagerView } from './components/License/LicenseManagerView';
 import { StoreProfileView } from './components/Settings/StoreProfileView';
 import { SuppliersPurchasesView } from './components/Suppliers/SuppliersPurchasesView';
+import { CashSessionsView } from './components/Cash/CashSessionsView';
+import { BackupManagerView } from './components/Settings/BackupManagerView';
 import { AccountingJournalView } from './components/Accounting/AccountingJournalView';
 import { TicketThermal80mm } from './components/Receipts/TicketThermal80mm';
 import { FactureReglementaireA4 } from './components/Receipts/FactureReglementaireA4';
@@ -51,8 +53,14 @@ const MainLayout: React.FC = () => {
         {activeView === 'clients' && <CarnetDetteView />}
         {activeView === 'accounting' && <AccountingJournalView />}
         {activeView === 'reports' && <DailyZReportView />}
+        {activeView === 'shifts' && <CashSessionsView />}
         {activeView === 'license' && <LicenseManagerView />}
-        {activeView === 'settings' && <StoreProfileView />}
+        {activeView === 'settings' && (
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <StoreProfileView />
+            <BackupManagerView />
+          </div>
+        )}
       </main>
 
       {/* Slim status bar: cashier • version • local DB (fiscal IDs live on receipts + settings) */}
@@ -78,7 +86,7 @@ const MainLayout: React.FC = () => {
             </>
           )}
           <span className="text-slate-300 dark:text-slate-600">|</span>
-          <span className="uppercase tracking-widest text-amber-400/80">v1.0-rc1</span>
+          <span className="uppercase tracking-widest text-amber-400/80">v1.0.1</span>
         </span>
       </footer>
 

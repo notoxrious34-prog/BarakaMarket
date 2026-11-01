@@ -210,6 +210,36 @@ export const initialProducts: Product[] = [
     has_expiry_date: true,
     expiry_date: '2026-10-30', // Very fresh!
   },
+  {
+    id: 13,
+    barcode: '6130000000137',
+    name_fr: 'BISCUITS BIMO TANGO CHOCOLAT',
+    name_ar: 'بسكويت بيمو تانغو شوكولاتة',
+    category_id: 'confiserie',
+    buy_price: 45,
+    sell_price: 60,
+    tva_rate: 19,
+    stock_qty: 120,
+    min_stock_alert: 20,
+    unit: 'PIECE',
+    has_expiry_date: true,
+    expiry_date: '2027-06-15',
+  },
+  {
+    id: 14,
+    barcode: '6130000000144',
+    name_fr: 'YAOURT SOUMMAM NATURE 4x100G',
+    name_ar: 'ياغورت الصومام طبيعي 4×100غ',
+    category_id: 'laiterie',
+    buy_price: 90,
+    sell_price: 110,
+    tva_rate: 19,
+    stock_qty: 60,
+    min_stock_alert: 12,
+    unit: 'PIECE',
+    has_expiry_date: true,
+    expiry_date: '2026-11-20',
+  },
 ];
 
 export const initialClients: Client[] = [
