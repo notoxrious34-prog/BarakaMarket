@@ -36,7 +36,10 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Loopback write token: 401/401/200 gate (T4, ADR-025) | server/index.test.ts | +1 | ✅ 1/1 |
 | Native-first commit lane: fallback/id-forwarding/down→null (T4b, ADR-026) | src/core/commit-lane.test.ts | +4 | ✅ 4/4 |
 | Product mirror mapping + no-op contract (T4c, ADR-027) | src/core/product-authority.test.ts | +3 | ✅ 3/3 |
-| **Total** | **29 files** | **222** | **✅ 222/222, 0 fail** |
+| Pole-display VFD frames: 20-col exact + brightness + determinism (T5, ADR-028) | src/hardware/pole-display.test.ts | +6 | ✅ 6/6 |
+| Unified print lane: spool contract + Lane B fallback (T5, ADR-028) | src/core/print-lane.test.ts | +5 | ✅ 5/5 |
+| Pole spool routing `spool: pole-display-spool.bin` (T5, ADR-028) | server/index.test.ts | +1 | ✅ 1/1 |
+| **Total** | **31 files** | **234** | **✅ 234/234, 0 fail** |
 
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
@@ -51,7 +54,7 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 222/222 + Rust 7/7 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 234/234 + Rust 7/7 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.

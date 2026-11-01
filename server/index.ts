@@ -589,8 +589,11 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       const buf = Buffer.from(hex, 'hex');
       const dir = path.resolve('data');
       fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(path.join(dir, 'raw-print-spool.bin'), buf);
-      res.json({ ok: true, bytes: buf.length, label: label ?? 'raw' });
+      // T5 (ADR-028): printer and pole-display streams spool to separate
+      // files so one USB/COM forwarder each can drain without framing.
+      const spool = (label ?? '').startsWith('pole') ? 'pole-display-spool.bin' : 'raw-print-spool.bin';
+      fs.appendFileSync(path.join(dir, spool), buf);
+      res.json({ ok: true, bytes: buf.length, label: label ?? 'raw', spool });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

@@ -122,6 +122,15 @@ test('api: raw-print spools drawer-kick bytes and rejects garbage', async () => 
   assert.equal(bad.status, 400);
 });
 
+test('api: raw-print routes pole labels to the pole spool (T5)', async () => {
+  const r = await fetch(`${base}/api/raw-print`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hex: '0c', label: 'pole-display' }),
+  });
+  assert.equal(r.status, 200);
+  assert.equal(((await r.json()) as { spool: string }).spool, 'pole-display-spool.bin');
+});
+
 test('api: POST /purchases/receive commits BL with stock influx', async () => {
   (baraka as unknown as { db: { prepare: (s: string) => { run: (...a: unknown[]) => void } } }).db
     .prepare('INSERT OR IGNORE INTO suppliers (id, name) VALUES (9, ?)').run('SUP API');

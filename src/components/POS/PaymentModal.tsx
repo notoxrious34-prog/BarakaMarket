@@ -7,6 +7,7 @@ import { formatDZDFromCentimes, dzdToCentimes } from '../../core/money';
 import { calculateCashChange, smartCashPresetsCt } from '../../core/fiscal.centimes';
 import { cashChime } from '../../hardware/sound';
 import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
+import { showPoleTotal } from '../../core/print-lane';
 import {
   Banknote,
   CreditCard,
@@ -52,6 +53,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
   useEffect(() => {
     tenderInputRef.current?.focus();
     tenderInputRef.current?.select();
+    // T5 (ADR-028): customer pole shows the amount due on modal open.
+    // Fire-and-forget: pole absent => Lane B (voice + screen) stays the path.
+    void showPoleTotal(totals.total_ttc);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Update amount paid default when payment method or totals change

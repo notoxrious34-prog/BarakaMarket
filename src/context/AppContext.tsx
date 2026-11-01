@@ -31,6 +31,7 @@ import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
+import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
 
@@ -926,6 +927,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
       setSales(prev => [authoritative, ...prev]);
+      // T5 (ADR-028): Lane A auto-spool (ticket + drawer on cash) and pole
+      // tendered frame — fire-and-forget; Lane B (CSS modal print) is
+      // unaffected and stays the instant path.
+      void printSaleAuto(authoritative, storeProfile, language === 'ar');
+      void showPoleTendered(amountPaid, Math.max(0, Math.round(amountPaid - totals.total_ttc)), paymentMethod);
       // A successful commit proves the lane is alive — flush any backlog now.
       void drainOutbox();
       clearCart();
