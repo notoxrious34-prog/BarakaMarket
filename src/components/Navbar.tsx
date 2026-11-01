@@ -37,8 +37,6 @@ export const Navbar: React.FC = () => {
     isHardwareScaleActive,
     setHardwareScaleActive,
     scaleWeightGrams,
-    licenseActivated,
-    trialRemaining,
   } = useApp();
 
   const [showHeldDropdown, setShowHeldDropdown] = useState(false);
@@ -75,20 +73,7 @@ export const Navbar: React.FC = () => {
           <span className="font-bold text-lg text-white tracking-tight group-hover:text-emerald-400 transition-colors whitespace-nowrap">
             Baraka Market
           </span>
-          {/* Gate-03 TASK 3: demo-transaction badge while in TRIAL. */}
-          {!licenseActivated ? (
-            <button
-              onClick={() => setActiveView('license')}
-              title={isAr ? 'نسخة تجريبية — اضغط للتفعيل' : 'Version d\'essai — cliquer pour activer'}
-              className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/30 hover:bg-amber-500/20 cursor-pointer whitespace-nowrap"
-            >
-              {isAr ? `تجريبي: ${trialRemaining.sales} عملية` : `ESSAI: ${trialRemaining.sales} ventes`}
-            </button>
-          ) : (
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 whitespace-nowrap">
-              {isAr ? 'مرخّص' : 'LICENCIÉ'}
-            </span>
-          )}
+          {/* BRK-020: trial badge removed — license status lives in Licence/Settings only. */}
         </div>
 
         {/* Navigation Tabs */}

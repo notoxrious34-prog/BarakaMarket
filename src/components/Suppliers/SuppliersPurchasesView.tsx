@@ -22,6 +22,8 @@ import {
   CreditCard,
   Banknote,
   FileText,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 
 export const SuppliersPurchasesView: React.FC = () => {
@@ -30,6 +32,8 @@ export const SuppliersPurchasesView: React.FC = () => {
     products,
     purchases,
     addSupplier,
+    updateSupplier,
+    deleteSupplier,
     recordPurchaseReception,
     settleSupplierDebt,
     language,
@@ -66,6 +70,26 @@ export const SuppliersPurchasesView: React.FC = () => {
   const [newSupNif, setNewSupNif] = useState('');
   const [newSupRc, setNewSupRc] = useState('');
   const [newSupCategory, setNewSupCategory] = useState('');
+
+  // BRK-020: supplier edit/delete lifecycle.
+  const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
+  const [crudMsg, setCrudMsg] = useState('');
+  const openEditSupplier = (sup: Supplier) => {
+    setEditingSupplier({ ...sup });
+    setCrudMsg('');
+  };
+  const handleDeleteSupplier = (sup: Supplier) => {
+    if (sup.balance_due > 0) {
+      setCrudMsg(isAr
+        ? 'مستحيل: لا يمكن حذف مورد في ذمته دين قائم'
+        : 'Impossible de supprimer un fournisseur avec des dettes en cours');
+      return;
+    }
+    if (!window.confirm(isAr ? `حذف المورد ${sup.name}؟` : `Supprimer ${sup.name} ?`)) return;
+    deleteSupplier(sup.id);
+    if (selectedSupplier?.id === sup.id) setSelectedSupplier(suppliers.find(s => s.id !== sup.id) ?? suppliers[0]);
+    setCrudMsg('');
+  };
 
   const filteredSuppliers = suppliers.filter(s => {
     const q = searchQuery.toLowerCase();
@@ -229,6 +253,11 @@ export const SuppliersPurchasesView: React.FC = () => {
         </div>
 
         {/* Suppliers List */}
+        {crudMsg && (
+          <div className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 mb-2">
+            {crudMsg}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto space-y-1.5 pe-1">
           {filteredSuppliers.map(sup => {
             const isSelected = selectedSupplier?.id === sup.id;
@@ -244,16 +273,32 @@ export const SuppliersPurchasesView: React.FC = () => {
               >
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-white truncate">{sup.name}</span>
-                  <span
-                    dir="ltr"
-                    className={`text-xs font-bold font-mono px-2 py-0.5 rounded ${
-                      sup.balance_due > 0
-                        ? 'bg-amber-900/60 text-amber-300 border border-amber-700/50'
-                        : 'bg-emerald-900/40 text-emerald-400'
-                    }`}
-                  >
-                    {formatDZD(sup.balance_due, false)}
-                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={e => { e.stopPropagation(); openEditSupplier(sup); }}
+                      title={isAr ? 'تعديل' : 'Modifier'}
+                      className="p-1 rounded text-slate-500 hover:text-sky-300 hover:bg-[#162030] cursor-pointer"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDeleteSupplier(sup); }}
+                      title={isAr ? 'حذف' : 'Supprimer'}
+                      className="p-1 rounded text-slate-500 hover:text-rose-300 hover:bg-[#162030] cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                    <span
+                      dir="ltr"
+                      className={`text-xs font-bold font-mono px-2 py-0.5 rounded ${
+                        sup.balance_due > 0
+                          ? 'bg-amber-900/60 text-amber-300 border border-amber-700/50'
+                          : 'bg-emerald-900/40 text-emerald-400'
+                      }`}
+                    >
+                      {formatDZD(sup.balance_due, false)}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
@@ -677,6 +722,90 @@ export const SuppliersPurchasesView: React.FC = () => {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* BRK-020 MODAL: Edit Supplier */}
+      {editingSupplier && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-[#111722] border border-[#1e293b] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+            <div className="p-4 border-b border-[#1e293b] flex justify-between items-center bg-[#0b0f17]">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Pencil className="w-4 h-4 text-sky-400" />
+                <span>{isAr ? 'تعديل المورد' : 'Modifier Fournisseur'}</span>
+              </h3>
+              <button onClick={() => setEditingSupplier(null)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={e => {
+                e.preventDefault();
+                if (!editingSupplier.name.trim()) return;
+                updateSupplier(editingSupplier.id, {
+                  name: editingSupplier.name,
+                  contact_person: editingSupplier.contact_person,
+                  phone: editingSupplier.phone,
+                  address: editingSupplier.address,
+                  nif: editingSupplier.nif,
+                  rc: editingSupplier.rc,
+                  category: editingSupplier.category,
+                });
+                setSelectedSupplier({ ...editingSupplier });
+                setEditingSupplier(null);
+              }}
+              className="p-4 space-y-3"
+            >
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  {isAr ? 'اسم الشركة الموردة:' : 'Raison Sociale:'} *
+                </label>
+                <input
+                  type="text" required
+                  value={editingSupplier.name}
+                  onChange={e => setEditingSupplier({ ...editingSupplier, name: e.target.value })}
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-amber-500"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">{isAr ? 'الهاتف:' : 'Téléphone:'}</label>
+                  <input
+                    type="tel"
+                    value={editingSupplier.phone}
+                    onChange={e => setEditingSupplier({ ...editingSupplier, phone: e.target.value })}
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">NIF:</label>
+                  <input
+                    type="text"
+                    value={editingSupplier.nif ?? ''}
+                    onChange={e => setEditingSupplier({ ...editingSupplier, nif: e.target.value })}
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">{isAr ? 'العنوان:' : 'Adresse:'}</label>
+                <input
+                  type="text"
+                  value={editingSupplier.address}
+                  onChange={e => setEditingSupplier({ ...editingSupplier, address: e.target.value })}
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none"
+                />
+              </div>
+              <div className="pt-2 flex justify-end gap-2">
+                <button type="button" onClick={() => setEditingSupplier(null)} className="px-4 py-2 bg-[#162030] text-slate-300 rounded-lg text-xs">
+                  {isAr ? 'إلغاء' : 'Annuler'}
+                </button>
+                <button type="submit" className="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-bold">
+                  {isAr ? 'حفظ' : 'Enregistrer'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

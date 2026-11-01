@@ -128,6 +128,7 @@ interface AppContextType {
   deleteProduct: (id: number) => void;
   addClient: (client: Omit<Client, 'id' | 'credit_balance'>) => Client;
   updateClient: (id: number, client: Partial<Client>) => void;
+  deleteClient: (id: number) => void;
   updateStoreProfile: (profile: Partial<StoreProfile>) => void;
   /** Gate-03 TASK 4: first-run provisioning — true until the shop identity locks in. */
   needsStoreSetup: boolean;
@@ -1101,6 +1102,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setClients(prev => prev.map(c => (c.id === id ? { ...c, ...clientData } : c)));
   };
 
+  const deleteClient = (id: number) => {
+    setClients(prev => prev.filter(c => c.id !== id));
+  };
+
   const updateStoreProfile = (profileData: Partial<StoreProfile>) => {
     setStoreProfile(prev => ({ ...prev, ...profileData }));
   };
@@ -1299,6 +1304,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteProduct,
         addClient,
         updateClient,
+        deleteClient,
         updateStoreProfile,
         needsStoreSetup,
         completeStoreSetup,

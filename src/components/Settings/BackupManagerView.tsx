@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { LocalSnapshotPanel } from '../Inventory/ProductToolModals';
 
 const API = 'http://127.0.0.1:3100';
 
@@ -49,9 +50,14 @@ export const BackupManagerView: React.FC = () => {
   const card = 'bg-[#101724] border border-[#1e293b] rounded-xl p-4';
 
   return (
-    <div className={card}>
+    <div className="space-y-4">
+      {/* ADR-018: offline lane — always available, no server needed. */}
+      <LocalSnapshotPanel isAr={isAr} />
+      {/* Fiscal SQLite lane — rendered only when the loopback server answers. No error banners. */}
+      {!offline && (
+      <div className={card}>
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-bold text-white">{isAr ? 'النسخ الاحتياطي الساخن' : 'Sauvegarde à chaud'}</h3>
+        <h3 className="text-xs font-bold text-white">{isAr ? 'النسخ الاحتياطي الساخن (SQLite)' : 'Sauvegarde à chaud (SQLite)'}</h3>
         <button
           disabled={busy}
           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white cursor-pointer"
@@ -60,14 +66,9 @@ export const BackupManagerView: React.FC = () => {
           {isAr ? 'إنشاء نسخة فورية' : 'Créer Sauvegarde'}
         </button>
       </div>
-      {offline && (
-        <div className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 mb-3">
-          {isAr ? 'الخادم المحلي غير متصل — شغّل `npm run dev:server`.' : 'Loopback hors ligne — lancez `npm run dev:server`.'}
-        </div>
-      )}
       {msg && <div className="text-[11px] text-slate-300 bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 mb-3">{msg}</div>}
       <div className="space-y-2 max-h-64 overflow-y-auto">
-        {rows.length === 0 && !offline && (
+        {rows.length === 0 && (
           <div className="text-[11px] text-slate-500">{isAr ? 'لا نسخ بعد.' : 'Aucun snapshot.'}</div>
         )}
         {rows.map(b => (
@@ -90,6 +91,8 @@ export const BackupManagerView: React.FC = () => {
           </div>
         ))}
       </div>
+      </div>
+      )}
     </div>
   );
 };

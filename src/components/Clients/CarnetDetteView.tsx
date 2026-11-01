@@ -21,10 +21,12 @@ import {
   X,
   CreditCard,
   Banknote,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 
 export const CarnetDetteView: React.FC = () => {
-  const { clients, sales, settlements, addClient, settleClientDebt, language } = useApp();
+  const { clients, sales, settlements, addClient, updateClient, deleteClient, settleClientDebt, language } = useApp();
   const isAr = language === 'ar';
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -45,6 +47,22 @@ export const CarnetDetteView: React.FC = () => {
   const [newClientAddress, setNewClientAddress] = useState('');
   const [newClientLimit, setNewClientLimit] = useState(20000);
   const [newClientNif, setNewClientNif] = useState('');
+
+  // BRK-020: client edit/delete lifecycle.
+  const [editingClient, setEditingClient] = useState<Client | null>(null);
+  const [crudMsg, setCrudMsg] = useState('');
+  const handleDeleteClient = (client: Client) => {
+    if (client.credit_balance > 0) {
+      setCrudMsg(isAr
+        ? `مستحيل: لا يمكن حذف زبون عليه دين (${formatDZD(client.credit_balance, false)}) / Action impossible: le client a une dette en cours`
+        : `Action impossible: le client a une dette en cours de ${formatDZD(client.credit_balance, false)}`);
+      return;
+    }
+    if (!window.confirm(isAr ? `حذف الزبون ${client.name}؟` : `Supprimer ${client.name} ?`)) return;
+    deleteClient(client.id);
+    if (selectedClient?.id === client.id) setSelectedClient(clients.find(c => c.id !== client.id && c.id !== 1) ?? clients[0]);
+    setCrudMsg('');
+  };
 
   // Filter clients
   const filteredClients = clients.filter(c => {
@@ -150,6 +168,11 @@ export const CarnetDetteView: React.FC = () => {
         </div>
 
         {/* Client List */}
+        {crudMsg && (
+          <div className="text-[11px] text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg px-3 py-2 mb-2">
+            {crudMsg}
+          </div>
+        )}
         <div className="flex-1 overflow-y-auto space-y-1.5 pe-1">
           {filteredClients.map(client => {
             const isSelected = selectedClient?.id === client.id;
@@ -165,16 +188,32 @@ export const CarnetDetteView: React.FC = () => {
               >
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-white truncate">{client.name}</span>
-                  <span
-                    dir="ltr"
-                    className={`text-xs font-bold font-mono px-2 py-0.5 rounded ${
-                      client.credit_balance > 0
-                        ? 'bg-rose-900/60 text-rose-300 border border-rose-700/50'
-                        : 'bg-emerald-900/40 text-emerald-400'
-                    }`}
-                  >
-                    {formatDZD(client.credit_balance, false)}
-                  </span>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={e => { e.stopPropagation(); setEditingClient({ ...client }); setCrudMsg(''); }}
+                      title={isAr ? 'تعديل' : 'Modifier'}
+                      className="p-1 rounded text-slate-500 hover:text-sky-300 hover:bg-[#162030] cursor-pointer"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={e => { e.stopPropagation(); handleDeleteClient(client); }}
+                      title={isAr ? 'حذف' : 'Supprimer'}
+                      className="p-1 rounded text-slate-500 hover:text-rose-300 hover:bg-[#162030] cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                    <span
+                      dir="ltr"
+                      className={`text-xs font-bold font-mono px-2 py-0.5 rounded ${
+                        client.credit_balance > 0
+                          ? 'bg-rose-900/60 text-rose-300 border border-rose-700/50'
+                          : 'bg-emerald-900/40 text-emerald-400'
+                      }`}
+                    >
+                      {formatDZD(client.credit_balance, false)}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
@@ -427,6 +466,88 @@ export const CarnetDetteView: React.FC = () => {
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold"
                 >
                   {isAr ? 'تأكيد التسديد' : 'Confirmer le Règlement'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* BRK-020 MODAL: Edit Client */}
+      {editingClient && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="bg-[#111722] border border-[#1e293b] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden">
+            <div className="p-4 border-b border-[#1e293b] flex justify-between items-center bg-[#0b0f17]">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <Pencil className="w-4 h-4 text-sky-400" />
+                <span>{isAr ? 'تعديل الزبون' : 'Modifier Client'}</span>
+              </h3>
+              <button onClick={() => setEditingClient(null)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={e => {
+                e.preventDefault();
+                if (!editingClient.name.trim()) return;
+                updateClient(editingClient.id, {
+                  name: editingClient.name,
+                  phone: editingClient.phone,
+                  address: editingClient.address,
+                  max_credit_limit: editingClient.max_credit_limit,
+                  notes: editingClient.notes,
+                });
+                setSelectedClient({ ...editingClient });
+                setEditingClient(null);
+              }}
+              className="p-4 space-y-3"
+            >
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">
+                  {isAr ? 'اسم الزبون:' : 'Nom:'} *
+                </label>
+                <input
+                  type="text" required
+                  value={editingClient.name}
+                  onChange={e => setEditingClient({ ...editingClient, name: e.target.value })}
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none focus:border-rose-500"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">{isAr ? 'الهاتف:' : 'Téléphone:'}</label>
+                  <input
+                    type="tel"
+                    value={editingClient.phone}
+                    onChange={e => setEditingClient({ ...editingClient, phone: e.target.value })}
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">{isAr ? 'سقف الدين (دج):' : 'Plafond (DZD):'}</label>
+                  <input
+                    type="number" min="0"
+                    value={editingClient.max_credit_limit}
+                    onChange={e => setEditingClient({ ...editingClient, max_credit_limit: Number(e.target.value) })}
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">{isAr ? 'العنوان:' : 'Adresse:'}</label>
+                <input
+                  type="text"
+                  value={editingClient.address}
+                  onChange={e => setEditingClient({ ...editingClient, address: e.target.value })}
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none"
+                />
+              </div>
+              <div className="pt-2 flex justify-end gap-2">
+                <button type="button" onClick={() => setEditingClient(null)} className="px-4 py-2 bg-[#162030] text-slate-300 rounded-lg text-xs">
+                  {isAr ? 'إلغاء' : 'Annuler'}
+                </button>
+                <button type="submit" className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-bold">
+                  {isAr ? 'حفظ' : 'Enregistrer'}
                 </button>
               </div>
             </form>

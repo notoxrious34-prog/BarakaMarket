@@ -66,7 +66,7 @@ export const CashSessionsView: React.FC = () => {
       <h2 className="text-sm font-bold text-white">{isAr ? 'إغلاق الصندوق وتقرير Z' : 'Caisse & Clôture (Z)'}</h2>
       {offline && (
         <div className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
-          {isAr ? 'الخادم المحلي غير متصل — شغّل `npm run dev:server` للجلسات المباشرة.' : 'Loopback hors ligne — lancez `npm run dev:server` pour les sessions live.'}
+          {isAr ? 'وضع مستقل: الجلسات المباشرة غير متوفرة هنا — تُدار من دفتر اليومية.' : 'Mode autonome: sessions live indisponibles ici — voir le journal comptable.'}
         </div>
       )}
       {msg && <div className="text-[11px] text-slate-300 bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2">{msg}</div>}
