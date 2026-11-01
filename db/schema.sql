@@ -185,7 +185,9 @@ CREATE TABLE IF NOT EXISTS client_settlements (
   total_collected_ct INTEGER NOT NULL DEFAULT 0,
   receipt_number TEXT    UNIQUE,
   date           TEXT    NOT NULL,
-  note           TEXT
+  note           TEXT,
+  -- T2b (ADR-024): idempotency key minted by the checkout at finalize.
+  client_settlement_key TEXT
 );
 
 -- ACID ephemeral cart draft (EXEC-DIR-2023-001 TASK 4).

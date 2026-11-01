@@ -130,6 +130,35 @@ export async function postSaleToLoopback(
   }
 }
 
+/** T2b (ADR-024): POST a debt settlement to the authoritative lane.
+ * @returns authoritative {id, receipt_number} or null. Idempotent by
+ * client_settlement_key (server slice). */
+export async function postSettlementToLoopback(
+  input: {
+    client_id: number; client_name?: string; amount_ct: number;
+    payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
+    timbre_ct: number; total_collected_ct: number;
+    client_settlement_key?: string | null; date?: string; note?: string | null;
+  },
+  timeoutMs = 4000,
+): Promise<{ id: string; receipt_number: string } | null> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const r = await fetch(`${LOOPBACK_BASE}/api/settlements`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    return (await r.json()) as { id: string; receipt_number: string };
+  } catch {
+    return null;
+  }
+}
+
 /** Fire-and-forget 5-byte drawer-kick via the raw-print spool endpoint. */
 export function kickDrawerViaLoopback(): void {
   try {

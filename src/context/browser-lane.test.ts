@@ -16,6 +16,11 @@ test('t2: browser never mints FACT/T numbers (only Q until T2b)', () => {
   assert.ok(!src.includes('`FACT-${'), 'template-minted FACT in browser lane');
 });
 
+test('t2b: browser never mints Q numbers — server seq is the sole source', () => {
+  assert.ok(!src.includes("nextBrowserSeq('Q'"), 'browser mints Q');
+  assert.ok(src.includes('DRAFT-Q-'), 'missing DRAFT-Q provisional marker');
+});
+
 test('t2: provisional rows carry DRAFT refs (obviously non-fiscal)', () => {
   assert.ok(src.includes('DRAFT-FACT-'), 'missing DRAFT-FACT provisional marker');
   assert.ok(src.includes('DRAFT-T-'), 'missing DRAFT-T provisional marker');

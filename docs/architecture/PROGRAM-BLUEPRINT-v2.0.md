@@ -81,7 +81,7 @@ touches shop config. Offline-first: update NEVER blocks checkout.
    violations fail review.
 
 ## 10. Task map (approved, flexible)
-T1 sale commit · **DONE (ADR-021 slice A + ADR-022 slice B, 205/205, live-wire proven)** · T2 single-lane seq · **sale lane DONE (ADR-023, DRAFT refs + guard, 208/208)** → proposed T2b settlement-lane (Q via server seq, same T1 pattern) for approval · T3 migrations · T4 loopback token ·
+T1 sale commit · **DONE (ADR-021 slice A + ADR-022 slice B, 205/205, live-wire proven)** · T2 single-lane seq · **FULLY DONE (ADR-023 sale lane + ADR-024 settlement lane T2b, Q via server seq, 214/214, live-wire proven)** · T3 migrations · **DONE (ADR-021 foundation + v3 step in ADR-024, tested)** · T4 loopback token ·
 T5 pro printing + pole display · T6 RS-232 scale · T7 power-cut drill ·
 T8 full RBAC · T9 updater · T10 light audit · T11 soak/keyboard/triggers ·
 T12 gold-master rehearsal + v1.1.0 tag.

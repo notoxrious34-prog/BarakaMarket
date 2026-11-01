@@ -29,7 +29,7 @@ import {
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
-import { probeFiscalAuthority, postSaleToLoopback, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { probeFiscalAuthority, postSaleToLoopback, postSettlementToLoopback, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
 
 /** localStorage-backed StorageLike for the sale outbox (never throws). */
@@ -108,7 +108,7 @@ interface AppContextType {
     amount: number,
     paymentMethod: PaymentMethod,
     note?: string
-  ) => DebtSettlement;
+  ) => Promise<DebtSettlement>;
 
   // Supplier & Inbound Purchase Actions (directly updates stock & PMP)
   addSupplier: (supplier: Omit<Supplier, 'id' | 'balance_due'>) => Supplier;
@@ -749,15 +749,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const drainOutbox = async (): Promise<void> => {
     if (authorityRef.current !== 'FISCAL_SQLITE') return;
     try {
-      const { done } = await replayOutbox(lsStore, (h, i) =>
-        postSaleToLoopback(h as AuthorityHeaderInput, i as AuthorityItemInput[]));
+      const { done } = await replayOutbox(lsStore, async (e) => {
+        if (e.kind === 'settlement') return postSettlementToLoopback(e.header as Parameters<typeof postSettlementToLoopback>[0]);
+        return postSaleToLoopback(e.header as AuthorityHeaderInput, e.items as AuthorityItemInput[]);
+      });
       if (done.length === 0) return;
-      setSales(prev => prev.map(s => {
-        const r = done.find(d => d.provisionalId === s.id);
-        return r
-          ? { ...s, id: r.auth.id, invoice_number: r.auth.invoice_number, ticket_number: r.auth.ticket_number, is_provisional: false }
-          : s;
-      }));
+      const saleDone = done.filter(d => d.kind === 'sale');
+      if (saleDone.length > 0) {
+        setSales(prev => prev.map(s => {
+          const r = saleDone.find(d => d.provisionalId === s.id);
+          return r && r.auth.invoice_number && r.auth.ticket_number
+            ? { ...s, id: r.auth.id, invoice_number: r.auth.invoice_number, ticket_number: r.auth.ticket_number, is_provisional: false }
+            : s;
+        }));
+      }
+      const settleDone = done.filter(d => d.kind === 'settlement');
+      if (settleDone.length > 0) {
+        setSettlements(prev => prev.map(s => {
+          const r = settleDone.find(d => d.provisionalId === s.id);
+          return r && r.auth.receipt_number
+            ? { ...s, id: r.auth.id, receipt_number: r.auth.receipt_number }
+            : s;
+        }));
+      }
     } catch { /* next drain will retry — the queue persists */ }
   };
 
@@ -849,7 +863,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // outbox; the drain upgrades this row instead of duplicating it.
         const provisional = completeSale(paymentMethod, amountPaid, isFactureReglementaire);
         enqueueOutbox(lsStore, {
-          key: saleKey, provisionalId: provisional.id,
+          key: saleKey, kind: 'sale', provisionalId: provisional.id,
           header: fiscalHeader, items: payloadItems,
           enqueuedAt: createdAt, attempts: 0,
         });
@@ -906,12 +920,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const settleClientDebt = (
+  const settleClientDebt = async (
     clientId: number,
     amount: number,
     paymentMethod: PaymentMethod,
     note?: string
-  ): DebtSettlement => {
+  ): Promise<DebtSettlement> => {
     const client = clients.find(c => c.id === clientId);
     const clientName = client ? client.name : `Client #${clientId}`;
     const prevBalance = client ? client.credit_balance : amount;
@@ -926,16 +940,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     const timbre = centimesToDzd(timbreCt);
     const totalCollected = Math.round((amount + timbre) * 100) / 100;
-    const receiptYear = new Date().getFullYear();
-    const receipt_number = `Q-${receiptYear}-${pad6(nextBrowserSeq('Q', receiptYear))}`;
+    const nowIso = new Date().toISOString();
+    // T2b (ADR-024): one key per settlement — same key through POST, failure,
+    // outbox, and replay. The server Q seq is the sole source of Q numbers.
+    const settleKey = mintSaleKey();
+    const fiscalInput = {
+      client_id: clientId, client_name: clientName, amount_ct: amountCt,
+      payment_method: paymentMethod, timbre_ct: timbreCt,
+      total_collected_ct: amountCt + timbreCt,
+      client_settlement_key: settleKey, date: nowIso, note: note ?? null,
+    };
+    const out = authorityRef.current === 'FISCAL_SQLITE'
+      ? await postSettlementToLoopback(fiscalInput)
+      : null;
+    const receipt_number = out?.receipt_number
+      ?? `DRAFT-Q-${Date.now().toString(36).toUpperCase()}`;
 
     const settlement: DebtSettlement = {
-      id: `SETTLE-${Date.now()}`,
+      id: out?.id ?? `SETTLE-${Date.now()}`,
       client_id: clientId,
       client_name: clientName,
       amount: Math.round(amount * 100) / 100,
       payment_method: paymentMethod,
-      date: new Date().toISOString(),
+      date: nowIso,
       note,
       timbre_fiscal: timbre,
       total_collected: totalCollected,
@@ -955,6 +982,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSettlements(prev => [settlement, ...prev]);
     const newBalance = Math.max(0, Math.round((prevBalance - amount) * 100) / 100);
     setLastSettlementQuittance({ ...settlement, prev_balance: prevBalance, new_balance: newBalance });
+    if (!out) {
+      // Provisional now, fiscal later — same T1 pattern as sales.
+      enqueueOutbox(lsStore, {
+        key: settleKey, kind: 'settlement', provisionalId: settlement.id,
+        header: fiscalInput, items: [], enqueuedAt: nowIso, attempts: 0,
+      });
+    } else {
+      void drainOutbox();
+    }
     return settlement;
   };
 

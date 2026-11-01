@@ -88,11 +88,11 @@ export const CarnetDetteView: React.FC = () => {
     setShowSettlementModal(true);
   };
 
-  const handleExecuteSettlement = (e: React.FormEvent) => {
+  const handleExecuteSettlement = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedClient || settlementAmount <= 0) return;
 
-    const record = settleClientDebt(
+    const record = await settleClientDebt(
       selectedClient.id,
       settlementAmount,
       settlementMethod,

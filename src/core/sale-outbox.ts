@@ -16,7 +16,9 @@ export interface StorageLike {
 export interface OutboxEntry {
   /** Idempotency key minted once at finalize — stable across retries. */
   key: string;
-  /** Browser provisional sale id (SALE-<ts>) to upgrade on success. */
+  /** Fiscal lane this payload belongs to (T2b generalizes the T1 outbox). */
+  kind: 'sale' | 'settlement';
+  /** Browser provisional id to upgrade on success. */
   provisionalId: string;
   header: unknown;
   items: unknown[];
@@ -26,8 +28,9 @@ export interface OutboxEntry {
 
 export interface OutboxReceipt {
   key: string;
+  kind: 'sale' | 'settlement';
   provisionalId: string;
-  auth: { id: string; invoice_number: string; ticket_number: string };
+  auth: { id: string; invoice_number?: string; ticket_number?: string; receipt_number?: string };
 }
 
 export const OUTBOX_KEY = 'baraka_sale_outbox_v1';
@@ -49,7 +52,9 @@ export function loadOutbox(store: StorageLike): OutboxEntry[] {
     const arr = JSON.parse(raw) as unknown;
     if (!Array.isArray(arr)) return [];
     return arr.filter((e): e is OutboxEntry =>
-      !!e && typeof (e as OutboxEntry).key === 'string' && Array.isArray((e as OutboxEntry).items));
+      !!e && typeof (e as OutboxEntry).key === 'string' && Array.isArray((e as OutboxEntry).items))
+      // Backward compat: pre-kind entries (T1) are sale payloads.
+      .map(e => ({ ...e, kind: (e.kind ?? 'sale') as 'sale' | 'settlement' }));
   } catch {
     return [];
   }
@@ -70,10 +75,11 @@ export function enqueueOutbox(store: StorageLike, entry: OutboxEntry): OutboxEnt
 /**
  * Replay every queued payload through `post`. One poison entry never blocks
  * the rest; failures stay queued with attempts+1 for the next drain.
+ * `post` receives the whole entry and routes by `kind`.
  */
 export async function replayOutbox(
   store: StorageLike,
-  post: (header: unknown, items: unknown[]) => Promise<{ id: string; invoice_number: string; ticket_number: string } | null>,
+  post: (entry: OutboxEntry) => Promise<OutboxReceipt['auth'] | null>,
 ): Promise<{ done: OutboxReceipt[]; remaining: OutboxEntry[] }> {
   const q = loadOutbox(store);
   const done: OutboxReceipt[] = [];
@@ -81,12 +87,12 @@ export async function replayOutbox(
   for (const e of q) {
     let auth = null;
     try {
-      auth = await post(e.header, e.items);
+      auth = await post(e);
     } catch {
       auth = null;
     }
     if (auth) {
-      done.push({ key: e.key, provisionalId: e.provisionalId, auth });
+      done.push({ key: e.key, kind: e.kind, provisionalId: e.provisionalId, auth });
     } else {
       remaining.push({ ...e, attempts: e.attempts + 1 });
     }

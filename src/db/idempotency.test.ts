@@ -120,3 +120,59 @@ test('t3: v1 file migrates to v2 preserving rows, then dedupes', () => {
     c.close();
   } finally { cleanup(p); }
 });
+
+// ---- T2b (ADR-024): settlement lane idempotency (Q single-lane) ----
+const seedClient = (b: ReturnType<typeof openBarakaDb>) => {
+  b.db.prepare(`INSERT INTO clients (id, name, credit_balance_ct, max_credit_limit_ct)
+    VALUES (1, 'Zed', 500000, 0)`).run();
+};
+
+const settle = (extra: Record<string, unknown> = {}) => ({
+  client_id: 1, amount_ct: 100000, payment_method: 'ESPECES' as const,
+  timbre_ct: 1000, total_collected_ct: 101000, date: '2026-11-01T12:00:00.000Z', ...extra,
+});
+
+test('t2b: retried settlement with same key returns ORIGINAL receipt, Q x1', () => {
+  const b = openBarakaDb(':memory:');
+  seedClient(b);
+  const s1 = b.recordSettlement(settle({ client_settlement_key: 'ST-1' }));
+  const s2 = b.recordSettlement(settle({ client_settlement_key: 'ST-1' }));
+  assert.equal(s2.id, s1.id);
+  assert.equal(s2.receipt_number, s1.receipt_number);
+  assert.match(s1.receipt_number, /^Q-2026-000001$/);
+  const n = (b.db.prepare("SELECT COUNT(*) AS n FROM client_settlements").get() as { n: number }).n;
+  assert.equal(n, 1);
+  b.close();
+});
+
+test('t2b: distinct keys consume sequential Q numbers', () => {
+  const b = openBarakaDb(':memory:');
+  seedClient(b);
+  const a = b.recordSettlement(settle({ client_settlement_key: 'ST-A' }));
+  const c = b.recordSettlement(settle({ client_settlement_key: 'ST-C' }));
+  assert.match(a.receipt_number, /^Q-2026-000001$/);
+  assert.match(c.receipt_number, /^Q-2026-000002$/);
+  b.close();
+});
+
+test('t2b: v2 file climbs to v3 preserving settlements, then dedupes', () => {
+  const p = tmpFile('migv2');
+  try {
+    const b = openBarakaDb(p);
+    seedClient(b);
+    const legacy = b.recordSettlement(settle());
+    b.db.exec('DROP INDEX IF EXISTS idx_settlements_client_key');
+    b.db.exec('ALTER TABLE client_settlements DROP COLUMN client_settlement_key');
+    b.db.exec('PRAGMA user_version = 0');
+    b.close();
+    const c = openBarakaDb(p);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, LATEST_SCHEMA_VERSION);
+    const cols = c.db.prepare('PRAGMA table_info(client_settlements)').all() as { name: string }[];
+    assert.ok(cols.some(x => x.name === 'client_settlement_key'));
+    assert.equal((c.db.prepare('SELECT total_collected_ct AS t FROM client_settlements WHERE id = ?').get(legacy.id) as { t: number }).t, 101000);
+    const d1 = c.recordSettlement(settle({ client_settlement_key: 'POSTMIG-S' }));
+    const d2 = c.recordSettlement(settle({ client_settlement_key: 'POSTMIG-S' }));
+    assert.equal(d2.id, d1.id);
+    c.close();
+  } finally { cleanup(p); }
+});

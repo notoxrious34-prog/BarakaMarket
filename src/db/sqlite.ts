@@ -158,7 +158,7 @@ function schemaSql(): string {
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 2;
+export const LATEST_SCHEMA_VERSION = 3;
 
 function schemaVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
@@ -179,9 +179,20 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 2');
     v = 2;
   }
-  // Always-ensured: partial unique index lives here (not in schema.sql) so
+  // v2 → v3: T2b idempotency key on client_settlements.
+  if (v < 3) {
+    const cols = db.prepare('PRAGMA table_info(client_settlements)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'client_settlement_key')) {
+      db.exec('DROP INDEX IF EXISTS idx_settlements_client_key');
+      db.exec('ALTER TABLE client_settlements ADD COLUMN client_settlement_key TEXT');
+    }
+    db.exec('PRAGMA user_version = 3');
+    v = 3;
+  }
+  // Always-ensured: partial unique index lives here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_client_key ON client_settlements(client_settlement_key) WHERE client_settlement_key IS NOT NULL');
 }
 
 export interface BarakaDb {
@@ -250,6 +261,8 @@ export interface BarakaDb {
     payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
     timbre_ct?: number; total_collected_ct?: number; receipt_number?: string;
     date?: string; note?: string | null;
+    /** T2b (ADR-024): checkout-minted idempotency key, stable across retries. */
+    client_settlement_key?: string | null;
   }): { id: string; receipt_number: string };
   /** Gate-03 TASK 1 — tamper-evident Z-report closure. */
   finalizeZReport(input: {
@@ -1398,6 +1411,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
       timbre_ct?: number; total_collected_ct?: number; receipt_number?: string;
       date?: string; note?: string | null;
+      client_settlement_key?: string | null;
     }) {
       assertIntegerCentimes(input.amount_ct, 'amount_ct');
       if (input.amount_ct <= 0) throw new Error('[db] settlement amount must be > 0');
@@ -1411,17 +1425,47 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         throw new Error(`[db] settlement timbre mismatch: got ${timbreCt}ct, fiscal rule says ${expected}ct`);
       }
       const id = input.id ?? randomUUID();
+      const key = input.client_settlement_key ?? null;
+      const byKey = (k: string) => db.prepare(
+        'SELECT id, receipt_number FROM client_settlements WHERE client_settlement_key = ?',
+      ).get(k) as { id: string; receipt_number: string } | undefined;
+      // T2b idempotent path: retries return the ORIGINAL receipt, Q never re-consumed.
+      if (key) {
+        const existing = byKey(key);
+        if (existing) return { id: existing.id, receipt_number: existing.receipt_number };
+      }
       const year = parseInt((input.date ?? new Date().toISOString()).slice(0, 4), 10);
-      const receipt = input.receipt_number ?? `Q-${year}-${pad6(bumpSeq(db, 'Q', year))}`;
-      db.prepare(
-        `INSERT INTO client_settlements (id, client_id, client_name, amount_ct, payment_method,
-          timbre_ct, total_collected_ct, receipt_number, date, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        id, input.client_id, input.client_name ?? '', input.amount_ct, input.payment_method,
-        timbreCt, collectedCt, receipt, input.date ?? new Date().toISOString(), input.note ?? null,
-      );
-      return { id, receipt_number: receipt };
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const client = db.prepare(
+          'SELECT id, name, phone, credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = ?',
+        ).get(input.client_id) as
+          | { id: number; name: string; phone: string; credit_balance_ct: number; max_credit_limit_ct: number }
+          | undefined;
+        if (!client) throw new Error(`[db] CLIENT_NOT_FOUND: ${input.client_id}`);
+        // Art.136: cash (ESPECES) inflows >= 50 DZD carry stamp duty (already cross-checked above).
+        const newBalance = client.credit_balance_ct - input.amount_ct;
+        db.prepare('UPDATE clients SET credit_balance_ct = ? WHERE id = ?').run(newBalance, client.id);
+        const receipt = input.receipt_number ?? `Q-${year}-${pad6(bumpSeq(db, 'Q', year))}`;
+        db.prepare(
+          `INSERT INTO client_settlements (id, client_id, client_name, amount_ct, payment_method,
+            timbre_ct, total_collected_ct, receipt_number, date, note, client_settlement_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          id, input.client_id, input.client_name ?? '', input.amount_ct, input.payment_method,
+          timbreCt, collectedCt, receipt, input.date ?? new Date().toISOString(), input.note ?? null, key,
+        );
+        db.exec('COMMIT');
+        return { id, receipt_number: receipt };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        // T2b race net: the loser returns the winner's receipt.
+        if (key && /UNIQUE constraint failed: client_settlements\.client_settlement_key|idx_settlements_client_key/.test((e as Error).message)) {
+          const winner = byKey(key);
+          if (winner) return { id: winner.id, receipt_number: winner.receipt_number };
+        }
+        throw e;
+      }
     },
     getMeta(key: string): string | null {
       const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;

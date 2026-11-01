@@ -30,12 +30,14 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | Reference templates REST lane | server/index.test.ts | +1 | ✅ 1/1 |
 | Idempotent commit + v1→v2 migration (T1 slice A, ADR-021) | src/db/idempotency.test.ts | 4 | ✅ 4/4 |
 | Offline outbox + idempotent replay (T1 slice B, ADR-022) | src/core/sale-outbox.test.ts | 6 | ✅ 6/6 |
-| Single-lane numbering guard, DRAFT provisional refs (T2 sale lane, ADR-023) | src/context/browser-lane.test.ts | 3 | ✅ 3/3 |
-| **Total** | **27 files** | **208** | **✅ 208/208, 0 fail** |
+| Single-lane numbering guard, DRAFT refs (T2 sale lane, ADR-023) | src/context/browser-lane.test.ts | 3 | ✅ 3/3 → 4/4 |
+| Settlement idempotency + v2→v3 migration (T2b, ADR-024) | src/db/idempotency.test.ts | +3 | ✅ 3/3 |
+| Outbox kind routing + backward compat (T2b) | src/core/sale-outbox.test.ts | +2 | ✅ 2/2 |
+| **Total** | **27 files** | **214** | **✅ 214/214, 0 fail** |
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 208/208 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 214/214 holds.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.
