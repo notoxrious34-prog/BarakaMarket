@@ -156,12 +156,7 @@ export async function postSaleToLoopback(
  * @returns authoritative {id, receipt_number} or null. Idempotent by
  * client_settlement_key (server slice). */
 export async function postSettlementToLoopback(
-  input: {
-    client_id: number; client_name?: string; amount_ct: number;
-    payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
-    timbre_ct: number; total_collected_ct: number;
-    client_settlement_key?: string | null; date?: string; note?: string | null;
-  },
+  input: AuthoritySettlementInput,
   timeoutMs = 4000,
 ): Promise<{ id: string; receipt_number: string } | null> {
   try {
@@ -180,6 +175,72 @@ export async function postSettlementToLoopback(
   } catch {
     return null;
   }
+}
+
+/** Row identity shared by both commit lanes (Rust requires `id`; the TS
+ * lane adopts a provided one). crypto.randomUUID with a timestamp fallback. */
+export function mintRowId(): string {
+  try {
+    const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+    if (c?.randomUUID) return c.randomUUID();
+  } catch { /* legacy webview — fall through */ }
+  return `row-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffff).toString(36)}`;
+}
+
+async function invokeLane<T>(command: 'record_sale' | 'record_settlement', args: Record<string, unknown>): Promise<T | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const mod = await import('@tauri-apps/api/core');
+    const r = (await mod.invoke(command, args)) as T | null;
+    return r ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * T4b (ADR-026): native-first sale commit. Inside the Tauri shell the Rust
+ * fiscal lane owns the write (re-validated, seq-owned, idempotent) — zero
+ * loopback hops. Everywhere else (browser preview, dev, loopback down) the
+ * loopback POST applies. Null when neither lane answers → the caller queues
+ * provisional + outbox, exactly as before.
+ */
+export async function commitSale(
+  header: AuthorityHeaderInput,
+  items: AuthorityItemInput[],
+): Promise<{ id: string; invoice_number: string; ticket_number: string } | null> {
+  const h = header.id ? header : { ...header, id: mintRowId() };
+  const native = await invokeLane<{ id?: string; invoice_number?: string; ticket_number?: string }>(
+    'record_sale', { header: h, items },
+  );
+  if (native && native.id && native.invoice_number && native.ticket_number) {
+    return { id: native.id, invoice_number: native.invoice_number, ticket_number: native.ticket_number };
+  }
+  if (isTauriRuntime()) return null; // exe lane: Rust refused — never silently downgrade to provisional+loopback
+  return postSaleToLoopback(h, items);
+}
+
+export interface AuthoritySettlementInput {
+  id?: string;
+  client_id: number; client_name?: string; amount_ct: number;
+  payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
+  timbre_ct: number; total_collected_ct: number;
+  client_settlement_key?: string | null; date?: string; note?: string | null;
+}
+
+/** T4b (ADR-026): native-first settlement commit (same lane order as sales). */
+export async function commitSettlement(
+  input: AuthoritySettlementInput,
+): Promise<{ id: string; receipt_number: string } | null> {
+  const inp = input.id ? input : { ...input, id: mintRowId() };
+  const native = await invokeLane<{ id?: string; receipt_number?: string }>(
+    'record_settlement', { input: inp },
+  );
+  if (native && native.id && native.receipt_number) {
+    return { id: native.id, receipt_number: native.receipt_number };
+  }
+  if (isTauriRuntime()) return null;
+  return postSettlementToLoopback(inp);
 }
 
 /** Fire-and-forget 5-byte drawer-kick via the raw-print spool endpoint. */

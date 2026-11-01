@@ -7,6 +7,8 @@
 
 use std::{fs, path::PathBuf};
 
+mod fiscal;
+
 /// Frozen fiscal schema — the SAME file the Node lane is tested against.
 const SCHEMA: &str = include_str!("../../db/schema.sql");
 
@@ -18,7 +20,7 @@ fn data_dir() -> PathBuf {
 }
 
 /// Create %APPDATA%/Baraka Market/baraka.db on first run. Idempotent:
-/// existing shops are never touched.
+/// existing shops are never touched. Migrates old files to LATEST (T4b).
 fn provision_db() -> Result<PathBuf, String> {
     let dir = data_dir();
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -27,6 +29,9 @@ fn provision_db() -> Result<PathBuf, String> {
         let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
         conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     }
+    // Converge every open (fresh or legacy) to LATEST_SCHEMA_VERSION.
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::migrate(&conn)?;
     Ok(db)
 }
 
@@ -47,6 +52,31 @@ fn loopback_token() -> Result<String, String> {
     Ok(t)
 }
 
+/// T4b (ADR-026): native fiscal commit — sale. The frontend computes the
+/// centimes payload with the tested engine; Rust re-validates, owns seq +
+/// idempotency, and commits atomically. Loopback-independent (exe lane).
+#[tauri::command]
+fn record_sale(
+    header: serde_json::Value,
+    items: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    let arr = items
+        .as_array()
+        .ok_or("[fiscal] items must be an array")?
+        .clone();
+    fiscal::record_sale(&mut conn, &header, &arr)
+}
+
+/// T4b (ADR-026): native fiscal commit — debt settlement (Q via server seq).
+#[tauri::command]
+fn record_settlement(input: serde_json::Value) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::record_settlement(&mut conn, &input)
+}
+
 /// Gate-02 TASK 1: native authority probe. The frontend calls this via
 /// `invoke('db_status')`; success flips the POS into MODE FISCAL ACTIF.
 #[tauri::command]
@@ -65,7 +95,12 @@ fn main() {
         Err(e) => eprintln!("[baraka] db provisioning FAILED: {e}"),
     }
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![db_status, loopback_token])
+        .invoke_handler(tauri::generate_handler![
+            db_status,
+            loopback_token,
+            record_sale,
+            record_settlement
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");
 }

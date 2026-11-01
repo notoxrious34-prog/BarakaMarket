@@ -29,7 +29,7 @@ import {
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
-import { probeFiscalAuthority, postSaleToLoopback, postSettlementToLoopback, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
 
 /** localStorage-backed StorageLike for the sale outbox (never throws). */
@@ -750,8 +750,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (authorityRef.current !== 'FISCAL_SQLITE') return;
     try {
       const { done } = await replayOutbox(lsStore, async (e) => {
-        if (e.kind === 'settlement') return postSettlementToLoopback(e.header as Parameters<typeof postSettlementToLoopback>[0]);
-        return postSaleToLoopback(e.header as AuthorityHeaderInput, e.items as AuthorityItemInput[]);
+        if (e.kind === 'settlement') return commitSettlement(e.header as Parameters<typeof commitSettlement>[0]);
+        return commitSale(e.header as AuthorityHeaderInput, e.items as AuthorityItemInput[]);
       });
       if (done.length === 0) return;
       const saleDone = done.filter(d => d.kind === 'sale');
@@ -854,9 +854,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         is_facture: isFactureReglementaire ? 1 : 0,
         created_at: createdAt,
       };
-      // Degraded lane: no POST when the loopback is absent (rush hour first).
+      // Degraded lane: no commit when the fiscal lane is unreachable (rush hour first).
       const out = authorityRef.current === 'FISCAL_SQLITE'
-        ? await postSaleToLoopback(fiscalHeader, payloadItems)
+        ? await commitSale(fiscalHeader, payloadItems)
         : null;
       if (!out) {
         // Provisional now, fiscal later: the SAME key + payload wait in the
@@ -951,7 +951,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       client_settlement_key: settleKey, date: nowIso, note: note ?? null,
     };
     const out = authorityRef.current === 'FISCAL_SQLITE'
-      ? await postSettlementToLoopback(fiscalInput)
+      ? await commitSettlement(fiscalInput)
       : null;
     const receipt_number = out?.receipt_number
       ?? `DRAFT-Q-${Date.now().toString(36).toUpperCase()}`;
