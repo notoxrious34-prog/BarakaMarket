@@ -29,7 +29,14 @@ import {
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
-import { probeFiscalAuthority, postSaleToLoopback, type AuthorityStatus } from '../core/fiscal-authority';
+import { probeFiscalAuthority, postSaleToLoopback, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
+
+/** localStorage-backed StorageLike for the sale outbox (never throws). */
+const lsStore: StorageLike = {
+  getItem: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
+  setItem: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* private mode: queue stays in memory */ } },
+};
 import { centimesToDzd, dzdToCentimes } from '../core/money';
 import { calculateAccountingSummary, calculateNewPMP } from '../utils/accounting';
 
@@ -734,6 +741,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /**
+   * T1 slice B (ADR-022): drain the offline outbox whenever the fiscal lane
+   * is reachable. Successful replays UPGRADE the provisional browser rows
+   * (same key → authoritative FACT/T), never duplicate them.
+   */
+  const drainOutbox = async (): Promise<void> => {
+    if (authorityRef.current !== 'FISCAL_SQLITE') return;
+    try {
+      const { done } = await replayOutbox(lsStore, (h, i) =>
+        postSaleToLoopback(h as AuthorityHeaderInput, i as AuthorityItemInput[]));
+      if (done.length === 0) return;
+      setSales(prev => prev.map(s => {
+        const r = done.find(d => d.provisionalId === s.id);
+        return r
+          ? { ...s, id: r.auth.id, invoice_number: r.auth.invoice_number, ticket_number: r.auth.ticket_number, is_provisional: false }
+          : s;
+      }));
+    } catch { /* next drain will retry — the queue persists */ }
+  };
+
+  // Drain whenever the authority settles on the fiscal lane (probe return,
+  // loopback restart, first mount with the server already up).
+  useEffect(() => {
+    if (authority === 'FISCAL_SQLITE') void drainOutbox();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authority]);
+
+  /**
    * Gate-02 TASK 1 — authoritative checkout. Recomputes the cart through the
    * integer engine, POSTs to the SQLite loopback, and stamps the returned
    * monotonic FACT/T numbers. Falls back to provisional on any failure.
@@ -743,9 +777,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amountPaid: number,
     isFactureReglementaire = false,
   ): Promise<Sale> => {
-    if (authorityRef.current !== 'FISCAL_SQLITE' || currentCart.length === 0) {
+    if (currentCart.length === 0) {
       return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
     }
+    // Minted once per finalize — the same key follows this sale through
+    // POST, failure, outbox, and replay (T1 slice B, ADR-022).
+    const saleKey = mintSaleKey();
     try {
       const ctItems = currentCart.map(it => {
         const l = calculateLineTotalsCt(
@@ -779,32 +816,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         line_tva_ct: ctItems[i].total_line_tva_ct,
         line_ttc_ct: ctItems[i].total_line_ttc_ct,
       }));
-      const out = await postSaleToLoopback(
-        {
-          cashier_id: 'C-01',
-          cashier_name: 'Amine',
-          client_id: selectedClient.id,
-          client_name: selectedClient.name,
-          payment_method: paymentMethod,
-          amount_paid_ct: dzdToCentimes(amountPaid),
-          amount_returned_ct: Math.max(0, dzdToCentimes(amountPaid) - t.total_ttc_ct),
-          totals: {
-            total_ht_ct: t.total_ht_ct,
-            total_tva_ct: t.total_tva_ct,
-            timbre_ct: t.timbre_ct,
-            total_ttc_ct: t.total_ttc_ct,
-            tva_breakdown: {
-              0: { base_ht_ct: t.tva_breakdown[0].base_ht_ct, tva_amount_ct: t.tva_breakdown[0].tva_amount_ct, total_ttc_ct: t.tva_breakdown[0].total_ttc_ct },
-              9: { base_ht_ct: t.tva_breakdown[9].base_ht_ct, tva_amount_ct: t.tva_breakdown[9].tva_amount_ct, total_ttc_ct: t.tva_breakdown[9].total_ttc_ct },
-              19: { base_ht_ct: t.tva_breakdown[19].base_ht_ct, tva_amount_ct: t.tva_breakdown[19].tva_amount_ct, total_ttc_ct: t.tva_breakdown[19].total_ttc_ct },
-            },
+      const fiscalHeader: AuthorityHeaderInput = {
+        client_sale_id: saleKey,
+        cashier_id: 'C-01',
+        cashier_name: 'Amine',
+        client_id: selectedClient.id,
+        client_name: selectedClient.name,
+        payment_method: paymentMethod,
+        amount_paid_ct: dzdToCentimes(amountPaid),
+        amount_returned_ct: Math.max(0, dzdToCentimes(amountPaid) - t.total_ttc_ct),
+        totals: {
+          total_ht_ct: t.total_ht_ct,
+          total_tva_ct: t.total_tva_ct,
+          timbre_ct: t.timbre_ct,
+          total_ttc_ct: t.total_ttc_ct,
+          tva_breakdown: {
+            0: { base_ht_ct: t.tva_breakdown[0].base_ht_ct, tva_amount_ct: t.tva_breakdown[0].tva_amount_ct, total_ttc_ct: t.tva_breakdown[0].total_ttc_ct },
+            9: { base_ht_ct: t.tva_breakdown[9].base_ht_ct, tva_amount_ct: t.tva_breakdown[9].tva_amount_ct, total_ttc_ct: t.tva_breakdown[9].total_ttc_ct },
+            19: { base_ht_ct: t.tva_breakdown[19].base_ht_ct, tva_amount_ct: t.tva_breakdown[19].tva_amount_ct, total_ttc_ct: t.tva_breakdown[19].total_ttc_ct },
           },
-          is_facture: isFactureReglementaire ? 1 : 0,
-          created_at: createdAt,
         },
-        payloadItems,
-      );
-      if (!out) return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
+        is_facture: isFactureReglementaire ? 1 : 0,
+        created_at: createdAt,
+      };
+      // Degraded lane: no POST when the loopback is absent (rush hour first).
+      const out = authorityRef.current === 'FISCAL_SQLITE'
+        ? await postSaleToLoopback(fiscalHeader, payloadItems)
+        : null;
+      if (!out) {
+        // Provisional now, fiscal later: the SAME key + payload wait in the
+        // outbox; the drain upgrades this row instead of duplicating it.
+        const provisional = completeSale(paymentMethod, amountPaid, isFactureReglementaire);
+        enqueueOutbox(lsStore, {
+          key: saleKey, provisionalId: provisional.id,
+          header: fiscalHeader, items: payloadItems,
+          enqueuedAt: createdAt, attempts: 0,
+        });
+        return provisional;
+      }
       const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
       const authoritative: Sale = {
         id: out.id,
@@ -846,6 +895,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
       setSales(prev => [authoritative, ...prev]);
+      // A successful commit proves the lane is alive — flush any backlog now.
+      void drainOutbox();
       clearCart();
       openPrintModal(authoritative, isFactureReglementaire ? 'facture' : 'ticket');
       return authoritative;

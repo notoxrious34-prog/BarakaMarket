@@ -100,6 +100,8 @@ export interface AuthorityHeaderInput {
   };
   is_facture?: number;
   created_at?: string;
+  /** T1 slice B (ADR-022): checkout-minted idempotency key, stable across retries. */
+  client_sale_id?: string | null;
 }
 
 /**
