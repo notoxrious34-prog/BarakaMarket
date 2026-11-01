@@ -86,7 +86,8 @@ export function isSessionLive(s: Session, now = Date.now(), idleMs = SESSION_IDL
 export type AuditAction =
   | 'login.ok' | 'login.fail' | 'login.locked' | 'logout' | 'session.lock' | 'session.unlock'
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
-  | 'update.check' | 'update.install';
+  | 'update.check' | 'update.install'
+  | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close';
 
 export interface AuditEvent {
   actor: string;

@@ -17,11 +17,11 @@ interface ZResult {
 }
 
 export const CashSessionsView: React.FC = () => {
-  const { language } = useApp();
+  const { language, session } = useApp();
   const isAr = language === 'ar';
   const [live, setLive] = useState<LiveStatus | null>(null);
   const [offline, setOffline] = useState(false);
-  const [cashier, setCashier] = useState('Amine');
+  const [cashier, setCashier] = useState(session?.displayName ?? 'Amine');
   const [opening, setOpening] = useState('5000');
   const [movType, setMovType] = useState<'DEPOSIT' | 'WITHDRAWAL' | 'EXPENSE'>('DEPOSIT');
   const [movAmount, setMovAmount] = useState('');
@@ -137,7 +137,7 @@ export const CashSessionsView: React.FC = () => {
               </div>
               <button
                 className={`${btn} bg-amber-600 hover:bg-amber-500 text-white`}
-                onClick={() => void post(`${API}/api/cash/close-and-z`, { sessionId: live.session.id, countedCashCt: Math.round(Number(counted) * 100), printReceipt: true }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé')}
+                onClick={() => void post(`${API}/api/cash/close-and-z`, { sessionId: live.session.id, countedCashCt: Math.round(Number(counted) * 100), printReceipt: true, actor: session?.username ?? cashier }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé')}
               >
                 {isAr ? 'إغلاق وطبع Z' : 'Clôturer + Z'}
               </button>

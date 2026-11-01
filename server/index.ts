@@ -191,6 +191,8 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     try {
       const { reason, by } = req.body as { reason: string; by?: string };
       baraka.voidSale(req.params.id, reason, by ?? '');
+      // T10: voids live in the security trail too (actor + reason).
+      baraka.logAudit({ actor: by || 'unknown', action: 'sale.void', entity: 'sales', entityId: req.params.id, detail: reason });
       res.json({ ok: true });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
@@ -430,14 +432,20 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
 
   app.post('/api/cash/close-and-z', (req, res) => {
     try {
-      const { sessionId, countedCashCt, notes, storeName, printReceipt } = req.body as {
+      const { sessionId, countedCashCt, notes, storeName, printReceipt, actor } = req.body as {
         sessionId: string; countedCashCt: number; notes?: string;
-        storeName?: string; printReceipt?: boolean;
+        storeName?: string; printReceipt?: boolean; actor?: string;
       };
       if (typeof sessionId !== 'string' || typeof countedCashCt !== 'number') {
         res.status(400).json({ error: 'body must be {sessionId, countedCashCt, notes?, printReceipt?}' }); return;
       }
       const z = baraka.closeCashSessionAndGenerateZ(sessionId, countedCashCt, notes);
+      // T10: Z closes are security events (actor + Z number + cash diff).
+      baraka.logAudit({
+        actor: typeof actor === 'string' && actor ? actor : 'till',
+        action: 'z.close', entity: 'cash_sessions', entityId: sessionId,
+        detail: `${(z as { zNumber?: string }).zNumber ?? ''} diff=${(z as { cashDiffCt?: number }).cashDiffCt ?? 0}ct`,
+      });
       let bytes = 0;
       if (printReceipt !== false) {
         const buf = buildThermalZReport(z, storeName ?? 'BARAKA MARKET');

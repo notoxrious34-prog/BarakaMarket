@@ -447,6 +447,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     void auditSessionEvent(s.username, 'session.lock', 'manual');
   };
 
+  // T10 (ADR-033): light transactional audit. Fiscal events land in audit_log
+  // with the live operator — fire-and-forget (exe: invoke audit_log;
+  // token-less browser: dropped silently, the void/Z server lanes cover it).
+  const auditFiscal = (action: 'sale.commit' | 'settlement.commit', detail: string): void => {
+    const actor = sessionRef.current?.username ?? 'till';
+    void auditSessionEvent(actor, action, detail);
+  };
+
   // T8: the operator stamp every fiscal AND provisional row carries.
   const cashierStamp = () => {
     const s = sessionRef.current;
@@ -891,6 +899,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? { ...s, id: r.auth.id, invoice_number: r.auth.invoice_number, ticket_number: r.auth.ticket_number, is_provisional: false }
             : s;
         }));
+        // T10: replayed commits are fiscal events too — one audit row each.
+        for (const r of saleDone) {
+          if (r.auth.invoice_number) auditFiscal('sale.commit', `${r.auth.invoice_number} (replay)`);
+        }
       }
       const settleDone = done.filter(d => d.kind === 'settlement');
       if (settleDone.length > 0) {
@@ -900,6 +912,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ? { ...s, id: r.auth.id, receipt_number: r.auth.receipt_number }
             : s;
         }));
+        for (const r of settleDone) {
+          if (r.auth.receipt_number) auditFiscal('settlement.commit', `${r.auth.receipt_number} (replay)`);
+        }
       }
     } catch { /* next drain will retry — the queue persists */ }
   };
@@ -1055,6 +1070,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
       }
       setSales(prev => [authoritative, ...prev]);
+      // T10: authoritative money leaves an audit row (actor + FACT number).
+      auditFiscal('sale.commit', `${authoritative.invoice_number} · ${authoritative.total_ttc} DZD`);
       // T5 (ADR-028): Lane A auto-spool (ticket + drawer on cash) and pole
       // tendered frame — fire-and-forget; Lane B (CSS modal print) is
       // unaffected and stays the instant path.
@@ -1141,6 +1158,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         header: fiscalInput, items: [], enqueuedAt: nowIso, attempts: 0,
       });
     } else {
+      // T10: authoritative debt collection leaves an audit row.
+      auditFiscal('settlement.commit', `${settlement.receipt_number} · ${settlement.total_collected} DZD`);
       void drainOutbox();
     }
     return settlement;

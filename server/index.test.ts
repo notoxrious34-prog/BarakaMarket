@@ -387,3 +387,35 @@ test('api: CORS preflight passes on the loopback; token gate intact', async () =
   const get = await _rawFetch(`${base}/api/users`);
   assert.equal(get.headers.get('access-control-allow-origin'), '*');
 });
+
+test('api: T10 void writes a sale.void audit row (actor + reason)', async () => {
+  const s = await (await fetch(`${base}/api/sales`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ header, items, clientSaleKey: `T10-VOID-${Date.now().toString(36)}` }),
+  })).json() as { id: string };
+  const v = await fetch(`${base}/api/sales/${s.id}/void`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reason: 't10-test', by: 't10-owner' }),
+  });
+  assert.equal(v.status, 200);
+  const audit = await (await fetch(`${base}/api/audit?limit=100`)).json() as { action: string; actor: string }[];
+  const row = audit.find(a => a.action === 'sale.void' && a.actor === 't10-owner');
+  assert.ok(row, 'sale.void audit row present');
+});
+
+test('api: T10 close-and-z writes a z.close audit row', async () => {
+  const o = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'T10', openingFloatCt: 100000 }),
+  });
+  assert.equal(o.status, 201);
+  const sess = await o.json() as { id: string };
+  const c = await fetch(`${base}/api/cash/close-and-z`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: sess.id, countedCashCt: 100000, actor: 't10-owner' }),
+  });
+  assert.equal(c.status, 201);
+  const audit = await (await fetch(`${base}/api/audit?limit=100`)).json() as { action: string; actor: string }[];
+  const row = audit.find(a => a.action === 'z.close' && a.actor === 't10-owner');
+  assert.ok(row, 'z.close audit row present');
+});
