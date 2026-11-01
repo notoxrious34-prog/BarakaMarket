@@ -670,11 +670,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Sale => {
     const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
     const dateNow = new Date();
-    const year = dateNow.getFullYear();
-    // INVARIANT 2: monotonic 6-digit provisional numbers (SQLite seq is authoritative).
-    // NEVER sales.length-based. Browser lane is marked provisional + NON-FISCAL banner.
-    const invoiceNumber = `FACT-${year}-${pad6(nextBrowserSeq('FACT', year))}`;
-    const ticketNumber = `T-${year}-${pad6(nextBrowserSeq('T', year))}`;
+    // T2 (ADR-023): the browser NEVER mints fiscal numbers. Provisional rows
+    // carry DRAFT refs (obviously non-fiscal, unique per finalize) until the
+    // outbox drain upgrades them to authoritative FACT/T. NEVER sales.length.
+    const draftRef = dateNow.getTime().toString(36).toUpperCase();
+    const invoiceNumber = `DRAFT-FACT-${draftRef}`;
+    const ticketNumber = `DRAFT-T-${draftRef}`;
     const returned = Math.max(0, Math.round(amountPaid - totals.total_ttc));
 
     const newSale: Sale = {
