@@ -144,3 +144,10 @@ Live proofs (2026-11-02, real Edge lane via `playwright-core` + `msedge.exe`, se
 - Lane archaeology: shared dev-server owner PIN is **5678** (lane #1 retired 1234); 5-strike lockout with 60s·2^cycles cooldown verified live; fresh profiles hit first-run store-setup overlay (name + NIF 15 + RC mandatory).
 - Releases: `v1.3.2` + `v1.3.3` signed `SIG-OK [ED]` (keynum `489b702c66040e7e`), 3 assets each `uploaded` (`-setup.exe` + `.sig` + `latest.json`); auto-updater picks up v1.3.3.
 - Iron status: v1.3.3 proven on web lane only — **silent-install + iron smoke still open** (every prior release had it).
+- 2026-11-02 iron close-out: `BarakaMarket-1.3.3-setup.exe /S /D=D:\BarakaMarket-1.3.3`
+  (must run via `cmd.exe` — MSYS bash mangles `/S /D=` args) → installed
+  (`baraka-market.exe` + `uninstall.exe`); app launched with WebView2
+  `--remote-debugging-port` → Playwright `connectOverCDP` lane: POS live,
+  footer `V1.3.3`, payment modal `672×708` on iron, vision PASS (FR locale:
+  keypad visual-LEFT = first-in-DOM, correct LTR mirror of the RTL right side;
+  `NET 640 = 577.98 + 52.02 + 10`, `RENDU 0`, zero defects).

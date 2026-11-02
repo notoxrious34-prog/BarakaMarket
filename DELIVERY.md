@@ -25,7 +25,8 @@
 - [x] v1.3.2 — cash cockpit two-column, keypad RIGHT · lane COCKPIT 4/4 · signed · released.
 - [x] v1.3.3 (2026-11-02) — cockpit raffiné: compact keypad-right tray, gold NET band, 50px keys ·
       293/293 · tsc/lint/build clean · `SIG-OK [ED]` · `v1.3.3` 3 assets `uploaded` ·
-      web-lane vision PASS. **Iron silent-install + smoke: OPEN (next).**
+      web-lane vision PASS + **iron smoke PASS** (`D:\BarakaMarket-1.3.3`, footer `V1.3.3`,
+      payment modal `672×708` on iron, vision PASS, zero defects).
 - [x] BarakaKeygen v2 — owner activation desk (`releases/BarakaKeygen.exe`, 103MB):
       generate/verify/history/quit, queue line-reader, `CHECK: VALID` proven via piped stdin.
 
