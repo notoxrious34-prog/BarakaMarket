@@ -36,6 +36,7 @@ export const SuppliersPurchasesView: React.FC = () => {
     deleteSupplier,
     recordPurchaseReception,
     settleSupplierDebt,
+    addProduct,
     language,
   } = useApp();
   const isAr = language === 'ar';
@@ -103,6 +104,47 @@ export const SuppliersPurchasesView: React.FC = () => {
   const totalSupplierDebts = suppliers.reduce((sum, s) => sum + (s.balance_due || 0), 0);
 
   const supplierPurchases = purchases.filter(p => p.supplier_id === selectedSupplier?.id);
+
+  // Inline new-product form inside the reception modal (owner request):
+  // manual barcode + TVA 9% + epicerie defaults, prices reused from the line.
+  const [showNewProduct, setShowNewProduct] = useState(false);
+  const [npName, setNpName] = useState('');
+  const [npBarcode, setNpBarcode] = useState('');
+  const [npTva, setNpTva] = useState<TVARate>(9);
+  const [npUnit, setNpUnit] = useState<'PIECE' | 'KG' | 'LITRE'>('PIECE');
+  const [npError, setNpError] = useState('');
+
+  const handleCreateAndInsertProduct = () => {
+    const name = npName.trim();
+    const code = npBarcode.trim();
+    if (!name) { setNpError(isAr ? 'اسم المنتج إلزامي' : 'Nom du produit requis'); return; }
+    if (!code) { setNpError(isAr ? 'الباركود إلزامي (يدوي)' : 'Code-barres requis (manuel)'); return; }
+    if (products.some(p => p.barcode === code)) {
+      setNpError(isAr ? 'هذا الباركود موجود مسبقاً' : 'Ce code-barres existe déjà');
+      return;
+    }
+    if (incomingQty <= 0) { setNpError(isAr ? 'الكمية يجب أن تكون > 0' : 'Quantité doit être > 0'); return; }
+    const created = addProduct({
+      barcode: code, name_fr: name, name_ar: name, category_id: 'epicerie',
+      buy_price: incomingBuyPriceHT, sell_price: incomingSellPriceTTC,
+      tva_rate: npTva, stock_qty: 0, min_stock_alert: 10, unit: npUnit,
+      has_expiry_date: false,
+    });
+    const lineHT = Math.round(incomingQty * incomingBuyPriceHT * 100) / 100;
+    const lineTTC = Math.round(lineHT * (1 + npTva / 100) * 100) / 100;
+    setReceptionItems(prev => [...prev, {
+      product_id: created.id, barcode: created.barcode,
+      name_fr: created.name_fr, name_ar: created.name_ar,
+      quantity: incomingQty, unit: created.unit,
+      unit_buy_price_ht: incomingBuyPriceHT, tva_rate: npTva,
+      unit_sell_price_ttc: incomingSellPriceTTC,
+      total_line_ht: lineHT, total_line_ttc: lineTTC,
+    }]);
+    setSelectedProductId(created.id);
+    setIncomingTVA(npTva);
+    setShowNewProduct(false);
+    setNpName(''); setNpBarcode(''); setNpTva(9); setNpUnit('PIECE'); setNpError('');
+  };
 
   // Sync selected product defaults in reception modal
   const handleSelectProductChange = (prodId: number) => {
@@ -504,9 +546,20 @@ export const SuppliersPurchasesView: React.FC = () => {
 
                 <div className="grid grid-cols-1 md:grid-cols-5 gap-2.5">
                   <div className="md:col-span-2">
-                    <label className="text-[10px] text-slate-400 block mb-1">
-                      {isAr ? 'المنتج:' : 'Produit:'}
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[10px] text-slate-400 block">
+                        {isAr ? 'المنتج:' : 'Produit:'}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => { setShowNewProduct(v => !v); setNpError(''); }}
+                        className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer"
+                      >
+                        {showNewProduct
+                          ? (isAr ? 'إخفاء −' : 'Masquer −')
+                          : (isAr ? '+ منتج جديد' : '+ Nouveau produit')}
+                      </button>
+                    </div>
                     <select
                       value={selectedProductId}
                       onChange={e => handleSelectProductChange(parseInt(e.target.value, 10))}
@@ -597,6 +650,80 @@ export const SuppliersPurchasesView: React.FC = () => {
                     <span>{isAr ? 'إدراج السلعة في وصل الاستلام' : 'Insérer dans le Bon'}</span>
                   </button>
                 </div>
+
+                {/* Inline new-product form: manual barcode + TVA 9% + epicerie */}
+                {showNewProduct && (
+                  <div className="bg-[#0b0f17] border border-emerald-900/50 rounded-xl p-3 space-y-2.5">
+                    <div className="text-[11px] font-bold text-emerald-300">
+                      {isAr ? 'منتج جديد — سيُنشأ ويُدرج في الوصل مباشرة' : 'Nouveau produit — créé puis inséré dans le bon'}
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                      <div className="md:col-span-2">
+                        <label className="text-[10px] text-slate-400 block mb-1">
+                          {isAr ? 'اسم المنتج *' : 'Nom *'}
+                        </label>
+                        <input
+                          type="text"
+                          value={npName}
+                          onChange={e => setNpName(e.target.value)}
+                          placeholder={isAr ? 'مثال: سكر 1كغ' : 'Ex: SUCRE 1KG'}
+                          className="w-full bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-white placeholder:text-slate-600 outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-slate-400 block mb-1">
+                          {isAr ? 'الباركود (يدوي) *' : 'Code-barres (manuel) *'}
+                        </label>
+                        <input
+                          type="text"
+                          value={npBarcode}
+                          onChange={e => setNpBarcode(e.target.value)}
+                          placeholder="613000000001"
+                          dir="ltr"
+                          className="w-full bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-white font-mono placeholder:text-slate-600 outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-1">TVA</label>
+                          <select
+                            value={npTva}
+                            onChange={e => setNpTva(parseInt(e.target.value, 10) as TVARate)}
+                            className="w-full bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-white"
+                          >
+                            <option value={0}>0%</option>
+                            <option value={9}>9%</option>
+                            <option value={19}>19%</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-1">
+                            {isAr ? 'الوحدة' : 'Unité'}
+                          </label>
+                          <select
+                            value={npUnit}
+                            onChange={e => setNpUnit(e.target.value as 'PIECE' | 'KG' | 'LITRE')}
+                            className="w-full bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-white"
+                          >
+                            <option value="PIECE">PIECE</option>
+                            <option value="KG">KG</option>
+                            <option value="LITRE">LITRE</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                    {npError && <div className="text-[11px] text-rose-300">{npError}</div>}
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={handleCreateAndInsertProduct}
+                        className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold cursor-pointer"
+                      >
+                        {isAr ? 'إنشاء وإدراج في الوصل' : 'Créer + insérer'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Items in Current Voucher */}

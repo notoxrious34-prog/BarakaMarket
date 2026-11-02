@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { commitSale, commitSettlement, mintRowId } from './fiscal-authority.js';
+import { commitSale, commitSettlement, commitVoid, backupDatabase, fetchDailyZ, mintRowId } from './fiscal-authority.js';
 
 /**
  * T4b (ADR-026): the native-first commit lane.
@@ -85,6 +85,63 @@ describe('commit lane (T4b)', () => {
         [],
       );
       assert.equal(out, null);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('#003: commitVoid falls back to the loopback void endpoint with reason+actor', async () => {
+    let seenUrl = '';
+    let seenBody = '';
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      seenUrl = String(url);
+      seenBody = String(init?.body ?? '');
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const out = await commitVoid('sale-1', 'wrong item scanned', 'owner');
+      assert.deepEqual(out, { id: 'sale-1', status: 'CANCELLED' });
+      assert.ok(seenUrl.endsWith('/api/sales/sale-1/void'), 'must hit the per-sale void endpoint');
+      const body = JSON.parse(seenBody) as { reason?: string; by?: string };
+      assert.equal(body.reason, 'wrong item scanned');
+      assert.equal(body.by, 'owner');
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('#003: commitVoid down => null (legal journal is never faked)', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch;
+    try {
+      assert.equal(await commitVoid('sale-1', 'reason', 'owner'), null);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('#003: backupDatabase falls back to the loopback backup endpoint', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ ok: true, dest: '/abs/baraka-2026.db' }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const out = await backupDatabase('data/baraka-2026.db');
+      assert.equal(out?.path, '/abs/baraka-2026.db');
+      assert.equal(out?.bytes, null);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('#003: fetchDailyZ is native-only (browser lane returns null, no fetch)', async () => {
+    const realFetch = globalThis.fetch;
+    let called = false;
+    globalThis.fetch = (async () => { called = true; throw new Error('must not fetch'); }) as typeof fetch;
+    try {
+      assert.equal(await fetchDailyZ('2026-11-01'), null);
+      assert.equal(called, false);
     } finally {
       globalThis.fetch = realFetch;
     }

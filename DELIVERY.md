@@ -29,6 +29,12 @@
       payment modal `672×708` on iron, vision PASS, zero defects).
 - [x] BarakaKeygen v2 — owner activation desk (`releases/BarakaKeygen.exe`, 103MB):
       generate/verify/history/quit, queue line-reader, `CHECK: VALID` proven via piped stdin.
+- [x] #003 SQLite invoke bridge (2026-11-02) — Rust `next_invoice/void_sale/daily_z/backup_db` (18/18) ·
+      TS `commitVoid/backupDatabase/fetchDailyZ` · `sale.void` (manager+) + Z-view void surface ·
+      one-shot golden migration + single-lane parity · **302/302** · tsc/lint/build clean.
+- [x] Owner tasks (2026-11-02) — auto-update dry-run PASS on iron (`À jour — 1.3.3`, nothing installed) ·
+      reception inline new-product (manual barcode/TVA 9%/epicerie, lane-proven) ·
+      products DB read-only audit clean (14 exe / 14 loopback / 14 UI, zero defects, no fixes applied).
 
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)

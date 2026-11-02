@@ -474,6 +474,110 @@ pub fn record_settlement(conn: &mut Connection, input: &Value) -> Result<Value, 
     Ok(serde_json::json!({ "id": id, "receipt_number": receipt }))
 }
 
+/// #003 (Phase A): atomic sequence mint WITHOUT writing a sale.
+/// Same UPDATE..RETURNING primitive as record_sale — ONE sequencer for every
+/// lane, so a preview/reservation never forks the numbering.
+pub fn next_invoice(conn: &mut Connection, kind: &str, year: i64) -> Result<Value, String> {
+    let prefix = match kind {
+        "FACT" => "FACT",
+        "T" => "T",
+        "Q" => "Q",
+        _ => return Err(format!("[fiscal] bad seq kind: {kind} (FACT/T/Q)")),
+    };
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let n = bump_seq(&tx, kind, year)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "number": format!("{prefix}-{year}-{n:06}") }))
+}
+
+/// #003 (Phase A): legal void — status flip + void_log row, ONE Immediate tx.
+/// No DELETE ever (T11): the row stays, the journal explains why.
+pub fn void_sale(
+    conn: &mut Connection,
+    sale_id: &str,
+    reason: &str,
+    voided_by: &str,
+) -> Result<Value, String> {
+    if reason.trim().is_empty() {
+        return Err("[fiscal] void reason is required (legal journal)".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let (invoice, status): (String, String) = tx
+        .query_row(
+            "SELECT invoice_number, status FROM sales WHERE id = ?1",
+            [sale_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| format!("[fiscal] sale not found: {sale_id}"))?;
+    if status == "CANCELLED" {
+        return Err("[fiscal] sale already voided".to_string());
+    }
+    tx.execute(
+        "UPDATE sales SET status = 'CANCELLED' WHERE id = ?1",
+        [sale_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO void_log (sale_id, invoice_number, reason, voided_by, voided_at)
+         VALUES (?1, ?2, ?3, ?4, datetime('now'))",
+        rusqlite::params![sale_id, invoice, reason, voided_by],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "id": sale_id, "invoice_number": invoice, "status": "CANCELLED" }))
+}
+
+/// #003 (Phase A): day summary for the Z lane — read-only. COMPLETED sales
+/// only; voids counted separately. The legal day-LOCK lives in #004.
+pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
+    if day.len() != 10 || day.as_bytes()[4] != b'-' || day.as_bytes()[7] != b'-' {
+        return Err("[fiscal] day must be YYYY-MM-DD".to_string());
+    }
+    let (count, total): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), SUM(total_ttc_ct) FROM sales
+             WHERE substr(created_at, 1, 10) = ?1 AND status = 'COMPLETED'",
+            [day],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let voids: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sales WHERE substr(created_at, 1, 10) = ?1 AND status = 'CANCELLED'",
+            [day],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "day": day,
+        "sales_count": count,
+        "total_ttc_ct": total.unwrap_or(0),
+        "voids_count": voids,
+    }))
+}
+
+/// #003 (Phase A): hot snapshot — VACUUM INTO a sibling file. Mirrors the
+/// TS `backupTo` contract (.db suffix, parents created).
+pub fn backup_db(conn: &Connection, dest: &str) -> Result<Value, String> {
+    if !dest.ends_with(".db") {
+        return Err("[fiscal] backup destination must end with .db".to_string());
+    }
+    if let Some(parent) = std::path::Path::new(dest).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+    }
+    let escaped = dest.replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{escaped}'"))
+        .map_err(|e| e.to_string())?;
+    let bytes = std::fs::metadata(dest).map_err(|e| e.to_string())?.len();
+    Ok(serde_json::json!({ "path": dest, "bytes": bytes }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,5 +768,84 @@ mod tests {
             "client_settlement_key": "TRG-ST", "date": "2026-11-01T12:00:00.000Z", "note": null});
         record_settlement(&mut db, &st).unwrap();
         assert!(db.execute("DELETE FROM client_settlements", []).is_err());
+    }
+
+    #[test]
+    fn next_invoice_mints_gapless_sequences() {
+        // #003 gate: the SAME primitive every lane shares — 1000 mints, no gap.
+        let mut db = memdb();
+        for i in 1..=1000 {
+            let r = next_invoice(&mut db, "FACT", 2026).unwrap();
+            assert_eq!(r["number"], format!("FACT-2026-{i:06}"));
+        }
+        assert_eq!(
+            next_invoice(&mut db, "T", 2026).unwrap()["number"],
+            "T-2026-000001"
+        );
+        assert_eq!(
+            next_invoice(&mut db, "Q", 2026).unwrap()["number"],
+            "Q-2026-000001"
+        );
+        assert!(next_invoice(&mut db, "X", 2026).is_err());
+    }
+
+    #[test]
+    fn void_sale_flips_and_journals() {
+        // #003: legal void keeps the row, explains in the journal, never DELETEs.
+        let mut db = memdb();
+        let r = record_sale(&mut db, &sale_header(Some("V-1")), &sale_items()).unwrap();
+        let out = void_sale(&mut db, "s1", "wrong item scanned", "owner").unwrap();
+        assert_eq!(out["status"], "CANCELLED");
+        assert_eq!(out["invoice_number"], r["invoice_number"]);
+        let st: String = db
+            .query_row("SELECT status FROM sales WHERE id = 's1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(st, "CANCELLED");
+        let j: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM void_log WHERE sale_id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(j, 1);
+        assert!(void_sale(&mut db, "s1", "again", "owner").is_err()); // already voided
+        assert!(void_sale(&mut db, "s1", "   ", "owner").is_err()); // reason required
+        assert!(void_sale(&mut db, "nope", "reason", "owner").is_err()); // unknown id
+    }
+
+    #[test]
+    fn daily_z_counts_completed_only() {
+        // #003: Z preview reads COMPLETED; voids counted apart (lock is #004).
+        let mut db = memdb();
+        let mut h2 = sale_header(Some("Z-2"));
+        h2["id"] = serde_json::json!("s2");
+        record_sale(&mut db, &sale_header(Some("Z-1")), &sale_items()).unwrap();
+        record_sale(&mut db, &h2, &sale_items()).unwrap();
+        void_sale(&mut db, "s1", "test void", "owner").unwrap();
+        let z = daily_z(&db, "2026-11-01").unwrap();
+        assert_eq!(z["sales_count"], 1);
+        assert_eq!(z["voids_count"], 1);
+        assert_eq!(z["total_ttc_ct"], 179400);
+        assert!(daily_z(&db, "11-01").is_err());
+    }
+
+    #[test]
+    fn backup_db_writes_reopenable_sibling() {
+        // #003: hot snapshot mirrors the TS backupTo contract.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("B-1")), &sale_items()).unwrap();
+        let dir = std::env::temp_dir().join("baraka-003-test");
+        let dest = dir.join("snap.db");
+        let _ = std::fs::remove_file(&dest);
+        let out = backup_db(&db, dest.to_str().expect("temp path must be UTF-8")).unwrap();
+        assert!(out["bytes"].as_u64().unwrap() > 0);
+        let check = Connection::open(&dest).unwrap();
+        let n: i64 = check
+            .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_file(&dest);
+        assert!(backup_db(&db, "snap.txt").is_err()); // .db suffix contract
     }
 }

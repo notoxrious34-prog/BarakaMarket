@@ -1,5 +1,14 @@
 # CHANGELOG — Baraka Market
 
+## Unreleased — #003 SQLite invoke bridge + owner tasks (2026-11-02)
+- Rust: `next_invoice` / `void_sale` / `daily_z` / `backup_db` (+4 invoke commands); 18/18.
+- TS: `commitVoid` / `backupDatabase` (invoke → loopback) + `fetchDailyZ` (native-only);
+  `sale.void` (manager+) + per-invoice void surface in the Z view.
+- Migration one-shot with golden-dump fixture, seq reseed, `--force` rebuild; 302/302.
+- Owner tasks: auto-update dry-run PASS (`À jour — 1.3.3` on iron);
+  inline new-product in the reception modal (manual barcode/TVA 9%/epicerie);
+  products DB read-only audit clean (14/14/14, zero defects).
+
 ## v1.3.3 (2026-11-02) — cockpit raffiné
 - Cash modal compacted per owner eye: `max-w-2xl`, 200px keypad tray RIGHT (first in RTL),
   micro-ledger + gold NET band, 50px keys, two-step `Key` scale (compact ~48px / comfort ~56px).

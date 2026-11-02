@@ -8,7 +8,7 @@ import {
 /** T8 (ADR-031): one permission table, lockout math, session life. */
 describe('rbac core (T8)', () => {
   it('hierarchy owner > manager > cashier on every permission', () => {
-    const perms = ['sell', 'settle', 'print', 'products.edit', 'clients.edit',
+    const perms = ['sell', 'settle', 'print', 'sale.void', 'products.edit', 'clients.edit',
       'cash.manage', 'z.close', 'accounting.view', 'settings.edit', 'users.manage', 'audit.view'] as const;
     for (const p of perms) {
       assert.equal(can('cashier', p) || can('manager', p) || can('owner', p), true);

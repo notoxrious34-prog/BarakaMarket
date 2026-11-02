@@ -151,3 +151,26 @@ Live proofs (2026-11-02, real Edge lane via `playwright-core` + `msedge.exe`, se
   footer `V1.3.3`, payment modal `672×708` on iron, vision PASS (FR locale:
   keypad visual-LEFT = first-in-DOM, correct LTR mirror of the RTL right side;
   `NET 640 = 577.98 + 52.02 + 10`, `RENDU 0`, zero defects).
+
+## Phase 5 — #003 SQLite invoke bridge + owner tasks (2026-11-02)
+| Slice | Change | Result |
+|---|---|---|
+| Rust lane (`fiscal.rs` + `main.rs`) | `next_invoice` (atomic mint, UPDATE..RETURNING) · `void_sale` (status flip + journal, no DELETE) · `daily_z` (read-only) · `backup_db` (VACUUM INTO) + 4 invoke commands | ✅ `cargo fmt` clean · `cargo test` **18/18** (incl. 1000-mint gapless + void/journal + Z counts + reopenable snapshot) |
+| TS routing (`fiscal-authority.ts`) | `commitVoid` / `backupDatabase` (invoke → loopback fallback) · `fetchDailyZ` (native-only) | ✅ lane order preserved: exe never downgrades to provisional |
+| Permissions + UI | `sale.void` (manager+) · `AppContext.voidSale` · per-invoice void surface in Z view (reason mandatory, CANCELLED stays visible) | ✅ `commit-lane` +4 tests |
+| One-shot migration | `scripts/migrate-localstorage.ts`: one-shot guard (`--force` to rebuild) · seq reseed to migrated maxima · golden-dump self-verify + `scripts/__fixtures__/localstorage-golden.json` | ✅ `migrate-golden` 2/2 (equality + refusal + force rebuild) |
+| Single lane + parity | 1000 gapless mints · canonical vector `179400ct` (timbre `1800ct`) identical Rust↔TS · DRAFT refs never match fiscal pattern | ✅ `seq-lane` 3/3 |
+| **Total** | | **✅ 302/302, 0 fail · `tsc` clean · `lint` clean · `vite build` ✅** |
+
+Owner tasks (2026-11-02, all approved via clarify before implementation):
+- **Auto-update dry-run** on `D:\BarakaMarket-1.3.3` (iron PIN 5678): `Sauvegarde & MAJ` → `Vérifier` → **`À jour — 1.3.3`**,
+  footer `V1.3.3` + `REGISTRE FISCAL ACTIF (SQLITE WAL)`, vision PASS, zero defects. Nothing installed, no relaunch.
+- **Reception inline new-product** (`SuppliersPurchasesView.tsx`): `+ منتج جديد` toggle → name + manual
+  barcode (required, duplicate-rejected) + TVA (default 9%) + unit; prices reused from the line; creates via
+  `addProduct` and inserts the receipt line at once (nav already gated `products.edit`).
+  Lane proof: `SUCRE LANE 1KG` + `6139876543210` + `9%` + `PIECE`, vision PASS, zero defects.
+- **Products DB read-only audit** (exe / loopback / UI): 14 products everywhere, 0 duplicate barcodes,
+  0 negative prices/stock, 0 bad TVA, 0 null barcodes, 0 orphan purchase items.
+  Observation (by design, no fix without approval): `product_barcodes` holds aliases only —
+  primary barcodes live in `products.barcode`.
+- Gates after the reception change: **302/302** · `tsc` clean · `build 1.52s` (iron app closed after smoke).

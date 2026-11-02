@@ -29,9 +29,9 @@ import {
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
-import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
-import { SESSION_IDLE_MS, type Session } from '../core/rbac.js';
+import { SESSION_IDLE_MS, can, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
 import { parseQtyPrefix } from '../core/barcode-qty';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
@@ -109,6 +109,12 @@ interface AppContextType {
     amountPaid: number,
     isFactureReglementaire?: boolean
   ) => Promise<Sale>;
+  /**
+   * #003 (Phase A): authoritative void of a COMPLETED sale. Manager+ only,
+   * reason mandatory (legal journal), native invoke first with loopback
+   * fallback. Throws when the fiscal lane is unreachable — never faked.
+   */
+  voidSale: (saleId: string, reason: string) => Promise<void>;
   settleClientDebt: (
     clientId: number,
     amount: number,
@@ -1155,6 +1161,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  /**
+   * #003 (Phase A): authoritative void — manager+ only, reason mandatory.
+   * Native invoke first, loopback fallback; throws when neither lane answers
+   * (the row keeps COMPLETED rather than faking a void).
+   */
+  const voidSale = async (saleId: string, reason: string): Promise<void> => {
+    const s = sessionRef.current;
+    if (!s) throw new Error('[void] login required');
+    if (!can(s.role, 'sale.void')) throw new Error('[void] manager or owner required');
+    const why = reason.trim();
+    if (!why) throw new Error('[void] reason is required (legal journal)');
+    touchSession();
+    const target = sales.find(x => x.id === saleId);
+    if (!target) throw new Error('[void] sale not found');
+    if (target.status !== 'COMPLETED') throw new Error('[void] only COMPLETED sales can be voided');
+    const out = await commitVoid(saleId, why, s.username);
+    if (!out) throw new Error('[void] fiscal lane unreachable — retry when MODE FISCAL ACTIF');
+    setSales(prev => prev.map(x => (x.id === saleId ? { ...x, status: 'CANCELLED' as const } : x)));
+    auditFiscal('sale.void', `${target.invoice_number} (${why}) by ${s.username}`);
+  };
+
   const settleClientDebt = async (
     clientId: number,
     amount: number,
@@ -1621,6 +1648,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteProductBarcode,
         completeSale,
         completeSaleFiscal,
+        voidSale,
         settleClientDebt,
         addSupplier,
         updateSupplier,

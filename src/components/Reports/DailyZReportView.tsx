@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
 import { computeZHash, GENESIS_PREV_HASH } from '../../core/zreport';
@@ -13,13 +14,19 @@ import {
   ArrowDownLeft,
   Percent,
   Lock,
+  Ban,
 } from 'lucide-react';
 
 export const DailyZReportView: React.FC = () => {
-  const { generateDailyZReport, sales, storeProfile, language } = useApp();
+  const { generateDailyZReport, sales, storeProfile, language, session, voidSale } = useApp();
   const isAr = language === 'ar';
+  const canVoid = can(session?.role ?? 'cashier', 'sale.void');
 
   const [zReport] = useState(() => generateDailyZReport());
+  const [voidTargetId, setVoidTargetId] = useState<string | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidBusy, setVoidBusy] = useState(false);
+  const [voidError, setVoidError] = useState('');
   const [format, setFormat] = useState<'80mm' | 'A4'>('80mm');
   const [prevHash, setPrevHash] = useState<string>(GENESIS_PREV_HASH);
   const [closure, setClosure] = useState<{ report_number: string; hash: string } | null>(null);
@@ -60,6 +67,28 @@ export const DailyZReportView: React.FC = () => {
     .sort(), [sales, zReport.date]);
   const firstInvoice = todayInvoices[0] ?? '—';
   const lastInvoice = todayInvoices[todayInvoices.length - 1] ?? '—';
+
+  // #003: today's rows for the legal-void surface (COMPLETED voids first,
+  // CANCELLED rows stay visible as the journal — never deleted).
+  const todaySales = useMemo(() => sales
+    .filter(s => s.created_at.startsWith(zReport.date))
+    .slice()
+    .sort((a, b) => b.created_at.localeCompare(a.created_at)), [sales, zReport.date]);
+
+  const confirmVoid = async (): Promise<void> => {
+    if (!voidTargetId) return;
+    setVoidBusy(true);
+    setVoidError('');
+    try {
+      await voidSale(voidTargetId, voidReason);
+      setVoidTargetId(null);
+      setVoidReason('');
+    } catch (e) {
+      setVoidError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setVoidBusy(false);
+    }
+  };
 
   const chainHash = closure?.hash ?? computeZHash(prevHash, zReport.report_number, zReport.date, ct.ttc, ct.timbre);
   const shortHash = (h: string) => `${h.slice(0, 10)}…${h.slice(-6)}`;
@@ -252,6 +281,72 @@ export const DailyZReportView: React.FC = () => {
               {formatDZD(zReport.total_credit_granted, false)}
             </div>
           </div>
+        </div>
+
+        {/* #003: legal-void surface — manager+ only. CANCELLED rows stay as
+            the journal; the fiscal lane (invoke → loopback) owns the flip. */}
+        <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-4 shadow-xl">
+          <h3 className="text-sm font-bold text-white mb-1 flex items-center gap-2">
+            <Ban className="w-4 h-4 text-rose-400" />
+            <span>{isAr ? 'فواتير اليوم — إلغاء قانوني' : 'Factures du jour — annulation légale'}</span>
+          </h3>
+          <p className="text-[11px] text-slate-500 mb-3">
+            {isAr
+              ? 'الإلغاء يبقي السطر ويوثق السبب — لا حذف أبداً. يتطلب اتصال المسار الجبائي.'
+              : 'L’annulation conserve la ligne et journalise le motif — jamais de suppression. Exige la voie fiscale.'}
+          </p>
+          {todaySales.length === 0 && (
+            <div className="text-xs text-slate-500">{isAr ? 'لا فواتير اليوم بعد.' : 'Aucune facture aujourd’hui.'}</div>
+          )}
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {todaySales.map(s => (
+              <div key={s.id} className="flex items-center gap-2 bg-[#0b0f17] border border-[#1e293b] rounded-xl px-3 py-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-mono font-bold text-slate-200 truncate">{s.invoice_number}</div>
+                  <div className="text-[11px] text-slate-500 font-mono">{formatDZD(s.total_ttc, false)} · {s.payment_method}</div>
+                </div>
+                {s.status === 'CANCELLED' ? (
+                  <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-rose-950/60 text-rose-300 border border-rose-900/60">
+                    {isAr ? 'ملغاة' : 'ANNULÉE'}
+                  </span>
+                ) : canVoid ? (
+                  voidTargetId === s.id ? (
+                    <div className="flex items-center gap-1.5 flex-1 max-w-[260px]">
+                      <input
+                        value={voidReason}
+                        onChange={e => setVoidReason(e.target.value)}
+                        placeholder={isAr ? 'السبب (إلزامي)…' : 'Motif (obligatoire)…'}
+                        className="flex-1 min-w-0 bg-[#111722] border border-rose-900/60 rounded-lg px-2 py-1.5 text-[11px] text-white placeholder:text-slate-600 outline-none focus:border-rose-500"
+                        disabled={voidBusy}
+                      />
+                      <button
+                        onClick={() => void confirmVoid()}
+                        disabled={voidBusy || !voidReason.trim()}
+                        className="px-2.5 py-1.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white rounded-lg text-[11px] font-bold cursor-pointer"
+                      >
+                        {isAr ? 'تأكيد' : 'OK'}
+                      </button>
+                      <button
+                        onClick={() => { setVoidTargetId(null); setVoidReason(''); setVoidError(''); }}
+                        disabled={voidBusy}
+                        className="px-2 py-1.5 text-slate-500 hover:text-slate-300 text-[11px] cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => { setVoidTargetId(s.id); setVoidReason(''); setVoidError(''); }}
+                      className="px-2.5 py-1.5 border border-rose-900/60 text-rose-300 hover:bg-rose-950/50 rounded-lg text-[11px] font-bold cursor-pointer"
+                    >
+                      {isAr ? 'إلغاء' : 'Annuler'}
+                    </button>
+                  )
+                ) : null}
+              </div>
+            ))}
+          </div>
+          {voidError && <div className="mt-2 text-[11px] text-rose-300 font-mono">{voidError}</div>}
         </div>
       </div>
 

@@ -14,7 +14,7 @@
 export type Role = 'cashier' | 'manager' | 'owner';
 
 export type Permission =
-  | 'sell' | 'settle' | 'print'
+  | 'sell' | 'settle' | 'print' | 'sale.void'
   | 'products.edit' | 'clients.edit' | 'cash.manage'
   | 'z.close' | 'accounting.view'
   | 'settings.edit' | 'users.manage' | 'audit.view';
@@ -23,7 +23,7 @@ const RANK: Record<Role, number> = { cashier: 0, manager: 1, owner: 2 };
 
 /** Minimum rank per permission — one table, no scattered ifs. */
 const MIN_RANK: Record<Permission, number> = {
-  sell: 0, settle: 0, print: 0,
+  sell: 0, settle: 0, print: 0, 'sale.void': 1,
   'products.edit': 1, 'clients.edit': 1, 'cash.manage': 1,
   'z.close': 1, 'accounting.view': 1,
   'settings.edit': 2, 'users.manage': 2, 'audit.view': 1,

@@ -187,7 +187,10 @@ export function mintRowId(): string {
   return `row-${Date.now().toString(36)}-${Math.floor(Math.random() * 0xffffff).toString(36)}`;
 }
 
-async function invokeLane<T>(command: 'record_sale' | 'record_settlement', args: Record<string, unknown>): Promise<T | null> {
+async function invokeLane<T>(
+  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'backup_db',
+  args: Record<string, unknown>,
+): Promise<T | null> {
   if (!isTauriRuntime()) return null;
   try {
     const mod = await import('@tauri-apps/api/core');
@@ -241,6 +244,85 @@ export async function commitSettlement(
   }
   if (isTauriRuntime()) return null;
   return postSettlementToLoopback(inp);
+}
+
+/**
+ * #003 (Phase A): native-first legal void. Inside the shell the Rust lane
+ * flips the row + journals the reason (no DELETE) — zero loopback hops.
+ * Browser lane POSTs to the loopback void endpoint. Tauri + native refusal
+ * => null (never silently downgrade the legal journal to provisional).
+ */
+export async function commitVoid(
+  saleId: string, reason: string, by: string,
+): Promise<{ id: string; status: 'CANCELLED' } | null> {
+  const native = await invokeLane<{ id?: string; status?: string }>(
+    'void_sale', { saleId, reason, voidedBy: by },
+  );
+  if (native && native.id && native.status === 'CANCELLED') {
+    return { id: native.id, status: 'CANCELLED' };
+  }
+  if (isTauriRuntime()) return null;
+  try {
+    const token = await getLoopbackToken();
+    const r = await fetch(`${LOOPBACK_BASE}/api/sales/${encodeURIComponent(saleId)}/void`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
+      body: JSON.stringify({ reason, by }),
+    });
+    if (!r.ok) return null;
+    return { id: saleId, status: 'CANCELLED' };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #003 (Phase A): native-first hot snapshot. exe lane VACUUMs INTO the
+ * sibling file; browser lane uses the loopback backup endpoint.
+ */
+export async function backupDatabase(
+  dest: string,
+): Promise<{ path: string; bytes: number | null } | null> {
+  const native = await invokeLane<{ path?: string; bytes?: number }>(
+    'backup_db', { dest },
+  );
+  if (native && native.path && typeof native.bytes === 'number') {
+    return { path: native.path, bytes: native.bytes };
+  }
+  if (isTauriRuntime()) return null;
+  try {
+    const token = await getLoopbackToken();
+    const r = await fetch(`${LOOPBACK_BASE}/api/backup`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
+      body: JSON.stringify({ dest }),
+    });
+    if (!r.ok) return null;
+    const j = (await r.json()) as { dest?: string };
+    return { path: typeof j.dest === 'string' ? j.dest : dest, bytes: null };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * #003 (Phase A): native-first day summary for the Z lane (read-only).
+ * Browser lane returns null — local sales state owns the preview there.
+ * The legal day-LOCK lives in #004.
+ */
+export async function fetchDailyZ(
+  day: string,
+): Promise<{ day: string; sales_count: number; total_ttc_ct: number; voids_count: number } | null> {
+  const native = await invokeLane<{ day?: string; sales_count?: number; total_ttc_ct?: number; voids_count?: number }>(
+    'daily_z', { day },
+  );
+  if (
+    native && native.day === day && typeof native.sales_count === 'number'
+    && typeof native.total_ttc_ct === 'number' && typeof native.voids_count === 'number'
+  ) {
+    return { day, sales_count: native.sales_count, total_ttc_ct: native.total_ttc_ct, voids_count: native.voids_count };
+  }
+  return null;
 }
 
 /** Fire-and-forget 5-byte drawer-kick via the raw-print spool endpoint. */

@@ -111,6 +111,42 @@ fn user_verify(username: String, pin: String) -> Result<serde_json::Value, Strin
     auth::user_verify(&conn, &username, &pin)
 }
 
+/// #003 (Phase A): atomic sequence mint (preview/reservation lane).
+#[tauri::command]
+fn next_invoice(kind: String, year: i64) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::next_invoice(&mut conn, &kind, year)
+}
+
+/// #003 (Phase A): legal void — status flip + journal row, no DELETE.
+#[tauri::command]
+fn void_sale(
+    saleId: String,
+    reason: String,
+    voidedBy: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::void_sale(&mut conn, &saleId, &reason, &voidedBy)
+}
+
+/// #003 (Phase A): day summary for the Z lane (read-only; lock lives in #004).
+#[tauri::command]
+fn daily_z(day: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::daily_z(&conn, &day)
+}
+
+/// #003 (Phase A): hot snapshot — VACUUM INTO a sibling file.
+#[tauri::command]
+fn backup_db(dest: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::backup_db(&conn, &dest)
+}
+
 /// T12 fix: native PIN change. The exe never had this command — forced-change
 /// died with "check the connection" because no loopback runs in the shell.
 #[tauri::command]
@@ -189,6 +225,10 @@ fn main() {
             loopback_token,
             record_sale,
             record_settlement,
+            next_invoice,
+            void_sale,
+            daily_z,
+            backup_db,
             product_upsert,
             product_list,
             product_search,
