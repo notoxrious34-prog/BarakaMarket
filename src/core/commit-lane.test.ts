@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { commitSale, commitSettlement, commitVoid, backupDatabase, fetchDailyZ, mintRowId } from './fiscal-authority.js';
+import { commitSale, commitSettlement, commitVoid, commitZClose, backupDatabase, fetchDailyZ, mintRowId } from './fiscal-authority.js';
 
 /**
  * T4b (ADR-026): the native-first commit lane.
@@ -142,6 +142,49 @@ describe('commit lane (T4b)', () => {
     try {
       assert.equal(await fetchDailyZ('2026-11-01'), null);
       assert.equal(called, false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('#004: commitZClose falls back to the loopback close endpoint with day+totals', async () => {
+    let seenUrl = '';
+    let seenBody = '';
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: { body?: unknown }) => {
+      seenUrl = String(url);
+      seenBody = String(init?.body ?? '');
+      return new Response(JSON.stringify({ report_number: 'Z-2026-000001', hash: 'h', prev_hash: 'p' }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const out = await commitZClose('2026-11-01', '08:00', '20:00', {
+        salesCount: 1, totalHtCt: 1000, tva0BaseCt: 1000, tva9BaseCt: 0,
+        tva9AmtCt: 0, tva19BaseCt: 0, tva19AmtCt: 0, totalTvaCt: 0,
+        totalTimbreCt: 0, totalTtcCt: 1000, especesGrossCt: 0, cibTotalCt: 1000,
+        dahabiyaTotalCt: 0, creditGrantedCt: 0, creditCollectedCt: 0,
+        firstInvoice: 'FACT-2026-000001', lastInvoice: 'FACT-2026-000001',
+      });
+      assert.deepEqual(out, { report_number: 'Z-2026-000001', hash: 'h', prev_hash: 'p' });
+      assert.ok(seenUrl.endsWith('/api/z/close'), 'must hit the legal close endpoint');
+      const body = JSON.parse(seenBody) as { day?: string; totals?: { salesCount?: number } };
+      assert.equal(body.day, '2026-11-01');
+      assert.equal(body.totals?.salesCount, 1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it('#004: commitZClose down => null (a legal lock is never faked)', async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch;
+    try {
+      assert.equal(await commitZClose('2026-11-01', '08:00', '20:00', {
+        salesCount: 0, totalHtCt: 0, tva0BaseCt: 0, tva9BaseCt: 0,
+        tva9AmtCt: 0, tva19BaseCt: 0, tva19AmtCt: 0, totalTvaCt: 0,
+        totalTimbreCt: 0, totalTtcCt: 0, especesGrossCt: 0, cibTotalCt: 0,
+        dahabiyaTotalCt: 0, creditGrantedCt: 0, creditCollectedCt: 0,
+        firstInvoice: '', lastInvoice: '',
+      }), null);
     } finally {
       globalThis.fetch = realFetch;
     }

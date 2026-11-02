@@ -10,7 +10,9 @@
 use rusqlite::Connection;
 use serde_json::Value;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 5;
+use crate::auth::sha256_hex;
+
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -122,7 +124,41 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    // v5 → v6 (#004): close_kind marks DAY (legal lock, one per day) vs
+    // SHIFT (cash-session snapshot). Fresh files get it from schema.sql.
+    if v < 6 {
+        if !has_col("z_reports", "close_kind")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN close_kind TEXT NOT NULL DEFAULT 'DAY';",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 6;")
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+fn valid_day(day: &str) -> bool {
+    day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-'
+}
+
+/// #004: true when a legal DAY close already freezes `day`.
+/// SHIFT snapshots never lock — several shifts may close the same day.
+fn day_locked(conn: &Connection, day: &str) -> Result<bool, String> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM z_reports WHERE day = ?1 AND close_kind = 'DAY'",
+            [day],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(n > 0)
+}
+
+/// Canonical Z chain hash — byte-identical to core/zreport.ts computeZHash.
+fn z_hash(prev: &str, number: &str, day: &str, ttc: i64, timbre: i64) -> String {
+    sha256_hex(&format!("{prev}||{number}||{day}||{ttc}||{timbre}"))
 }
 
 fn bump_seq(tx: &rusqlite::Transaction, kind: &str, year: i64) -> Result<i64, String> {
@@ -270,6 +306,18 @@ pub fn record_sale(
         ) {
             return Ok(row);
         }
+    }
+
+    // #004: a legally closed day is frozen — no new posting may land in it.
+    let created = str_field(&header["created_at"], "created_at")?;
+    let day = created.get(0..10).ok_or("[fiscal] bad created_at day")?;
+    if !valid_day(day) {
+        return Err("[fiscal] bad created_at day".to_string());
+    }
+    if day_locked(conn, day)? {
+        return Err(format!(
+            "[fiscal] day {day} is already legally closed (Z FINALISÉ) — sale refused"
+        ));
     }
 
     let tx = conn
@@ -506,15 +554,29 @@ pub fn void_sale(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let (invoice, status): (String, String) = tx
+    let (invoice, status, day): (String, String, String) = tx
         .query_row(
-            "SELECT invoice_number, status FROM sales WHERE id = ?1",
+            "SELECT invoice_number, status, substr(created_at, 1, 10) FROM sales WHERE id = ?1",
             [sale_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|_| format!("[fiscal] sale not found: {sale_id}"))?;
     if status == "CANCELLED" {
         return Err("[fiscal] sale already voided".to_string());
+    }
+    // #004: a legally closed day is frozen — voids to it are refused.
+    // (COUNT runs on the tx: same Immediate lock, no TOCTOU.)
+    let locked: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM z_reports WHERE day = ?1 AND close_kind = 'DAY'",
+            [&day],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if locked > 0 {
+        return Err(format!(
+            "[fiscal] day {day} is already legally closed (Z FINALISÉ) — void refused"
+        ));
     }
     tx.execute(
         "UPDATE sales SET status = 'CANCELLED' WHERE id = ?1",
@@ -529,6 +591,134 @@ pub fn void_sale(
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "id": sale_id, "invoice_number": invoice, "status": "CANCELLED" }))
+}
+
+/// #004 (Phase A): legal day close — recompute from the ledger, lock the
+/// day, chain the hash. Native twin of TS finalizeZReport (which additionally
+/// verifies caller-supplied totals against the same ledger query).
+pub fn z_close(
+    conn: &mut Connection,
+    day: &str,
+    opening_time: &str,
+    closing_time: &str,
+) -> Result<Value, String> {
+    if !valid_day(day) {
+        return Err("[fiscal] day must be YYYY-MM-DD".to_string());
+    }
+    let year: i64 = day
+        .get(0..4)
+        .ok_or("[fiscal] bad day")?
+        .parse()
+        .map_err(|_| "[fiscal] bad day year")?;
+    if !(2000..=2100).contains(&year) {
+        return Err("[fiscal] bad day year".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    if day_locked(&tx, day)? {
+        return Err(format!(
+            "[fiscal] day {day} is already legally closed (Z FINALISÉ) — close refused"
+        ));
+    }
+    let (n, ht, b0, b9, a9, b19, a19, tva, timbre, ttc, cash, cib, dah, cred, first, last): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = tx
+        .query_row(
+            "SELECT COUNT(*),
+               COALESCE(SUM(total_ht_ct), 0), COALESCE(SUM(tva0_base_ct), 0),
+               COALESCE(SUM(tva9_base_ct), 0), COALESCE(SUM(tva9_amt_ct), 0),
+               COALESCE(SUM(tva19_base_ct), 0), COALESCE(SUM(tva19_amt_ct), 0),
+               COALESCE(SUM(total_tva_ct), 0), COALESCE(SUM(timbre_ct), 0),
+               COALESCE(SUM(total_ttc_ct), 0),
+               COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN payment_method = 'CIB' THEN total_ttc_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0),
+               MIN(invoice_number), MAX(invoice_number)
+             FROM sales WHERE status = 'COMPLETED' AND substr(created_at, 1, 10) = ?1",
+            [day],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                    r.get(13)?,
+                    r.get(14)?,
+                    r.get(15)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    let coll: i64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(total_collected_ct), 0) FROM client_settlements
+             WHERE payment_method = 'ESPECES' AND substr(date, 1, 10) = ?1",
+            [day],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let prev: String = match tx.query_row(
+        "SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(h) => h,
+        Err(rusqlite::Error::QueryReturnedNoRows) => "0".repeat(64),
+        Err(e) => return Err(e.to_string()),
+    };
+    let number = format!("Z-{year}-{:06}", bump_seq(&tx, "Z", year)?);
+    let hash = z_hash(&prev, &number, day, ttc, timbre);
+    tx.execute(
+        "INSERT INTO z_reports (report_number, day, opening_time, closing_time,
+          total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
+          tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
+          especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
+          credit_collected_ct, first_invoice_number, last_invoice_number,
+          prev_hash, hash, finalized, close_kind)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,1,'DAY')",
+        rusqlite::params![
+            number, day, opening_time, closing_time,
+            n, ht, b0, b9, a9, b19, a19, tva, timbre, ttc,
+            cash, cib, dah, cred, coll,
+            first.unwrap_or_default(), last.unwrap_or_default(),
+            prev, hash,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "report_number": number, "day": day,
+        "opening_time": opening_time, "closing_time": closing_time,
+        "sales_count": n, "total_ht_ct": ht, "total_tva_ct": tva,
+        "total_timbre_ct": timbre, "total_ttc_ct": ttc,
+        "hash": hash, "prev_hash": prev,
+    }))
 }
 
 /// #003 (Phase A): day summary for the Z lane — read-only. COMPLETED sales
@@ -552,11 +742,15 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    // #004: the UI locks the void surface (and shows JOUR VERROUILLÉ) when
+    // a legal DAY close already freezes the day.
+    let locked = day_locked(conn, day)?;
     Ok(serde_json::json!({
         "day": day,
         "sales_count": count,
         "total_ttc_ct": total.unwrap_or(0),
         "voids_count": voids,
+        "closed": locked,
     }))
 }
 
@@ -713,7 +907,16 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
+        // #004: the climb also adds close_kind (DAY lock marker) on legacy files.
+        let has_kind: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('z_reports') WHERE name = 'close_kind'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_kind, 1);
         // T11: the climb also restores the append-only triggers on legacy files.
         let trig: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
@@ -812,6 +1015,48 @@ mod tests {
         assert!(void_sale(&mut db, "s1", "again", "owner").is_err()); // already voided
         assert!(void_sale(&mut db, "s1", "   ", "owner").is_err()); // reason required
         assert!(void_sale(&mut db, "nope", "reason", "owner").is_err()); // unknown id
+    }
+
+    #[test]
+    fn z_close_locks_chains_and_freezes_the_day() {
+        // #004: native close recomputes from the ledger (179400ct vector),
+        // chains prev→hash, then freezes the day: second close, voids and
+        // late sales to it are all refused.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("ZC-1")), &sale_items()).unwrap();
+        let z = z_close(&mut db, "2026-11-01", "08:00", "20:00").unwrap();
+        assert_eq!(z["report_number"], "Z-2026-000001");
+        assert_eq!(z["sales_count"], 1);
+        assert_eq!(z["total_ttc_ct"], 179400);
+        assert_eq!(z["total_ht_ct"], 165528);
+        assert_eq!(z["day"], "2026-11-01");
+        assert_eq!(z["prev_hash"], "0".repeat(64));
+        // Hash matches the canonical TS join prev||number||day||ttc||timbre.
+        let expect = crate::auth::sha256_hex(&format!(
+            "{}||{}||{}||{}||{}",
+            z["prev_hash"].as_str().unwrap(),
+            "Z-2026-000001",
+            "2026-11-01",
+            179400,
+            1800
+        ));
+        assert_eq!(z["hash"].as_str().unwrap(), expect);
+        // Day lock: second close refused (seq not consumed twice).
+        assert!(z_close(&mut db, "2026-11-01", "08:00", "21:00").is_err());
+        // Void after lock refused.
+        assert!(void_sale(&mut db, "s1", "late regret", "owner").is_err());
+        // Late sale to the frozen day refused.
+        let mut late = sale_header(Some("ZC-2"));
+        late["id"] = serde_json::json!("s9");
+        assert!(record_sale(&mut db, &late, &sale_items()).is_err());
+        // Another day still closes and chains onto the first hash.
+        let z2 = z_close(&mut db, "2026-11-02", "08:00", "20:00").unwrap();
+        assert_eq!(z2["report_number"], "Z-2026-000002");
+        assert_eq!(
+            z2["prev_hash"].as_str().unwrap(),
+            z["hash"].as_str().unwrap()
+        );
+        assert!(z_close(&mut db, "11-02", "08:00", "20:00").is_err()); // bad day
     }
 
     #[test]

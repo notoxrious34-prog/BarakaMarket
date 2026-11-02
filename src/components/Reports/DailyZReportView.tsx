@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
+import { commitZClose, fetchDailyZ } from '../../core/fiscal-authority';
 import { computeZHash, GENESIS_PREV_HASH } from '../../core/zreport';
 import {
   FileText,
@@ -21,6 +22,7 @@ export const DailyZReportView: React.FC = () => {
   const { generateDailyZReport, sales, storeProfile, language, session, voidSale } = useApp();
   const isAr = language === 'ar';
   const canVoid = can(session?.role ?? 'cashier', 'sale.void');
+  const canClose = can(session?.role ?? 'cashier', 'z.close');
 
   const [zReport] = useState(() => generateDailyZReport());
   const [voidTargetId, setVoidTargetId] = useState<string | null>(null);
@@ -30,10 +32,22 @@ export const DailyZReportView: React.FC = () => {
   const [format, setFormat] = useState<'80mm' | 'A4'>('80mm');
   const [prevHash, setPrevHash] = useState<string>(GENESIS_PREV_HASH);
   const [closure, setClosure] = useState<{ report_number: string; hash: string } | null>(null);
+  const [closedRow, setClosedRow] = useState<{ report_number: string; closing_time: string; hash: string; prev_hash: string } | null>(null);
+  const [dayLocked, setDayLocked] = useState(false);
+  // #004: full stored DAY row (centimes) — the ticket reprints from this,
+  // never from live state, once the day is locked.
+  const [dayRow, setDayRow] = useState<{
+    salesCount: number; ht: number; b0: number; b9: number; a9: number;
+    b19: number; a19: number; tva: number; timbre: number; ttc: number;
+    esp: number; bank: number; cred: number; coll: number;
+    first: string; last: string;
+  } | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeNote, setCloseNote] = useState('');
 
-  // Gate-03 TASK 1: chain head from the SQLite loopback (genesis if offline).
+  // #004: probe the legal day-lock on mount. Loopback lane reads the stored
+  // DAY row (reprint source); exe lane reads the native `closed` flag.
+  // Chain head from the SQLite loopback (genesis if offline).
   useEffect(() => {
     let alive = true;
     fetch('http://127.0.0.1:3100/api/z/latest-hash')
@@ -42,7 +56,41 @@ export const DailyZReportView: React.FC = () => {
         if (alive && j?.prev_hash) setPrevHash(j.prev_hash);
       })
       .catch(() => {});
+    fetch('http://127.0.0.1:3100/api/z/list')
+      .then(r => (r.ok ? r.json() : null))
+      .then((rows: Array<Record<string, unknown>> | null) => {
+        if (!alive || !Array.isArray(rows)) return;
+        const day = rows.find(r => r.day === zReport.date && r.close_kind === 'DAY') as
+          | { report_number: string; closing_time: string; hash: string; prev_hash: string;
+              total_sales_count: number; total_ht_ct: number; tva0_base_ct: number;
+              tva9_base_ct: number; tva9_amt_ct: number; tva19_base_ct: number;
+              tva19_amt_ct: number; total_tva_ct: number; total_timbre_ct: number;
+              total_ttc_ct: number; especes_gross_ct: number; cib_total_ct: number;
+              dahabiya_total_ct: number; credit_granted_ct: number; credit_collected_ct: number;
+              first_invoice_number: string; last_invoice_number: string } | undefined;
+        if (day && typeof day.report_number === 'string') {
+          setClosedRow({ report_number: day.report_number, closing_time: day.closing_time, hash: String(day.hash), prev_hash: String(day.prev_hash) });
+          setDayRow({
+            salesCount: Number(day.total_sales_count), ht: Number(day.total_ht_ct), b0: Number(day.tva0_base_ct),
+            b9: Number(day.tva9_base_ct), a9: Number(day.tva9_amt_ct), b19: Number(day.tva19_base_ct),
+            a19: Number(day.tva19_amt_ct), tva: Number(day.total_tva_ct), timbre: Number(day.total_timbre_ct),
+            ttc: Number(day.total_ttc_ct), esp: Number(day.especes_gross_ct),
+            bank: Number(day.cib_total_ct) + Number(day.dahabiya_total_ct),
+            cred: Number(day.credit_granted_ct), coll: Number(day.credit_collected_ct),
+            first: String(day.first_invoice_number ?? ''), last: String(day.last_invoice_number ?? ''),
+          });
+          setClosure({ report_number: day.report_number, hash: String(day.hash) });
+          setPrevHash(String(day.prev_hash));
+          setDayLocked(true);
+          setCloseNote(isAr ? 'اليوم مقفل قانونياً — إعادة طباعة من السجل' : 'Jour verrouillé — réimpression depuis le registre');
+        }
+      })
+      .catch(() => {});
+    fetchDailyZ(zReport.date)
+      .then(z => { if (alive && z?.closed) setDayLocked(true); })
+      .catch(() => {});
     return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const ct = useMemo(() => ({
@@ -67,6 +115,17 @@ export const DailyZReportView: React.FC = () => {
     .sort(), [sales, zReport.date]);
   const firstInvoice = todayInvoices[0] ?? '—';
   const lastInvoice = todayInvoices[todayInvoices.length - 1] ?? '—';
+
+  // #004: ticket values — the stored DAY row once locked (reprint), live
+  // aggregates before the close. Cards above always stay live (management).
+  const tv = dayRow ?? {
+    salesCount: zReport.sales_count, ht: ct.ht, b0: ct.b0, b9: ct.b9, a9: ct.a9,
+    b19: ct.b19, a19: ct.a19, tva: ct.tva, timbre: ct.timbre, ttc: ct.ttc,
+    esp: ct.esp, bank: ct.cib, cred: ct.cred, coll: ct.coll,
+    first: firstInvoice, last: lastInvoice,
+  };
+  const tvClosedAt = closedRow?.closing_time ?? zReport.closed_at;
+  const tvReportNo = closure ? closure.report_number : zReport.report_number;
 
   // #003: today's rows for the legal-void surface (COMPLETED voids first,
   // CANCELLED rows stay visible as the journal — never deleted).
@@ -97,36 +156,34 @@ export const DailyZReportView: React.FC = () => {
     window.print();
   };
 
-  /** Finalize the closure: authoritative SQLite lane, provisional fallback. */
+  /** #004: finalize via the legal close lane (invoke → loopback). */
   const handleClose = async () => {
+    if (dayLocked || closedRow) {
+      setCloseNote(isAr ? 'اليوم مقفل قانونياً — الإغلاق مرفوض' : 'Jour déjà verrouillé — clôture refusée');
+      return;
+    }
     setClosing(true);
     setCloseNote('');
     try {
-      const r = await fetch('http://127.0.0.1:3100/api/z/close', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          day: zReport.date,
-          openingTime: '08:00',
-          closingTime: new Date().toLocaleTimeString('fr-FR'),
-          totals: {
-            salesCount: zReport.sales_count, totalHtCt: ct.ht, tva0BaseCt: ct.b0,
-            tva9BaseCt: ct.b9, tva9AmtCt: ct.a9, tva19BaseCt: ct.b19, tva19AmtCt: ct.a19,
-            totalTvaCt: ct.tva, totalTimbreCt: ct.timbre, totalTtcCt: ct.ttc,
-            especesGrossCt: ct.esp, cibTotalCt: ct.cib, dahabiyaTotalCt: 0,
-            creditGrantedCt: ct.cred, creditCollectedCt: ct.coll,
-            firstInvoice, lastInvoice,
-          },
-        }),
+      const closingTime = new Date().toLocaleTimeString('fr-FR');
+      const out = await commitZClose(zReport.date, '08:00', closingTime, {
+        salesCount: zReport.sales_count, totalHtCt: ct.ht, tva0BaseCt: ct.b0,
+        tva9BaseCt: ct.b9, tva9AmtCt: ct.a9, tva19BaseCt: ct.b19, tva19AmtCt: ct.a19,
+        totalTvaCt: ct.tva, totalTimbreCt: ct.timbre, totalTtcCt: ct.ttc,
+        especesGrossCt: ct.esp, cibTotalCt: ct.cib, dahabiyaTotalCt: 0,
+        creditGrantedCt: ct.cred, creditCollectedCt: ct.coll,
+        firstInvoice, lastInvoice,
       });
-      if (!r.ok) throw new Error(await r.text());
-      const out = (await r.json()) as { report_number: string; hash: string };
-      setClosure(out);
-      setPrevHash(out.hash);
+      if (!out) throw new Error('lane');
+      setClosure({ report_number: out.report_number, hash: out.hash });
+      setClosedRow({ report_number: out.report_number, closing_time: closingTime, hash: out.hash, prev_hash: out.prev_hash });
+      setPrevHash(out.prev_hash);
+      setDayLocked(true);
       setCloseNote(isAr ? 'تم الإغلاق والتوقيع في SQLite' : 'Clôturé et signé en SQLite');
     } catch {
-      setClosure({ report_number: `${zReport.report_number}-P`, hash: chainHash });
-      setCloseNote(isAr ? 'وضع مؤقت: لا يوجد اتصال بقاعدة البيانات' : 'Provisoire: loopback injoignable');
+      setCloseNote(isAr
+        ? 'تعذّر الإغلاق: اليوم مقفل أو المجاميع لا تطابق الدفتر أو المسار الجبائي غائب'
+        : 'Clôture impossible : jour verrouillé, totaux divergents ou voie fiscale absente');
     } finally {
       setClosing(false);
     }
@@ -157,8 +214,9 @@ export const DailyZReportView: React.FC = () => {
             ))}
           </div>
           <button
-            onClick={handleClose}
-            disabled={closing || !!closure}
+            onClick={() => void handleClose()}
+            disabled={closing || !!closure || !canClose}
+            title={!canClose ? (isAr ? 'الإغلاق للمدير فأعلى' : 'Clôture réservée au gérant+') : undefined}
             className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 cursor-pointer"
           >
             <Lock className="w-4 h-4" />
@@ -181,7 +239,11 @@ export const DailyZReportView: React.FC = () => {
             <div className="text-xl font-black text-emerald-400 font-mono mt-1">
               {formatDZD(zReport.total_ttc, false)}
             </div>
-            <span className="text-[10px] text-slate-500 mt-0.5 block">{zReport.sales_count} {isAr ? 'عمليات بيع اليوم' : 'ventes enregistrées'}</span>
+            <span className="text-[10px] text-slate-500 mt-0.5 block">
+              {zReport.sales_count} {isAr
+                ? (zReport.sales_count === 1 ? 'عملية بيع اليوم' : 'عمليات بيع اليوم')
+                : (zReport.sales_count === 1 ? 'vente enregistrée' : 'ventes enregistrées')}
+            </span>
           </div>
 
           <div className="bg-[#111722] border border-[#1e293b] rounded-xl p-3.5 shadow-sm">
@@ -291,9 +353,13 @@ export const DailyZReportView: React.FC = () => {
             <span>{isAr ? 'فواتير اليوم — إلغاء قانوني' : 'Factures du jour — annulation légale'}</span>
           </h3>
           <p className="text-[11px] text-slate-500 mb-3">
-            {isAr
-              ? 'الإلغاء يبقي السطر ويوثق السبب — لا حذف أبداً. يتطلب اتصال المسار الجبائي.'
-              : 'L’annulation conserve la ligne et journalise le motif — jamais de suppression. Exige la voie fiscale.'}
+            {dayLocked || closedRow
+              ? (isAr
+                ? 'اليوم مقفل قانونياً (Z FINALISÉ) — الإلغاء مرفوض، السجل للقراءة فقط.'
+                : 'Jour légalement verrouillé (Z FINALISÉ) — annulation refusée, journal en lecture seule.')
+              : (isAr
+                ? 'الإلغاء يبقي السطر ويوثق السبب — لا حذف أبداً. يتطلب اتصال المسار الجبائي.'
+                : 'L’annulation conserve la ligne et journalise le motif — jamais de suppression. Exige la voie fiscale.')}
           </p>
           {todaySales.length === 0 && (
             <div className="text-xs text-slate-500">{isAr ? 'لا فواتير اليوم بعد.' : 'Aucune facture aujourd’hui.'}</div>
@@ -308,6 +374,10 @@ export const DailyZReportView: React.FC = () => {
                 {s.status === 'CANCELLED' ? (
                   <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-rose-950/60 text-rose-300 border border-rose-900/60">
                     {isAr ? 'ملغاة' : 'ANNULÉE'}
+                  </span>
+                ) : (dayLocked || closedRow) ? (
+                  <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-slate-800/60 text-slate-400 border border-slate-700/60" title={isAr ? 'اليوم مقفل قانونياً' : 'Jour verrouillé'}>
+                    <Lock className="w-3 h-3 inline" />
                   </span>
                 ) : canVoid ? (
                   voidTargetId === s.id ? (
@@ -369,29 +439,29 @@ export const DailyZReportView: React.FC = () => {
             <div className="font-bold text-lg uppercase">{storeProfile.store_name}</div>
             <div className="text-xs">{storeProfile.company_owner} — {storeProfile.address}</div>
             <div className="text-[11px]">RC: {storeProfile.rc_number} | NIF: {storeProfile.nif_number} | NIS: {storeProfile.nis_number} | AI: {storeProfile.ai_number}</div>
-            <div className="font-bold mt-2">RAPPORT Z DE CLÔTURE — {closure ? closure.report_number : zReport.report_number}{closure && ' (FINALISÉ)'}</div>
-            <div className="text-[11px]">Date: {zReport.date} — Clôture: {zReport.closed_at} — Ventes: {zReport.sales_count}</div>
-            <div className="text-[11px]">Factures: {firstInvoice} → {lastInvoice}</div>
-          </div>
-          <table className="w-full my-3 text-[11px]">
-            <tbody>
-              <tr className="border-b border-black"><td>Total HT</td><td className="text-end">{ct.ht / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>TVA 0% — base</td><td className="text-end">{ct.b0 / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>TVA 9% — base / montant</td><td className="text-end">{ct.b9 / 100} / {ct.a9 / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>TVA 19% — base / montant</td><td className="text-end">{ct.b19 / 100} / {ct.a19 / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>Total TVA</td><td className="text-end">{ct.tva / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>Timbre fiscal (Art. 136)</td><td className="text-end">{ct.timbre / 100} DZD</td></tr>
-              <tr className="font-bold"><td>TOTAL TTC</td><td className="text-end">{ct.ttc / 100} DZD</td></tr>
-            </tbody>
-          </table>
-          <table className="w-full my-3 text-[11px]">
-            <tbody>
-              <tr className="border-b border-black"><td>Espèces (timbre inclus)</td><td className="text-end">{ct.esp / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>CIB / Dahabiya</td><td className="text-end">{ct.cib / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>Crédit accordé</td><td className="text-end">{ct.cred / 100} DZD</td></tr>
-              <tr className="border-b border-black"><td>Crédit recouvré</td><td className="text-end">{ct.coll / 100} DZD</td></tr>
-            </tbody>
-          </table>
+            <div className="font-bold mt-2">RAPPORT Z DE CLÔTURE — {tvReportNo}{closure && ' (FINALISÉ)'}</div>
+            <div className="text-[11px]">Date: {zReport.date} — Clôture: {tvClosedAt} — Ventes: {tv.salesCount}</div>
+            <div className="text-[11px]">Factures: {tv.first} → {tv.last}</div>
+            </div>
+            <table className="w-full my-3 text-[11px]">
+              <tbody>
+                <tr className="border-b border-black"><td>Total HT</td><td className="text-end">{tv.ht / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>TVA 0% — base</td><td className="text-end">{tv.b0 / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>TVA 9% — base / montant</td><td className="text-end">{tv.b9 / 100} / {tv.a9 / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>TVA 19% — base / montant</td><td className="text-end">{tv.b19 / 100} / {tv.a19 / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>Total TVA</td><td className="text-end">{tv.tva / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>Timbre fiscal (Art. 136)</td><td className="text-end">{tv.timbre / 100} DZD</td></tr>
+                <tr className="font-bold"><td>TOTAL TTC</td><td className="text-end">{tv.ttc / 100} DZD</td></tr>
+              </tbody>
+            </table>
+            <table className="w-full my-3 text-[11px]">
+              <tbody>
+                <tr className="border-b border-black"><td>Espèces (timbre inclus)</td><td className="text-end">{tv.esp / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>CIB / Dahabiya</td><td className="text-end">{tv.bank / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>Crédit accordé</td><td className="text-end">{tv.cred / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>Crédit recouvré</td><td className="text-end">{tv.coll / 100} DZD</td></tr>
+              </tbody>
+            </table>
           <div className="text-[10px] break-all border-t border-black pt-2">
             <div>prev_hash: {prevHash}</div>
             <div className="font-bold">hash: {chainHash}</div>
@@ -421,13 +491,13 @@ export const DailyZReportView: React.FC = () => {
             <div className="font-bold text-sm uppercase">*** RAPPORT Z DE CAISSE ***</div>
             <div className="text-[10px]">CLÔTURE JOURNALIÈRE FISCALE</div>
             <div className="text-[10px] pt-1">
-              {closure ? closure.report_number : zReport.report_number}{closure && ' — FINALISÉ'}
+              {tvReportNo}{closure && ' — FINALISÉ'}
             </div>
             <div className="text-[10px]">
-              Date: {zReport.date} - Heure: {zReport.closed_at}
+              Date: {zReport.date} - Heure: {tvClosedAt}
             </div>
             <div className="text-[9px] break-words">
-              {firstInvoice} → {lastInvoice}
+              {tv.first} → {tv.last}
             </div>
             {closeNote && <div className="text-[9px] font-bold">{closeNote}</div>}
           </div>
@@ -435,27 +505,27 @@ export const DailyZReportView: React.FC = () => {
           <div className="py-2 border-b border-black space-y-1 text-[10px]">
             <div className="flex justify-between">
               <span>Nombre de Ventes:</span>
-              <span className="font-bold">{zReport.sales_count}</span>
+              <span className="font-bold">{tv.salesCount}</span>
             </div>
             <div className="flex justify-between">
               <span>Total HT:</span>
-              <span>{zReport.total_ht.toFixed(2)}</span>
+              <span>{(tv.ht / 100).toFixed(2)}</span>
             </div>
             <div className="flex justify-between">
-              <span>TVA 9% (Base {zReport.tva_9_base.toFixed(2)}):</span>
-              <span>{zReport.tva_9_amount.toFixed(2)}</span>
+              <span>TVA 9% (Base {(tv.b9 / 100).toFixed(2)}):</span>
+              <span>{(tv.a9 / 100).toFixed(2)}</span>
             </div>
             <div className="flex justify-between">
-              <span>TVA 19% (Base {zReport.tva_19_base.toFixed(2)}):</span>
-              <span>{zReport.tva_19_amount.toFixed(2)}</span>
+              <span>TVA 19% (Base {(tv.b19 / 100).toFixed(2)}):</span>
+              <span>{(tv.a19 / 100).toFixed(2)}</span>
             </div>
             <div className="flex justify-between font-semibold">
               <span>Timbre Fiscal (Espèces):</span>
-              <span>{zReport.total_timbre.toFixed(2)}</span>
+              <span>{(tv.timbre / 100).toFixed(2)}</span>
             </div>
             <div className="flex justify-between font-black text-xs pt-1 border-t border-black">
               <span>TOTAL TTC:</span>
-              <span>{zReport.total_ttc.toFixed(2)} DZD</span>
+              <span>{(tv.ttc / 100).toFixed(2)} DZD</span>
             </div>
           </div>
 
@@ -463,19 +533,19 @@ export const DailyZReportView: React.FC = () => {
             <div className="font-bold uppercase pb-0.5">Ventilation des Paiements:</div>
             <div className="flex justify-between">
               <span>Espèces:</span>
-              <span>{zReport.total_especes.toFixed(2)} DZD</span>
+              <span>{(tv.esp / 100).toFixed(2)} DZD</span>
             </div>
             <div className="flex justify-between">
               <span>CIB / Dahabiya:</span>
-              <span>{zReport.total_cib_dahabiya.toFixed(2)} DZD</span>
+              <span>{(tv.bank / 100).toFixed(2)} DZD</span>
             </div>
             <div className="flex justify-between">
               <span>Crédit Client (Carnet):</span>
-              <span>{zReport.total_credit_granted.toFixed(2)} DZD</span>
+              <span>{(tv.cred / 100).toFixed(2)} DZD</span>
             </div>
             <div className="flex justify-between">
               <span>Règlements Crédits Reçus:</span>
-              <span>{zReport.total_credit_settled.toFixed(2)} DZD</span>
+              <span>{(tv.coll / 100).toFixed(2)} DZD</span>
             </div>
           </div>
 

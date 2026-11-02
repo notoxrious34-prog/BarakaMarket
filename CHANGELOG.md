@@ -1,5 +1,15 @@
 # CHANGELOG — Baraka Market
 
+## Unreleased — #004 legal day-lock (Z) (2026-11-02)
+- `z_reports.close_kind` (`DAY` legal 1/day vs `SHIFT`); `LATEST_SCHEMA_VERSION 6`.
+- `finalizeZReport` refuses 2nd DAY close + verifies 16 totals vs ledger; locked day refuses
+  shift-close / new sales / voids (idempotent replays exempt).
+- Rust `z_close` + `daily_z.closed`; TS `commitZClose` (invoke → loopback, never fakes a lock).
+- Z view: no provisional `-P`; tickets reprint from the stored DAY row; voids locked; close gated
+  `z.close`; fixed `onClick={void handleClose()}` render loop + prev_hash display.
+- Lane: `Z-2026-000003 FINALISÉ` (714.00 DZD, genesis→`b47be2d4…`), 2nd close refused `400`,
+  reload `TICKET_EQUAL: true`, vision PASS 1366 + 768. **308/308** · 19/19 Rust.
+
 ## Unreleased — #003 SQLite invoke bridge + owner tasks (2026-11-02)
 - Rust: `next_invoice` / `void_sale` / `daily_z` / `backup_db` (+4 invoke commands); 18/18.
 - TS: `commitVoid` / `backupDatabase` (invoke → loopback) + `fetchDailyZ` (native-only);

@@ -266,7 +266,9 @@ CREATE TABLE IF NOT EXISTS z_reports (
   last_invoice_number  TEXT  NOT NULL DEFAULT '',
   prev_hash          TEXT    NOT NULL DEFAULT '',
   hash               TEXT    NOT NULL,
-  finalized          INTEGER NOT NULL DEFAULT 1
+  finalized          INTEGER NOT NULL DEFAULT 1,
+  -- #004: DAY = legal day lock (one per day); SHIFT = cash-session snapshot.
+  close_kind         TEXT    NOT NULL DEFAULT 'DAY'
 );
 
 -- Legal void journal. Rows are NEVER deleted from sales; voids append here.

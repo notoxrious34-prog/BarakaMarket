@@ -131,6 +131,18 @@ fn void_sale(
     fiscal::void_sale(&mut conn, &saleId, &reason, &voidedBy)
 }
 
+/// #004 (Phase A): legal day close — recompute, lock, chain (native lane).
+#[tauri::command]
+fn z_close(
+    day: String,
+    opening_time: String,
+    closing_time: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::z_close(&mut conn, &day, &opening_time, &closing_time)
+}
+
 /// #003 (Phase A): day summary for the Z lane (read-only; lock lives in #004).
 #[tauri::command]
 fn daily_z(day: String) -> Result<serde_json::Value, String> {
@@ -228,6 +240,7 @@ fn main() {
             next_invoice,
             void_sale,
             daily_z,
+            z_close,
             backup_db,
             product_upsert,
             product_list,

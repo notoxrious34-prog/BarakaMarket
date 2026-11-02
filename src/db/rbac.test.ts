@@ -23,11 +23,11 @@ const cleanup = (p: string) => {
   }
 };
 
-test('T8/T11: fresh DB seeds the owner at latest schema (v5)', () => {
+test('T8/T11: fresh DB seeds the owner at latest schema (v6)', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
-    assert.equal(LATEST_SCHEMA_VERSION, 5);
+    assert.equal(LATEST_SCHEMA_VERSION, 6);
     const users = b.listUsers();
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
@@ -95,7 +95,7 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
   }
 });
 
-test('T8/T11: legacy v3 file climbs to v5 and reseeds the owner', () => {
+test('T8/T11: legacy v3 file climbs to v6 and reseeds the owner', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
@@ -110,7 +110,7 @@ test('T8/T11: legacy v3 file climbs to v5 and reseeds the owner', () => {
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
     assert.equal(c.verifyUser('owner', '1234').ok, true);
-    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 5);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 6);
     c.close();
   } finally {
     cleanup(p);

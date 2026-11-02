@@ -74,14 +74,14 @@ const MainLayout: React.FC = () => {
       </main>
 
       {/* Slim status bar: cashier • version • local DB (fiscal IDs live on receipts + settings) */}
-      <footer className="px-4 py-1 bg-slate-100 dark:bg-[#070a0f] border-t border-slate-200 dark:border-[#162030] text-[10px] text-slate-600 dark:text-slate-500 flex items-center justify-between gap-2 select-none transition-colors">
-        <span>
+      <footer className="px-4 py-1 bg-slate-100 dark:bg-[#070a0f] border-t border-slate-200 dark:border-[#162030] text-[10px] text-slate-600 dark:text-slate-500 flex items-center justify-between gap-2 flex-wrap select-none transition-colors">
+        <span className="min-w-0 truncate">
           {language === 'ar' ? 'الكاشير:' : 'Caissier:'}{' '}
           <span className="text-slate-800 dark:text-slate-300 font-medium">
             {session ? `${session.displayName} (${session.role})` : '—'}
           </span>
         </span>
-        <span className="flex items-center gap-2">
+        <span className="flex items-center gap-2 min-w-0 flex-wrap justify-end">
           {outboxPending > 0 && (
             <span className="relative">
               <button
@@ -141,9 +141,10 @@ const MainLayout: React.FC = () => {
             </span>
           )}
           {isFiscalMode ? (
-            <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+            <span className="flex items-center gap-1 text-emerald-400 font-semibold whitespace-nowrap">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
-              ● REGISTRE FISCAL ACTIF (SQLITE WAL)
+              <span className="hidden min-[900px]:inline">● REGISTRE FISCAL ACTIF (SQLITE WAL)</span>
+              <span className="min-[900px]:hidden">● FISCAL</span>
             </span>
           ) : (
             <>

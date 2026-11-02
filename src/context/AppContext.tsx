@@ -1580,7 +1580,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    const settledTotal = todaySettlements.reduce((sum, st) => sum + st.amount, 0);
+    // #004: ESPECES-only, timbre included (total_collected) — byte-aligned
+    // with computeDayAggregates (total_collected_ct) for the close check.
+    const settledTotal = todaySettlements
+      .filter(st => st.payment_method === 'ESPECES')
+      .reduce((sum, st) => sum + (st.total_collected ?? st.amount), 0);
 
     const report: DailyZReport = {
       date: today,

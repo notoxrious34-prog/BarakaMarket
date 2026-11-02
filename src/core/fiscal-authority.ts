@@ -188,7 +188,7 @@ export function mintRowId(): string {
 }
 
 async function invokeLane<T>(
-  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'backup_db',
+  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db',
   args: Record<string, unknown>,
 ): Promise<T | null> {
   if (!isTauriRuntime()) return null;
@@ -308,21 +308,66 @@ export async function backupDatabase(
 /**
  * #003 (Phase A): native-first day summary for the Z lane (read-only).
  * Browser lane returns null — local sales state owns the preview there.
- * The legal day-LOCK lives in #004.
+ * #004 adds `closed`: true when a legal DAY close freezes the day.
  */
 export async function fetchDailyZ(
   day: string,
-): Promise<{ day: string; sales_count: number; total_ttc_ct: number; voids_count: number } | null> {
-  const native = await invokeLane<{ day?: string; sales_count?: number; total_ttc_ct?: number; voids_count?: number }>(
+): Promise<{ day: string; sales_count: number; total_ttc_ct: number; voids_count: number; closed: boolean } | null> {
+  const native = await invokeLane<{ day?: string; sales_count?: number; total_ttc_ct?: number; voids_count?: number; closed?: boolean }>(
     'daily_z', { day },
   );
   if (
     native && native.day === day && typeof native.sales_count === 'number'
     && typeof native.total_ttc_ct === 'number' && typeof native.voids_count === 'number'
   ) {
-    return { day, sales_count: native.sales_count, total_ttc_ct: native.total_ttc_ct, voids_count: native.voids_count };
+    return { day, sales_count: native.sales_count, total_ttc_ct: native.total_ttc_ct, voids_count: native.voids_count, closed: native.closed === true };
   }
   return null;
+}
+
+/** #004: legal-close totals, same shape the Z view already builds. */
+export interface ZCloseTotals {
+  salesCount: number; totalHtCt: number; tva0BaseCt: number; tva9BaseCt: number;
+  tva9AmtCt: number; tva19BaseCt: number; tva19AmtCt: number; totalTvaCt: number;
+  totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
+  dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
+  firstInvoice: string; lastInvoice: string;
+}
+
+/**
+ * #004 (Phase A): native-first legal day close. Inside the shell the Rust
+ * lane recomputes from its own ledger (caller totals are not trusted there),
+ * locks the day and chains the hash — zero loopback hops. Everywhere else
+ * the loopback POST applies; the server verifies the totals against ITS
+ * ledger and refuses mismatches and duplicate closes. Tauri + native refusal
+ * => null (the day is NOT closed — never fake a legal lock).
+ */
+export async function commitZClose(
+  day: string, openingTime: string, closingTime: string, totals: ZCloseTotals,
+): Promise<{ report_number: string; hash: string; prev_hash: string } | null> {
+  const native = await invokeLane<{ report_number?: string; hash?: string; prev_hash?: string }>(
+    'z_close', { day, opening_time: openingTime, closing_time: closingTime },
+  );
+  if (native && native.report_number && native.hash && native.prev_hash) {
+    return { report_number: native.report_number, hash: native.hash, prev_hash: native.prev_hash };
+  }
+  if (isTauriRuntime()) return null;
+  try {
+    const token = await getLoopbackToken();
+    const r = await fetch(`${LOOPBACK_BASE}/api/z/close`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
+      body: JSON.stringify({ day, openingTime, closingTime, totals }),
+    });
+    if (!r.ok) return null;
+    const j = (await r.json()) as { report_number?: string; hash?: string; prev_hash?: string };
+    if (j.report_number && j.hash && j.prev_hash) {
+      return { report_number: j.report_number, hash: j.hash, prev_hash: j.prev_hash };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** Fire-and-forget 5-byte drawer-kick via the raw-print spool endpoint. */

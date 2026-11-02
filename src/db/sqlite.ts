@@ -173,7 +173,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 5;
+export const LATEST_SCHEMA_VERSION = 6;
 
 function schemaVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
@@ -299,6 +299,17 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 5');
     v = 5;
   }
+  // v5 → v6 (#004): close_kind marks DAY (legal lock, one per day) vs SHIFT
+  // (cash-session snapshot, several per day allowed). Fresh files get it from
+  // schema.sql; legacy files climb here.
+  if (v < 6) {
+    const cols = db.prepare('PRAGMA table_info(z_reports)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'close_kind')) {
+      db.exec("ALTER TABLE z_reports ADD COLUMN close_kind TEXT NOT NULL DEFAULT 'DAY'");
+    }
+    db.exec('PRAGMA user_version = 6');
+    v = 6;
+  }
   // Always-ensured: partial unique index lives here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -410,6 +421,60 @@ function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z', year: number)
 }
 
 const pad6 = (n: number) => n.toString().padStart(6, '0');
+
+/**
+ * #004 (Phase A): true when a legal DAY close already freezes `day`.
+ * SHIFT snapshots never lock — several shifts may close the same day.
+ */
+export function isDayLocked(db: DatabaseSync, day: string): boolean {
+  const r = db.prepare(
+    "SELECT 1 AS one FROM z_reports WHERE day = ? AND close_kind = 'DAY' LIMIT 1",
+  ).get(day) as { one: number } | undefined;
+  return !!r;
+}
+
+/** #004: ledger-truth aggregates for one business day (COMPLETED sales + ESPECES settlements). */
+export interface DayAggregatesCt {
+  salesCount: number; totalHtCt: number; tva0BaseCt: number; tva9BaseCt: number;
+  tva9AmtCt: number; tva19BaseCt: number; tva19AmtCt: number; totalTvaCt: number;
+  totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
+  dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
+  firstInvoice: string; lastInvoice: string;
+}
+
+export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregatesCt {
+  const agg = db.prepare(
+    `SELECT COUNT(*) AS n,
+       COALESCE(SUM(total_ht_ct), 0) AS ht,
+       COALESCE(SUM(tva0_base_ct), 0) AS b0,
+       COALESCE(SUM(tva9_base_ct), 0) AS b9, COALESCE(SUM(tva9_amt_ct), 0) AS a9,
+       COALESCE(SUM(tva19_base_ct), 0) AS b19, COALESCE(SUM(tva19_amt_ct), 0) AS a19,
+       COALESCE(SUM(total_tva_ct), 0) AS tva,
+       COALESCE(SUM(timbre_ct), 0) AS timbre,
+       COALESCE(SUM(total_ttc_ct), 0) AS ttc,
+       COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN payment_method = 'CIB' THEN total_ttc_ct ELSE 0 END), 0) AS cib,
+       COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0) AS dah,
+       COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0) AS cred,
+       MIN(invoice_number) AS first, MAX(invoice_number) AS last
+     FROM sales WHERE status = 'COMPLETED' AND substr(created_at, 1, 10) = ?`,
+  ).get(day) as {
+    n: number; ht: number; b0: number; b9: number; a9: number; b19: number; a19: number;
+    tva: number; timbre: number; ttc: number; cash: number; cib: number; dah: number; cred: number;
+    first: string | null; last: string | null;
+  };
+  const settled = db.prepare(
+    `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
+     WHERE payment_method = 'ESPECES' AND substr(date, 1, 10) = ?`,
+  ).get(day) as { t: number };
+  return {
+    salesCount: agg.n, totalHtCt: agg.ht, tva0BaseCt: agg.b0, tva9BaseCt: agg.b9,
+    tva9AmtCt: agg.a9, tva19BaseCt: agg.b19, tva19AmtCt: agg.a19, totalTvaCt: agg.tva,
+    totalTimbreCt: agg.timbre, totalTtcCt: agg.ttc, especesGrossCt: agg.cash,
+    cibTotalCt: agg.cib, dahabiyaTotalCt: agg.dah, creditGrantedCt: agg.cred,
+    creditCollectedCt: settled.t, firstInvoice: agg.first ?? '', lastInvoice: agg.last ?? '',
+  };
+}
 
 export function openBarakaDb(dbPath: string): BarakaDb {
   if (dbPath !== ':memory:') {
@@ -1031,6 +1096,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         if (!s) throw new Error(`[db] cash session not found: ${sessionId}`);
         if (s.status !== 'OPEN') throw new Error(`[db] cash session already ${s.status}: ${sessionId}`);
         const periodEnd = new Date().toISOString();
+        // #004: a legally closed day is frozen — no shift may post to it.
+        if (isDayLocked(db, periodEnd.slice(0, 10))) {
+          throw new Error(`[db] day ${periodEnd.slice(0, 10)} is already legally closed (Z FINALISÉ) — shift close refused`);
+        }
         const agg = db.prepare(
           `SELECT COUNT(*) AS n,
              COALESCE(SUM(total_ht_ct), 0) AS ht,
@@ -1077,8 +1146,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
             especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
             credit_collected_ct, first_invoice_number, last_invoice_number,
-            prev_hash, hash, finalized)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+            prev_hash, hash, finalized, close_kind)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'SHIFT')`,
         ).run(
           zNumber, day, s.opened_at, periodEnd,
           agg.n, agg.ht, agg.b9, agg.a9, agg.b19, agg.a19, agg.a9 + agg.a19,
@@ -1400,7 +1469,6 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const year = parseInt(createdAt.slice(0, 4), 10);
       const id = header.id ?? randomUUID();
       const clientSaleId = header.client_sale_id ?? null;
-
       // T1 (ADR-021): idempotent commit. A retried POST (double click, replay
       // after a dropped connection) returns the ORIGINAL row — seq, stock and
       // ledger are never consumed twice.
@@ -1410,6 +1478,13 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       if (clientSaleId) {
         const existing = byKey(clientSaleId);
         if (existing) return { id: existing.id, invoice_number: existing.invoice_number, ticket_number: existing.ticket_number };
+      }
+      // #004: a legally closed day is frozen — no new posting may land in it.
+      // (Idempotent replays return above, so retries of an already-recorded
+      // sale never trip this guard.)
+      const saleDay = createdAt.slice(0, 10);
+      if (isDayLocked(db, saleDay)) {
+        throw new Error(`[db] day ${saleDay} is already legally closed (Z FINALISÉ) — sale refused`);
       }
 
       db.exec('BEGIN IMMEDIATE');
@@ -1480,10 +1555,15 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       if (!reason.trim()) throw new Error('[db] void reason is required (legal journal)');
       db.exec('BEGIN IMMEDIATE');
       try {
-        const sale = db.prepare('SELECT id, invoice_number, status FROM sales WHERE id = ?').get(saleId) as
-          | { id: string; invoice_number: string; status: string } | undefined;
+        const sale = db.prepare('SELECT id, invoice_number, status, created_at FROM sales WHERE id = ?').get(saleId) as
+          | { id: string; invoice_number: string; status: string; created_at: string } | undefined;
         if (!sale) throw new Error(`[db] sale not found: ${saleId}`);
         if (sale.status === 'CANCELLED') throw new Error('[db] sale already voided');
+        // #004: a legally closed day is frozen — voids to it are refused.
+        const day = sale.created_at.slice(0, 10);
+        if (isDayLocked(db, day)) {
+          throw new Error(`[db] day ${day} is already legally closed (Z FINALISÉ) — void refused`);
+        }
         db.prepare("UPDATE sales SET status = 'CANCELLED' WHERE id = ?").run(saleId);
         db.prepare(
           'INSERT INTO void_log (sale_id, invoice_number, reason, voided_by, voided_at) VALUES (?, ?, ?, ?, ?)',
@@ -1686,6 +1766,38 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       }
       const year = parseInt(input.day.slice(0, 4), 10);
       if (!Number.isInteger(year) || year < 2000 || year > 2100) throw new Error('[db] z_report invalid day');
+      // #004: one legal DAY close per day — a second finalize is refused
+      // (the Z seq is never consumed twice for the same day).
+      if (isDayLocked(db, input.day)) {
+        throw new Error(`[db] day ${input.day} is already legally closed (Z FINALISÉ) — close refused`);
+      }
+      // #004: the caller's totals must reproduce the SQLite ledger exactly.
+      // The UI merges CIB+DAHABIYA into one lane, so the bank split compares
+      // combined; every other field compares one-to-one.
+      const ledger = computeDayAggregates(db, input.day);
+      const bad: string[] = [];
+      const num = (label: string, got: number, want: number) => {
+        if (got !== want) bad.push(`${label}: caller=${got} ledger=${want}`);
+      };
+      num('salesCount', t.salesCount, ledger.salesCount);
+      num('totalHtCt', t.totalHtCt, ledger.totalHtCt);
+      num('tva0BaseCt', t.tva0BaseCt, ledger.tva0BaseCt);
+      num('tva9BaseCt', t.tva9BaseCt, ledger.tva9BaseCt);
+      num('tva9AmtCt', t.tva9AmtCt, ledger.tva9AmtCt);
+      num('tva19BaseCt', t.tva19BaseCt, ledger.tva19BaseCt);
+      num('tva19AmtCt', t.tva19AmtCt, ledger.tva19AmtCt);
+      num('totalTvaCt', t.totalTvaCt, ledger.totalTvaCt);
+      num('totalTimbreCt', t.totalTimbreCt, ledger.totalTimbreCt);
+      num('totalTtcCt', t.totalTtcCt, ledger.totalTtcCt);
+      num('especesGrossCt', t.especesGrossCt, ledger.especesGrossCt);
+      num('bankSplitCt', t.cibTotalCt + t.dahabiyaTotalCt, ledger.cibTotalCt + ledger.dahabiyaTotalCt);
+      num('creditGrantedCt', t.creditGrantedCt, ledger.creditGrantedCt);
+      num('creditCollectedCt', t.creditCollectedCt, ledger.creditCollectedCt);
+      if (t.firstInvoice !== ledger.firstInvoice) bad.push(`firstInvoice: caller=${t.firstInvoice} ledger=${ledger.firstInvoice}`);
+      if (t.lastInvoice !== ledger.lastInvoice) bad.push(`lastInvoice: caller=${t.lastInvoice} ledger=${ledger.lastInvoice}`);
+      if (bad.length > 0) {
+        throw new Error(`[db] z_report totals do not match SQLite ledger for ${input.day}: ${bad.join('; ')}`);
+      }
       const prev = ((): string => {
         const row = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as { hash: string } | undefined;
         return row?.hash ?? GENESIS_Z_HASH;
@@ -1698,8 +1810,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
           credit_collected_ct, first_invoice_number, last_invoice_number,
-          prev_hash, hash, finalized)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+          prev_hash, hash, finalized, close_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
       ).run(
         number, input.day, input.openingTime, input.closingTime,
         t.salesCount, t.totalHtCt, t.tva0BaseCt, t.tva9BaseCt, t.tva9AmtCt,

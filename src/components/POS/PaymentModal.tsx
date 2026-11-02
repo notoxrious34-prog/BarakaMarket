@@ -179,7 +179,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
               <span>{isAr ? 'الدفع في الصندوق / Règlement Caisse' : 'Règlement Caisse / الدفع في الصندوق'}</span>
             </h3>
             <p className="text-[11px] text-slate-500">
-              {currentCart.length} {isAr ? 'منتجات في السلة' : 'articles dans le panier'} · F1 exact · F2 1000 · F3 2000 · F4 5000
+              {currentCart.length} {isAr
+                ? (currentCart.length === 1 ? 'منتج واحد في السلة' : 'منتجات في السلة')
+                : (currentCart.length === 1 ? 'article dans le panier' : 'articles dans le panier')} · F1 exact · F2 1000 · F3 2000 · F4 5000
             </p>
           </div>
           <button

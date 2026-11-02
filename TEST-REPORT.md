@@ -174,3 +174,14 @@ Owner tasks (2026-11-02, all approved via clarify before implementation):
   Observation (by design, no fix without approval): `product_barcodes` holds aliases only —
   primary barcodes live in `products.barcode`.
 - Gates after the reception change: **302/302** · `tsc` clean · `build 1.52s` (iron app closed after smoke).
+
+## Phase 6 — #004 legal day-lock (Z) (2026-11-02)
+| Slice | Change | Result |
+|---|---|---|
+| Schema + migrate | `z_reports.close_kind` (`DAY` legal 1/day vs `SHIFT` session snapshot) · `LATEST_SCHEMA_VERSION 6` (TS + Rust, legacy climb) | ✅ version-pin tests bumped v5→v6 |
+| TS ledger (`sqlite.ts`) | `isDayLocked` + `computeDayAggregates` (COMPLETED + ESPECES settlements) · `finalizeZReport` refuses 2nd DAY close + verifies 16 caller totals vs ledger · shift/sale/void refuse on locked day | ✅ `zclose.test.ts` 4/4 (settle→close→verify-chain, hash pinned vs `node:crypto`, reprint byte-identical via `buildZTicketText`) |
+| Native lane (`fiscal.rs` + `main.rs`) | `z_close` (recompute + lock + chain in 1 Immediate tx) · sale/void day guards · `daily_z.closed` · `z_close` invoke cmd | ✅ `cargo test` **19/19** |
+| TS lane (`fiscal-authority.ts`) | `commitZClose` (invoke → loopback, never fakes a lock) · `ZTicketData` canonical 80mm text | ✅ `commit-lane` +2 (fallback + native-only) |
+| UI (`DailyZReportView.tsx`) | provisional `-P` fallback deleted · mount probe (`/api/z/list` DAY row = reprint source) + `fetchDailyZ.closed` · tickets render from the stored row (`tv.*`), live cards stay managerial · voids locked + close gated `z.close` (manager+) · FR plurals · `onClick={void handleClose()}` render-loop bug fixed · prev_hash display fixed (was own hash) · footer wraps <900px | ✅ lane: `Z-2026-000003 FINALISÉ`, lock banner, ticket reload `TICKET_EQUAL: true`, vision PASS 1366 + 768 |
+| Live ledger proof | loopback restarted on new code (stale v5 process killed) · 2 sales + 1 ESPECES settlement + verified close (`71400ct`, chain genesis→`b47be2d4…`) · 2nd close → `400 already legally closed (Z FINALISÉ)` | ✅ day-lock enforced live, not cosmetic |
+| **Total** | | **✅ 308/308, 0 fail · `tsc` clean · `lint` clean · `vite build` ✅** |
