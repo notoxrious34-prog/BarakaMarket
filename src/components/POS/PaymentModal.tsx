@@ -295,7 +295,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
 
             {paymentMethod === 'ESPECES' && (
               <div className="flex justify-between text-xs text-amber-300/90 font-medium ps-2 border-s-2 border-amber-500">
-                <span>{isAr ? 'حق الطابع المالي (المادة 136 قانون الطابع):' : 'Droit de Timbre Fiscal (1% Espèces):'}</span>
+                <span>{isAr ? 'حق الطابع المالي (المادة 136 قانون الطابع) — الحد الأدنى 10 دج:' : 'Droit de Timbre Fiscal (1% Espèces) — plancher 10 DA :'}</span>
                 <span className="font-mono" dir="ltr">+{formatDZD(totals.timbre_fiscal)}</span>
               </div>
             )}

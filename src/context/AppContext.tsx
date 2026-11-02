@@ -32,7 +32,7 @@ import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calc
 import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
 import { SESSION_IDLE_MS, type Session } from '../core/rbac.js';
-import { mintSaleKey, enqueueOutbox, replayOutbox, type StorageLike } from '../core/sale-outbox';
+import { mintSaleKey, enqueueOutbox, replayOutbox, pendingOutboxCount, type StorageLike } from '../core/sale-outbox';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
@@ -173,6 +173,13 @@ interface AppContextType {
   unlockSession: (pin: string) => Promise<boolean>;
   changeOwnPin: (oldPin: string, newPin: string) => Promise<boolean>;
   refreshSessionUsers: () => Promise<void>;
+  /**
+   * A1 (PLAN-v1.2.0): visible outbox depth. >0 means fiscal payloads are
+   * parked locally (server unreachable) — the footer badge reads this.
+   */
+  outboxPending: number;
+  retryOutboxDrain: () => void;
+  outboxFailed: boolean;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -347,6 +354,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const isFiscalMode = authority === 'FISCAL_SQLITE';
   const authorityRef = useRef<AuthorityStatus>('PROVISIONAL');
   authorityRef.current = authority;
+
+  // A1 (PLAN-v1.2.0): visible outbox depth for the footer badge.
+  const [outboxPending, setOutboxPending] = useState<number>(() => pendingOutboxCount(lsStore));
+  // A1 honesty: a finished drain that leaves entries behind is a failure,
+  // not silence — the badge turns red until a drain fully clears the queue.
+  const [outboxFailed, setOutboxFailed] = useState<boolean>(false);
 
   // T8 (ADR-031): authenticated session. Persisted across reloads (never the
   // PIN — only the verified identity + timestamps). Stale sessions die by
@@ -917,7 +930,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
     } catch { /* next drain will retry — the queue persists */ }
+    finally {
+      const left = pendingOutboxCount(lsStore);
+      setOutboxPending(left);
+      setOutboxFailed(left > 0);
+    }
   };
+
+  /** A1: manual retry from the footer badge (same lane gate as auto-drain). */
+  const retryOutboxDrain = (): void => { void drainOutbox(); };
 
   // Drain whenever the authority settles on the fiscal lane (probe return,
   // loopback restart, first mount with the server already up).
@@ -1028,6 +1049,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           header: fiscalHeader, items: payloadItems,
           enqueuedAt: createdAt, attempts: 0,
         });
+        setOutboxPending(pendingOutboxCount(lsStore)); // A1: badge now
         return provisional;
       }
       const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
@@ -1157,6 +1179,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         key: settleKey, kind: 'settlement', provisionalId: settlement.id,
         header: fiscalInput, items: [], enqueuedAt: nowIso, attempts: 0,
       });
+      setOutboxPending(pendingOutboxCount(lsStore)); // A1: badge now
     } else {
       // T10: authoritative debt collection leaves an audit row.
       auditFiscal('settlement.commit', `${settlement.receipt_number} · ${settlement.total_collected} DZD`);
@@ -1585,6 +1608,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         unlockSession,
         changeOwnPin,
         refreshSessionUsers,
+        outboxPending,
+        retryOutboxDrain,
+        outboxFailed,
       }}
     >
       {children}

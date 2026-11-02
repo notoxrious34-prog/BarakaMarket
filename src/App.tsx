@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { APP_VERSION } from './core/version';
 import { Navbar } from './components/Navbar';
 import { PosView } from './components/POS/PosView';
 import { ProductsStockView } from './components/Inventory/ProductsStockView';
@@ -34,6 +35,9 @@ const MainLayout: React.FC = () => {
     isFiscalMode,
     session,
     sessionLocked,
+    outboxPending,
+    retryOutboxDrain,
+    outboxFailed,
   } = useApp();
 
   // Global hotkeys: Ctrl+L to toggle language
@@ -85,6 +89,23 @@ const MainLayout: React.FC = () => {
           </span>
         </span>
         <span className="flex items-center gap-2">
+          {outboxPending > 0 && (
+            <button
+              type="button"
+              onClick={retryOutboxDrain}
+              title={outboxFailed
+                ? (language === 'ar' ? 'تعذّر الإرسال — الخادم لا يستجيب. انقر لإعادة المحاولة' : "Échec d'envoi — serveur injoignable. Cliquer pour réessayer")
+                : (language === 'ar' ? 'عمليات بانتظار الإرسال للقاعدة — انقر لإعادة المحاولة' : 'Opérations en attente — cliquer pour réessayer')}
+              className={outboxFailed
+                ? 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-500/15 border border-red-400/60 text-red-300 font-semibold cursor-pointer hover:bg-red-500/25'
+                : 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-400/50 text-amber-300 font-semibold cursor-pointer hover:bg-amber-500/25'}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full inline-block animate-pulse ${outboxFailed ? 'bg-red-400' : 'bg-amber-400'}`} />
+              {language === 'ar'
+                ? (outboxFailed ? `تعذّر إرسال ${outboxPending}` : `${outboxPending} بانتظار الإرسال`)
+                : (outboxFailed ? `Échec × ${outboxPending}` : `${outboxPending} en attente`)}
+            </button>
+          )}
           {isFiscalMode ? (
             <span className="flex items-center gap-1 text-emerald-400 font-semibold">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
@@ -101,7 +122,7 @@ const MainLayout: React.FC = () => {
             </>
           )}
           <span className="text-slate-300 dark:text-slate-600">|</span>
-          <span className="uppercase tracking-widest text-amber-400/80">v1.0.1</span>
+          <span className="uppercase tracking-widest text-amber-400/80">v{APP_VERSION}</span>
         </span>
       </footer>
 

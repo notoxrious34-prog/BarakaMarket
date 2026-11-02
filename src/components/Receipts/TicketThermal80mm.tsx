@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { APP_VERSION } from '../../core/version';
 import { Sale } from '../../types';
 import { formatDZD } from '../../core/display';
 import { Printer, X, Download, Copy, Check, Cpu } from 'lucide-react';
@@ -136,6 +137,11 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
                 <span>Date: {formattedDate}</span>
                 <span className="font-bold">{sale.ticket_number}</span>
               </div>
+              {sale.ticket_number.startsWith('DRAFT-') && (
+                <div className="text-center font-bold border border-black px-1 py-0.5 my-0.5">
+                  {isAr ? '*** غير مُرحّلة جبائياً — مسودة ***' : '*** NON TRANSFÉRÉ — BROUILLON ***'}
+                </div>
+              )}
               <div className="flex justify-between">
                 <span>Caissier: {sale.cashier_name}</span>
                 <span>Caisse: 01</span>
@@ -198,7 +204,7 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
 
               {sale.timbre_fiscal > 0 && (
                 <div className="flex justify-between font-semibold">
-                  <span>Droit de Timbre (Espèces):</span>
+                  <span>Droit de Timbre (Espèces, min 10):</span>
                   <span>{sale.timbre_fiscal.toFixed(2)}</span>
                 </div>
               )}
@@ -234,7 +240,7 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
                 {storeProfile.receipt_footer}
               </div>
               <div className="text-[9px] font-semibold text-slate-500 pt-1">
-                Baraka Market v1.0 by BarakaDEV
+                Baraka Market v{APP_VERSION} by BarakaDEV
               </div>
             </div>
           </div>

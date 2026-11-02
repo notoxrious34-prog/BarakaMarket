@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  loadOutbox, enqueueOutbox, replayOutbox, mintSaleKey, OUTBOX_KEY, OUTBOX_CAP,
+  loadOutbox, enqueueOutbox, replayOutbox, mintSaleKey, pendingOutboxCount, OUTBOX_KEY, OUTBOX_CAP,
   type OutboxEntry, type StorageLike,
 } from './sale-outbox.js';
 
@@ -93,4 +93,12 @@ test('outbox: pre-kind (T1) entries load as sale kind', () => {
   const s = fakeStore();
   s.setItem(OUTBOX_KEY, JSON.stringify([{ key: 'OLD', provisionalId: 'SALE-OLD', header: {}, items: [], enqueuedAt: 'x', attempts: 0 }]));
   assert.equal(loadOutbox(s)[0].kind, 'sale');
+});
+
+test('A1: pendingOutboxCount mirrors queue depth (badge source)', () => {
+  const s = fakeStore();
+  assert.equal(pendingOutboxCount(s), 0);
+  enqueueOutbox(s, { key: 'K1', kind: 'sale', provisionalId: 'S1', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
+  enqueueOutbox(s, { key: 'K2', kind: 'settlement', provisionalId: 'S2', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
+  assert.equal(pendingOutboxCount(s), 2);
 });

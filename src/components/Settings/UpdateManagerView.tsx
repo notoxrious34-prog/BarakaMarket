@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { APP_VERSION } from '../../core/version';
 import { isTauriRuntime } from '../../core/fiscal-authority';
 import {
   checkForUpdate, relaunchApp, RELEASES_URL,
@@ -22,7 +23,7 @@ export const UpdateManagerView: React.FC = () => {
   const [done, setDone] = useState<string | null>(null);
 
   const canInstall = !!session && session.role !== 'cashier';
-  const current = '1.1.0'; // bumped with package.json + tauri.conf.json per release
+  const current = APP_VERSION; // single source: package.json via src/core/version.ts
 
   const check = async () => {
     setBusy(true);

@@ -154,6 +154,20 @@ function schemaSql(): string {
 }
 
 /**
+ * A2 (PLAN-v1.2.0): column-first indexes must apply AFTER migration, never
+ * at open. A legacy file predates columns the indexes reference (day,
+ * created_at, …) and CREATE INDEX validates immediately — the open dies
+ * before the climb. Tables/triggers/views ride the first pass (fail hard:
+ * genuine corruption); every CREATE INDEX rides the post-migration pass.
+ */
+const INDEX_STMT = /CREATE\s+(?:UNIQUE\s+)?INDEX[\s\S]*?;/gi;
+
+export function splitSchemaIndexes(sql: string): { core: string; indexes: string[] } {
+  const indexes = sql.match(INDEX_STMT) ?? [];
+  return { core: sql.replace(INDEX_STMT, ''), indexes };
+}
+
+/**
  * T3 foundation (ADR-021): versioned migrations. Fresh DBs are born at
  * LATEST_SCHEMA_VERSION via schema.sql; older files climb step by step.
  * Each step is idempotent (column/index existence checks) so a half-opened
@@ -405,7 +419,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
   db.exec('PRAGMA journal_mode = WAL;');
   db.exec('PRAGMA foreign_keys = ON;');
   db.exec('PRAGMA synchronous = NORMAL;');
-  db.exec(schemaSql());
+  // A2: core first (tables/triggers/views, fail hard); indexes after migrate.
+  const { core: schemaCore, indexes: schemaIndexes } = splitSchemaIndexes(schemaSql());
+  db.exec(schemaCore);
   // Idempotent migration for pre-existing baraka.db files (IF NOT EXISTS
   // does not add columns to old tables). Duplicate-column errors ignored.
   for (const ddl of [
@@ -452,6 +468,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
   } catch { /* fresh DB already has Q */ }
   // T3 foundation (ADR-021): climb older files to LATEST_SCHEMA_VERSION.
   migrateSchemaVersion(db);
+  // A2: post-migration index pass — every column now exists. Fail hard: a
+  // broken index at this point is genuine corruption, never legacy shape.
+  for (const ix of schemaIndexes) db.exec(ix);
   // TASK-BRK-016-MKT: seed the Algerian reference catalog once (idempotent —
   // pre-seeded DBs are detected by row count, never re-inserted).
   try {

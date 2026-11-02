@@ -72,6 +72,11 @@ export function enqueueOutbox(store: StorageLike, entry: OutboxEntry): OutboxEnt
   return q;
 }
 
+/** A1 (PLAN-v1.2.0): visible pending count — the UI badge reads this. */
+export function pendingOutboxCount(store: StorageLike): number {
+  return loadOutbox(store).length;
+}
+
 /**
  * Replay every queued payload through `post`. One poison entry never blocks
  * the rest; failures stay queued with attempts+1 for the next drain.
