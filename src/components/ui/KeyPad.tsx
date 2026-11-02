@@ -16,15 +16,16 @@ const TEXT: Record<KeyVariant, string> = {
 
 export const Key: React.FC<{
   variant?: KeyVariant;
+  big?: boolean;
   onPress: () => void;
   label: React.ReactNode;
   title?: string;
-}> = ({ variant = 'digit', onPress, label, title }) => (
+}> = ({ variant = 'digit', big = false, onPress, label, title }) => (
   <button
     type="button"
     onClick={onPress}
     title={title}
-    className={`rounded-xl bg-[#162030] border border-[#2b3a4f] py-2.5 text-lg font-bold select-none cursor-pointer transition hover:bg-[#233145] active:scale-95 ${TEXT[variant]}`}
+    className={`rounded-xl bg-[#162030] border border-[#2b3a4f] font-bold select-none cursor-pointer transition hover:bg-[#233145] active:scale-95 ${big ? 'py-4 text-2xl' : 'py-2.5 text-lg'} ${TEXT[variant]}`}
   >
     {label}
   </button>

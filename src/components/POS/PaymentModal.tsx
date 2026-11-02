@@ -170,7 +170,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-      <div className="bg-[#111722] border border-[#1e293b] rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col">
+      <div className={`bg-[#111722] border border-[#1e293b] rounded-2xl w-full shadow-2xl overflow-hidden flex flex-col ${paymentMethod === 'ESPECES' ? 'max-w-3xl' : 'max-w-lg'}`}>
         {/* Modal Header */}
         <div className="px-5 py-4 border-b border-[#1e293b] flex items-center justify-between bg-[#0b0f17]">
           <div>
@@ -313,9 +313,25 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
             </div>
           </div>
 
-          {/* Cash Handling: Amount Tendered & Change */}
+          {/* Cash cockpit: tender (left) + touch keypad (right in RTL).
+              Single column on small screens, keypad first (touch-first). */}
           {paymentMethod === 'ESPECES' && (
-            <div className="space-y-2">
+            <div className="grid gap-4 md:grid-cols-[1fr_248px]">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-slate-300">
+                  {isAr ? 'لوحة اللمس:' : 'Pavé tactile :'}
+                </p>
+                <KeyPad>
+                  {(['1','2','3','4','5','6','7','8','9','00','0','.'] as const).map(k => (
+                    <Key big key={k} onPress={() => setAmountPaidInput(v => touchAmountKey(v, k))} label={k} />
+                  ))}
+                  <Key big variant="danger" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))} label="C" title={isAr ? 'مسح' : 'Effacer'} />
+                  <Key big variant="ok" onPress={() => setExact()} label={isAr ? 'بالضبط' : 'Exact'} />
+                  <Key big variant="muted" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))} label="⌫" title={isAr ? 'تراجع' : 'Retour'} />
+                </KeyPad>
+              </div>
+
+              <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-slate-300">
                   {isAr ? 'المبلغ المستلم / Montant Reçu:' : 'Montant Reçu / المبلغ المستلم:'}
@@ -353,18 +369,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
                 ))}
               </div>
 
-              {/* C1: touch keypad — full cash payment without a keyboard.
-                  Same downstream engine: feeds amountPaidInput only.
-                  Unified KeyPad language (shared with login PIN pad). */}
-              <KeyPad>
-                {(['1','2','3','4','5','6','7','8','9','00','0','.'] as const).map(k => (
-                  <Key key={k} onPress={() => setAmountPaidInput(v => touchAmountKey(v, k))} label={k} />
-                ))}
-                <Key variant="danger" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))} label="C" title={isAr ? 'مسح' : 'Effacer'} />
-                <Key variant="ok" onPress={() => setExact()} label={isAr ? 'بالضبط' : 'Exact'} />
-                <Key variant="muted" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))} label="⌫" title={isAr ? 'تراجع' : 'Retour'} />
-              </KeyPad>
-
               {/* Live change / deficit indicator */}
               {change.isValid ? (
                 <div className="bg-emerald-950/60 border border-emerald-600 rounded-xl px-4 py-3 text-center">
@@ -382,6 +386,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
                   </p>
                 </div>
               )}
+              </div>
             </div>
           )}
 
