@@ -53,6 +53,15 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | T11 triggers: append-only + terminal-state, legacy v4→v5 climb (ADR-034) | src/db/triggers.test.ts | +3 | ✅ 3/3 |
 | **Total** | **37 files** | **265** | **✅ 265/265, 0 fail** |
 
+## Phase 2 — v1.2.0 (2026-11-02 · `tsc + lint + build` clean)
+| Suite | File | Tests | Result |
+|---|---|---|---|
+| B1 linguistic unification guard (forbidden strings) | src/core/linguistic-guard.test.ts | 2 | ✅ 2/2 |
+| B3 `N*CODE` qty-prefix parser (plain/split/clamp/scale-fuzzy) | src/core/barcode-qty.test.ts | 4 | ✅ 4/4 |
+| B4 close-and-z gap reason persisted in `z.close` audit detail | server/index.test.ts | +1 | ✅ 1/1 |
+| **Total** | **42 files** | **278** | **✅ 278/278, 0 fail** |
+Live proofs: B2 daylight screenshots + computed-style audit 13/13 ≥4.5:1; B3 `12*`→12 + field 12→3 + RTL stepper/bidi; B4 blocked→unblocked close + reason in audit; B5 5 tabs + NIF lock screenshot. Full lane visual tour in session history.
+
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
 |---|---|---|---|
