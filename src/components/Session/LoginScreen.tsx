@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Key, KeyPad } from '../ui/KeyPad';
 import { useApp } from '../../context/AppContext';
 import { changeSessionPin } from '../../core/session-authority';
 
@@ -238,26 +239,22 @@ export const LoginScreen: React.FC = () => {
           {'•'.repeat(shown.length) || <span className="text-slate-400 text-sm tracking-normal">{ar ? 'أدخل الرمز' : 'Tapez le code'}</span>}
         </div>
 
-        <div className="grid grid-cols-3 gap-1.5 mb-2" dir="ltr">
+        {/* Unified KeyPad language — same caps as the payment keypad. */}
+        <KeyPad>
           {['1','2','3','4','5','6','7','8','9'].map(d => (
-            <button key={d} onClick={() => press(d)} className="rounded-xl bg-[#162030] border border-slate-700/60 py-2 text-lg font-bold hover:border-amber-400/50 hover:text-amber-200 active:scale-95 transition">
-              {d}
-            </button>
+            <Key key={d} onPress={() => press(d)} label={d} />
           ))}
-          <button onClick={clear} className="rounded-xl bg-[#162030] border border-slate-700/60 py-2 text-xs text-slate-400 hover:text-red-300 active:scale-95 transition">
-            {ar ? 'مسح' : 'Eff.'}
-          </button>
-          <button onClick={() => press('0')} className="rounded-xl bg-[#162030] border border-slate-700/60 py-2 text-lg font-bold hover:border-amber-400/50 hover:text-amber-200 active:scale-95 transition">
-            0
-          </button>
+          <Key variant="muted" onPress={clear} label={ar ? 'مسح' : 'Eff.'} />
+          <Key onPress={() => press('0')} label="0" />
           <button
             onClick={advanceOrSubmit}
             disabled={busy}
-            className="rounded-xl bg-amber-500/90 text-black font-bold py-2 hover:bg-amber-400 disabled:opacity-50 active:scale-95 transition"
+            className="rounded-xl bg-amber-500/90 text-black font-bold py-2.5 text-lg hover:bg-amber-400 disabled:opacity-50 active:scale-95 transition select-none cursor-pointer"
           >
             {busy ? '…' : 'OK'}
           </button>
-        </div>
+        </KeyPad>
+        <div className="mb-2" />
 
         {error && <p className="text-center text-sm text-red-400 mb-2">{error}</p>}
         {mustChange && (

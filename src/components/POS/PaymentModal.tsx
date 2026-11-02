@@ -7,6 +7,7 @@ import { formatDZDFromCentimes, dzdToCentimes } from '../../core/money';
 import { calculateCashChange, smartCashPresetsCt } from '../../core/fiscal.centimes';
 import { resolveAction } from '../../core/shortcuts';
 import { touchAmountKey } from '../../core/touch-amount';
+import { Key, KeyPad } from '../ui/KeyPad';
 import { cashChime } from '../../hardware/sound';
 import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
 import { showPoleTotal } from '../../core/print-lane';
@@ -353,40 +354,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
               </div>
 
               {/* C1: touch keypad — full cash payment without a keyboard.
-                  Same downstream engine: feeds amountPaidInput only. */}
-              <div className="grid grid-cols-3 gap-1.5 pt-1" dir="ltr">
+                  Same downstream engine: feeds amountPaidInput only.
+                  Unified KeyPad language (shared with login PIN pad). */}
+              <KeyPad>
                 {(['1','2','3','4','5','6','7','8','9','00','0','.'] as const).map(k => (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => setAmountPaidInput(v => touchAmountKey(v, k))}
-                    className="py-2.5 bg-[#162030] hover:bg-[#233145] active:bg-emerald-900 text-white rounded-xl text-lg font-mono font-bold border border-[#2b3a4f] cursor-pointer select-none"
-                  >
-                    {k}
-                  </button>
+                  <Key key={k} onPress={() => setAmountPaidInput(v => touchAmountKey(v, k))} label={k} />
                 ))}
-                <button
-                  type="button"
-                  onClick={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))}
-                  className="py-2.5 bg-rose-950/60 hover:bg-rose-900 text-rose-300 rounded-xl text-sm font-bold border border-rose-800 cursor-pointer select-none"
-                >
-                  C
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setExact()}
-                  className="py-2.5 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 rounded-xl text-sm font-bold border border-emerald-700 cursor-pointer select-none"
-                >
-                  {isAr ? 'بالضبط' : 'Exact'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))}
-                  className="py-2.5 bg-[#162030] hover:bg-[#233145] text-slate-300 rounded-xl text-lg font-bold border border-[#2b3a4f] cursor-pointer select-none"
-                >
-                  ⌫
-                </button>
-              </div>
+                <Key variant="danger" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))} label="C" title={isAr ? 'مسح' : 'Effacer'} />
+                <Key variant="ok" onPress={() => setExact()} label={isAr ? 'بالضبط' : 'Exact'} />
+                <Key variant="muted" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))} label="⌫" title={isAr ? 'تراجع' : 'Retour'} />
+              </KeyPad>
 
               {/* Live change / deficit indicator */}
               {change.isValid ? (
