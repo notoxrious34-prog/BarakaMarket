@@ -170,15 +170,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-      <div className={`bg-[#111722] border border-[#1e293b] rounded-2xl w-full shadow-2xl overflow-hidden flex flex-col ${paymentMethod === 'ESPECES' ? 'max-w-3xl' : 'max-w-lg'}`}>
-        {/* Modal Header */}
-        <div className="px-5 py-4 border-b border-[#1e293b] flex items-center justify-between bg-[#0b0f17]">
+      <div className={`bg-[#111722] border border-[#1e293b] rounded-2xl w-full shadow-2xl overflow-hidden flex flex-col ${paymentMethod === 'ESPECES' ? 'max-w-2xl' : 'max-w-md'}`}>
+        {/* Modal Header — slim band, gold hairline */}
+        <div className="px-4 py-2.5 border-b border-amber-500/20 flex items-center justify-between bg-[#0b0f17]">
           <div>
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
-              <Banknote className="w-5 h-5 text-emerald-400" />
+            <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <Banknote className="w-4 h-4 text-amber-300" />
               <span>{isAr ? 'الدفع في الصندوق / Règlement Caisse' : 'Règlement Caisse / الدفع في الصندوق'}</span>
             </h3>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-[11px] text-slate-500">
               {currentCart.length} {isAr ? 'منتجات في السلة' : 'articles dans le panier'} · F1 exact · F2 1000 · F3 2000 · F4 5000
             </p>
           </div>
@@ -186,57 +186,57 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
             onClick={onClose}
             className="p-1.5 text-slate-400 hover:text-white hover:bg-[#162030] rounded-lg transition-colors cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Modal Body */}
-        <div className="p-5 space-y-4">
+        <div className="p-4 space-y-3">
           {/* Payment Method Selector */}
           <div>
-            <label className="text-xs font-semibold text-slate-300 block mb-1.5">
-              {isAr ? 'طريقة الدفع:' : 'Mode de Règlement :'}
+            <label className="text-[10px] uppercase tracking-widest text-slate-500 block mb-1">
+              {isAr ? 'طريقة الدفع' : 'Mode de Règlement'}
             </label>
             <div className="grid grid-cols-3 gap-2">
               <button
                 type="button"
                 onClick={() => setPaymentMethod('ESPECES')}
-                className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
+                className={`p-2 rounded-xl border flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   paymentMethod === 'ESPECES'
                     ? 'bg-emerald-950/70 border-emerald-500 text-white shadow-md shadow-emerald-950/40'
                     : 'bg-[#162030] border-[#2b3a4f] text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Banknote className="w-5 h-5 text-emerald-400" />
-                <span className="text-xs font-bold">{isAr ? 'نقداً / Espèces' : 'Espèces / نقداً'}</span>
+                <Banknote className="w-4 h-4 text-emerald-400" />
+                <span className="text-[11px] font-bold">{isAr ? 'نقداً / Espèces' : 'Espèces / نقداً'}</span>
                 <span className="text-[10px] text-amber-300/80 font-mono">+1% Timbre</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setPaymentMethod('DAHABIYA')}
-                className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
+                className={`p-2 rounded-xl border flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   paymentMethod === 'DAHABIYA' || paymentMethod === 'CIB'
                     ? 'bg-emerald-950/70 border-emerald-500 text-white shadow-md shadow-emerald-950/40'
                     : 'bg-[#162030] border-[#2b3a4f] text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <CreditCard className="w-5 h-5 text-amber-400" />
-                <span className="text-xs font-bold">{isAr ? 'ذهبية / CIB' : 'CIB / Dahabiya'}</span>
+                <CreditCard className="w-4 h-4 text-amber-400" />
+                <span className="text-[11px] font-bold">{isAr ? 'ذهبية / CIB' : 'CIB / Dahabiya'}</span>
                 <span className="text-[10px] text-emerald-400/80 font-mono">Exempt Timbre</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setPaymentMethod('CREDIT')}
-                className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition-all cursor-pointer ${
+                className={`p-2 rounded-xl border flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   paymentMethod === 'CREDIT'
                     ? 'bg-rose-950/70 border-rose-500 text-white shadow-md shadow-rose-950/40'
                     : 'bg-[#162030] border-[#2b3a4f] text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <BookOpen className="w-5 h-5 text-rose-400" />
-                <span className="text-xs font-bold">{isAr ? 'كريدي (دَيْن)' : 'Carnet Crédit'}</span>
+                <BookOpen className="w-4 h-4 text-rose-400" />
+                <span className="text-[11px] font-bold">{isAr ? 'كريدي (دَيْن)' : 'Carnet Crédit'}</span>
                 <span className="text-[10px] text-slate-400 font-mono">Sur Compte</span>
               </button>
             </div>
@@ -285,56 +285,53 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
             </div>
           )}
 
-          {/* Amount Breakdown Panel */}
-          <div className="bg-[#0b0f17] border border-[#1e293b] rounded-xl p-3.5 space-y-2">
-            <div className="flex justify-between text-xs text-slate-400">
-              <span>{isAr ? 'المجموع الكلي / Montant Total (HT):' : 'Montant Total / المجموع الكلي (HT):'}</span>
-              <span className="font-mono text-slate-300" dir="ltr">{formatDZD(totals.total_ht)}</span>
+          {/* Amount ticket — flat micro-ledger, gold NET band */}
+          <div className="bg-[#0b0f17] border border-[#1e293b] rounded-xl px-3 py-2 space-y-1">
+            <div className="flex justify-between text-[11px] text-slate-500">
+              <span>{isAr ? 'المجموع (HT)' : 'Total HT'}</span>
+              <span className="font-mono" dir="ltr">{formatDZD(totals.total_ht)}</span>
             </div>
-            <div className="flex justify-between text-xs text-slate-400">
-              <span>{isAr ? 'مجموع الرسم على القيمة المضافة (TVA):' : 'Total TVA (0%, 9%, 19%):'}</span>
-              <span className="font-mono text-slate-300" dir="ltr">{formatDZD(totals.total_tva)}</span>
+            <div className="flex justify-between text-[11px] text-slate-500">
+              <span>{isAr ? 'TVA (0% · 9% · 19%)' : 'TVA (0% · 9% · 19%)'}</span>
+              <span className="font-mono" dir="ltr">{formatDZD(totals.total_tva)}</span>
             </div>
 
             {paymentMethod === 'ESPECES' && (
-              <div className="flex justify-between text-xs text-amber-300/90 font-medium ps-2 border-s-2 border-amber-500">
-                <span>{isAr ? 'حق الطابع المالي (المادة 136 قانون الطابع) — الحد الأدنى 10 دج:' : 'Droit de Timbre Fiscal (1% Espèces) — plancher 10 DA :'}</span>
+              <div className="flex justify-between text-[11px] text-amber-300/90 font-medium ps-2 border-s border-amber-500/60">
+                <span>{isAr ? 'الطابع (1%) — أدنى 10 دج' : 'Timbre 1% — min 10 DA'}</span>
                 <span className="font-mono" dir="ltr">+{formatDZD(totals.timbre_fiscal)}</span>
               </div>
             )}
 
-            <div className="pt-2 border-t border-[#1e293b] flex justify-between items-baseline">
-              <span className="text-sm font-bold text-white">
-                {isAr ? 'المجموع المستحق (TTC):' : 'NET À PAYER TTC:'}
+            <div className="pt-1.5 mt-1 border-t border-amber-500/25 flex justify-between items-baseline">
+              <span className="text-xs font-bold text-slate-200">
+                {isAr ? 'الصافي المستحق TTC' : 'NET À PAYER TTC'}
               </span>
-              <span className="text-2xl font-black text-emerald-400 font-mono" dir="ltr">
+              <span className="text-xl font-black text-amber-300 font-mono tabular-nums" dir="ltr">
                 {formatDZD(totals.total_ttc, false)}
               </span>
             </div>
           </div>
 
-          {/* Cash cockpit: tender (left) + touch keypad (right in RTL).
-              Single column on small screens, keypad first (touch-first). */}
+          {/* Cash cockpit: keypad RIGHT (first in RTL) in a raised tray,
+              tender column alongside. Compact touch caps (~48px). */}
           {paymentMethod === 'ESPECES' && (
-            <div className="grid gap-4 md:grid-cols-[1fr_248px]">
-              <div className="space-y-2">
-                <p className="text-xs font-semibold text-slate-300">
-                  {isAr ? 'لوحة اللمس:' : 'Pavé tactile :'}
-                </p>
+            <div className="grid gap-3 md:grid-cols-[1fr_200px]">
+              <div className="bg-[#0d1420] border border-[#1e293b] rounded-xl p-2">
                 <KeyPad>
                   {(['1','2','3','4','5','6','7','8','9','00','0','.'] as const).map(k => (
-                    <Key big key={k} onPress={() => setAmountPaidInput(v => touchAmountKey(v, k))} label={k} />
+                    <Key key={k} onPress={() => setAmountPaidInput(v => touchAmountKey(v, k))} label={k} />
                   ))}
-                  <Key big variant="danger" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))} label="C" title={isAr ? 'مسح' : 'Effacer'} />
-                  <Key big variant="ok" onPress={() => setExact()} label={isAr ? 'بالضبط' : 'Exact'} />
-                  <Key big variant="muted" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))} label="⌫" title={isAr ? 'تراجع' : 'Retour'} />
+                  <Key variant="danger" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))} label="C" title={isAr ? 'مسح' : 'Effacer'} />
+                  <Key variant="ok" onPress={() => setExact()} label={isAr ? 'بالضبط' : 'Exact'} />
+                  <Key variant="muted" onPress={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))} label="⌫" title={isAr ? 'تراجع' : 'Retour'} />
                 </KeyPad>
               </div>
 
               <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <label className="text-xs font-semibold text-slate-300">
-                  {isAr ? 'المبلغ المستلم / Montant Reçu:' : 'Montant Reçu / المبلغ المستلم:'}
+                <label className="text-[10px] uppercase tracking-widest text-slate-500">
+                  {isAr ? 'المستلم' : 'Reçu'}
                 </label>
               </div>
 
@@ -343,46 +340,46 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
                 type="number"
                 value={amountPaidInput}
                 onChange={e => setAmountPaidInput(e.target.value)}
-                className="w-full bg-[#162030] border border-[#2b3a4f] focus:border-emerald-500 text-white font-mono text-xl font-bold px-3 py-2 rounded-xl text-center outline-none"
+                className="w-full bg-[#162030] border border-[#2b3a4f] focus:border-emerald-500 text-white font-mono text-lg font-bold px-3 py-1.5 rounded-xl text-center outline-none"
               />
 
               {/* Algerian note preset chips */}
-              <div className="flex flex-wrap gap-1.5 pt-1">
+              <div className="flex flex-wrap gap-1">
                 <button
                   key="exact"
                   type="button"
                   onClick={setExact}
                   title="F1"
-                  className="flex-1 py-1.5 px-2 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 rounded-lg text-xs font-mono font-bold border border-emerald-700 cursor-pointer whitespace-nowrap"
+                  className="flex-1 py-1 px-1.5 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 rounded-lg text-[11px] font-mono font-bold border border-emerald-700 cursor-pointer whitespace-nowrap"
                 >
-                  {isAr ? 'المبلغ بالضبط' : 'Montant Exact'}
+                  {isAr ? 'بالضبط' : 'Exact'}
                 </button>
                 {presetsCt.filter(p => p !== totalTtcCt).map(p => (
                   <button
                     key={p}
                     type="button"
                     onClick={() => setAmountPaidInput((p / 100).toString())}
-                    className="flex-1 py-1.5 px-2 bg-[#162030] hover:bg-[#233145] text-slate-300 hover:text-white rounded-lg text-xs font-mono font-semibold border border-[#2b3a4f] cursor-pointer whitespace-nowrap"
+                    className="flex-1 py-1 px-1.5 bg-[#162030] hover:bg-[#233145] text-slate-300 hover:text-white rounded-lg text-[11px] font-mono font-semibold border border-[#2b3a4f] cursor-pointer whitespace-nowrap"
                   >
-                    {(p / 100).toLocaleString('fr-DZ')} DA
+                    {(p / 100).toLocaleString('fr-DZ')}
                   </button>
                 ))}
               </div>
 
               {/* Live change / deficit indicator */}
               {change.isValid ? (
-                <div className="bg-emerald-950/60 border border-emerald-600 rounded-xl px-4 py-3 text-center">
-                  <p className="text-xs font-bold text-emerald-300">
-                    {isAr ? 'إرجاع الصرف / Rendu de Monnaie:' : 'Rendu de Monnaie / إرجاع الصرف:'}
+                <div className="bg-emerald-950/60 border border-emerald-600/70 rounded-xl px-3 py-1.5 text-center shadow-[0_0_18px_-6px_rgba(16,185,129,0.5)]">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-300/80">
+                    {isAr ? 'الصرف' : 'Rendu'}
                   </p>
-                  <p className="font-mono font-black text-emerald-300 text-5xl tabular-nums" dir="ltr">
+                  <p className="font-mono font-black text-emerald-300 text-3xl tabular-nums leading-tight" dir="ltr">
                     {formatDZDFromCentimes(change.changeCt, false)}
                   </p>
                 </div>
               ) : (
-                <div className="bg-rose-950/40 border border-rose-800 rounded-xl px-4 py-2 text-center">
-                  <p className="text-xs font-bold text-rose-300">
-                    {isAr ? `المبلغ ناقص: ${formatDZDFromCentimes(change.deficitCt, false)}` : `Manque: ${formatDZDFromCentimes(change.deficitCt, false)}`}
+                <div className="bg-rose-950/40 border border-rose-800 rounded-xl px-3 py-1.5 text-center">
+                  <p className="text-[11px] font-bold text-rose-300">
+                    {isAr ? `ناقص: ${formatDZDFromCentimes(change.deficitCt, false)}` : `Manque: ${formatDZDFromCentimes(change.deficitCt, false)}`}
                   </p>
                 </div>
               )}
@@ -413,11 +410,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
         </div>
 
         {/* Modal Footer */}
-        <div className="p-4 bg-[#0b0f17] border-t border-[#1e293b] flex items-center justify-end gap-3">
+        <div className="px-4 py-2.5 bg-[#0b0f17] border-t border-[#1e293b] flex items-center justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 bg-[#162030] hover:bg-[#1e293b] text-slate-300 rounded-xl text-xs font-medium cursor-pointer"
+            className="px-3 py-1.5 bg-[#162030] hover:bg-[#1e293b] text-slate-300 rounded-xl text-xs font-medium cursor-pointer"
           >
             {isAr ? 'إلغاء' : 'Annuler'}
           </button>
@@ -426,7 +423,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
             type="button"
             onClick={handleValidate}
             disabled={isUnderpaid || (paymentMethod === 'CREDIT' && selectedClient.id === 1)}
-            className="px-6 py-2.5 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold shadow-lg shadow-emerald-950/60 flex items-center gap-2 cursor-pointer"
+            className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl text-[13px] font-bold shadow-lg shadow-emerald-950/60 flex items-center gap-2 cursor-pointer"
           >
             <Printer className="w-4 h-4" />
             <span>{isAr ? 'تأكيد وطباعة (Enter)' : 'Valider & Imprimer (Enter)'}</span>
