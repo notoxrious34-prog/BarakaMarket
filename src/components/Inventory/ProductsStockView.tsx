@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, TVARate } from '../../types';
 import { formatDZD } from '../../core/display';
+import { expiryBucket } from '../../core/expiry-bucket';
 import {
   Package,
   Plus,
@@ -293,6 +294,30 @@ export const ProductsStockView: React.FC = () => {
             <span>{isAr ? 'قريب انتهاء الصلاحية' : 'Dates Courtes'} ({expiringCount})</span>
           </button>
         </div>
+
+        {/* C4: in-screen expiry alert strip — expired (act now) + ≤15d (soon).
+            Alert only; selling stays governed by the existing POS badges. */}
+        {(() => {
+          const expired = products.filter(p => expiryBucket(p.has_expiry_date, p.expiry_date) === 'expired');
+          const soon = products.filter(p => expiryBucket(p.has_expiry_date, p.expiry_date) === 'soon');
+          if (!expired.length && !soon.length) return null;
+          return (
+            <div className="flex flex-col gap-1.5 rounded-xl border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-[11px]">
+              {expired.length > 0 && (
+                <div className="text-rose-300 font-bold">
+                  {isAr ? `منتهية الصلاحية (${expired.length}): ` : `Périmés (${expired.length}) : `}
+                  <span className="font-normal">{expired.slice(0, 5).map(p => isAr ? p.name_ar : p.name_fr).join('، ')}{expired.length > 5 ? '…' : ''}</span>
+                </div>
+              )}
+              {soon.length > 0 && (
+                <div className="text-amber-200">
+                  {isAr ? `تنتهي خلال 15 يوماً (${soon.length}): ` : `≤15 jours (${soon.length}) : `}
+                  <span>{soon.slice(0, 5).map(p => isAr ? p.name_ar : p.name_fr).join('، ')}{soon.length > 5 ? '…' : ''}</span>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Search & Add Action */}
         <div className="flex items-center gap-2">

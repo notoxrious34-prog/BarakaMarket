@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { Client, DebtSettlement, Sale } from '../../types';
 import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
+import { buildStatementRows, type LedgerRow } from '../../core/statement-ledger';
 import { Printer, X, FileText } from 'lucide-react';
 
 interface Props {
@@ -12,14 +13,8 @@ interface Props {
   onClose: () => void;
 }
 
-interface Row {
-  date: string;
-  label: string;
-  ref: string;
-  debitCt: number;
-  creditCt: number;
-  balanceCt: number;
-}
+// Row: shared shape from the pure ledger builder (C2).
+type Row = LedgerRow;
 
 /**
  * Gate-03 TASK 2 — Relevé de Compte Client (statement of account).
@@ -33,30 +28,11 @@ export const ClientAccountStatement: React.FC<Props> = ({ client, creditSales, s
   const isAr = language === 'ar';
   const [format, setFormat] = useState<'80mm' | 'A4'>('80mm');
 
-  const rows = useMemo<Row[]>(() => {
-    const events: Array<{ date: string; label: string; ref: string; debitCt: number; creditCt: number }> = [
-      ...creditSales.map(s => ({
-        date: s.created_at,
-        label: isAr ? 'شراء بالكريدي' : 'Achat à crédit',
-        ref: s.ticket_number,
-        debitCt: dzdToCentimes(s.total_ttc),
-        creditCt: 0,
-      })),
-      ...settlements.map(st => ({
-        date: st.date,
-        label: isAr ? `تسديد ${st.payment_method}` : `Versement ${st.payment_method}`,
-        ref: st.receipt_number ?? st.id.slice(0, 8),
-        debitCt: 0,
-        creditCt: dzdToCentimes(st.amount),
-      })),
-    ];
-    events.sort((a, b) => a.date.localeCompare(b.date));
-    let bal = 0;
-    return events.map(e => {
-      bal += e.debitCt - e.creditCt;
-      return { ...e, balanceCt: bal };
-    });
-  }, [creditSales, settlements, isAr]);
+  // C2: chronological ledger via the guard-tested pure builder.
+  const rows = useMemo<Row[]>(() => buildStatementRows(creditSales, settlements, {
+    credit: isAr ? 'شراء بالكريدي' : 'Achat à crédit',
+    settlement: (m: string) => isAr ? `تسديد ${m}` : `Versement ${m}`,
+  }), [creditSales, settlements, isAr]);
 
   const totalDebitCt = rows.reduce((a, r) => a + r.debitCt, 0);
   const totalCreditCt = rows.reduce((a, r) => a + r.creditCt, 0);

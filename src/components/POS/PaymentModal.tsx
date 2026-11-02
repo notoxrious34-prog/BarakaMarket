@@ -5,6 +5,8 @@ import { calculateSaleTotals } from '../../core/cart-bridge';
 import { formatDZD } from '../../core/display';
 import { formatDZDFromCentimes, dzdToCentimes } from '../../core/money';
 import { calculateCashChange, smartCashPresetsCt } from '../../core/fiscal.centimes';
+import { resolveAction } from '../../core/shortcuts';
+import { touchAmountKey } from '../../core/touch-amount';
 import { cashChime } from '../../hardware/sound';
 import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
 import { showPoleTotal } from '../../core/print-lane';
@@ -112,23 +114,23 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
   const setExact = () => setAmountPaidInput((totalTtcCt / 100).toString());
 
   // ADR-005-MKT keyboard matrix (capture phase: pre-empts the POS F1-F4 layer).
-  // F1/Alt+1 exact · F2/Alt+2 1000 · F3/Alt+3 2000 · F4/Alt+4 5000 ·
-  // Enter finalize (empty = exact) · Escape cancel · 2/3 tender select.
+  // C5: pay-lane matching via the customizable registry; Enter/Escape/2/3
+  // stay structural cockpit keys (not remappable).
   useEffect(() => {
     if (hudChangeCt !== null) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       const inInput = (e.target as HTMLElement).tagName === 'INPUT';
-      const alt = (d: string) => e.altKey && e.key === d;
-      if (e.key === 'F1' || alt('1')) {
+      const payAction = resolveAction(e, localStorage, 'pay');
+      if (payAction === 'pay.exact') {
         e.preventDefault(); e.stopPropagation(); setExact(); return;
       }
-      if (e.key === 'F2' || alt('2')) {
+      if (payAction === 'pay.1000') {
         e.preventDefault(); e.stopPropagation(); setAmountPaidInput('1000'); return;
       }
-      if (e.key === 'F3' || alt('3')) {
+      if (payAction === 'pay.2000') {
         e.preventDefault(); e.stopPropagation(); setAmountPaidInput('2000'); return;
       }
-      if (e.key === 'F4' || alt('4')) {
+      if (payAction === 'pay.5000') {
         e.preventDefault(); e.stopPropagation(); setAmountPaidInput('5000'); return;
       }
       if (e.key === 'Escape') {
@@ -348,6 +350,42 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
                     {(p / 100).toLocaleString('fr-DZ')} DA
                   </button>
                 ))}
+              </div>
+
+              {/* C1: touch keypad — full cash payment without a keyboard.
+                  Same downstream engine: feeds amountPaidInput only. */}
+              <div className="grid grid-cols-3 gap-1.5 pt-1" dir="ltr">
+                {(['1','2','3','4','5','6','7','8','9','00','0','.'] as const).map(k => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setAmountPaidInput(v => touchAmountKey(v, k))}
+                    className="py-2.5 bg-[#162030] hover:bg-[#233145] active:bg-emerald-900 text-white rounded-xl text-lg font-mono font-bold border border-[#2b3a4f] cursor-pointer select-none"
+                  >
+                    {k}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setAmountPaidInput(v => touchAmountKey(v, 'C'))}
+                  className="py-2.5 bg-rose-950/60 hover:bg-rose-900 text-rose-300 rounded-xl text-sm font-bold border border-rose-800 cursor-pointer select-none"
+                >
+                  C
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setExact()}
+                  className="py-2.5 bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 rounded-xl text-sm font-bold border border-emerald-700 cursor-pointer select-none"
+                >
+                  {isAr ? 'بالضبط' : 'Exact'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAmountPaidInput(v => touchAmountKey(v, 'back'))}
+                  className="py-2.5 bg-[#162030] hover:bg-[#233145] text-slate-300 rounded-xl text-lg font-bold border border-[#2b3a4f] cursor-pointer select-none"
+                >
+                  ⌫
+                </button>
               </div>
 
               {/* Live change / deficit indicator */}

@@ -4,6 +4,7 @@ import { initialCategories } from '../../data/seedData';
 import { Product, SaleItem } from '../../types';
 import { calculateSaleTotals } from '../../core/cart-bridge';
 import { formatDZD } from '../../core/display';
+import { resolveAction } from '../../core/shortcuts';
 import {
   Search,
   Barcode,
@@ -107,24 +108,28 @@ export const PosView: React.FC = () => {
   });
 
   // Zero-Mouse Keyboard Controller (F1-F10, Space, Enter) — TASK 6 extended matrix
+  // C5: key matching via the customizable registry (Settings → shortcuts);
+  // behavior bodies unchanged, modes keep F-keys working from inputs.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // F10 lock: toggle even from inputs (cashier quick-lock)
-      if (e.key === 'F10') {
+      const action = resolveAction(e, localStorage, 'pos');
+      // Lock toggles even from inputs (cashier quick-lock)
+      if (action === 'pos.lock') {
         e.preventDefault();
         setIsLocked(prev => !prev);
         return;
       }
-      if (isLocked) {
+      if (isLocked || !action) {
         // Any key unlocks except F10 handled above — require explicit F10 to avoid accidents.
         return;
       }
-      // Don't intercept if an input or modal is currently typing (unless it's an F-key)
-      if (e.key === 'F1') {
+      const tag = (e.target as HTMLElement).tagName;
+      if ((tag === 'INPUT' || tag === 'TEXTAREA') && !/^F\d+$/.test(e.key)) return;
+      if (action === 'pos.search') {
         e.preventDefault();
         barcodeInputRef.current?.focus();
         barcodeInputRef.current?.select();
-      } else if (e.key === 'F2') {
+      } else if (action === 'pos.qty') {
         // Quantity override modal for last scanned / selected item
         e.preventDefault();
         if (currentCart.length > 0) {
@@ -132,7 +137,7 @@ export const PosView: React.FC = () => {
           setEditingItemIndex(idx);
           setQtyModalIndex(idx);
         }
-      } else if (e.key === 'F3') {
+      } else if (action === 'pos.discount') {
         // Line remise modal (percent or fixed DZD)
         e.preventDefault();
         if (currentCart.length > 0) {
@@ -140,34 +145,28 @@ export const PosView: React.FC = () => {
           setEditingItemIndex(idx);
           setDiscountModalIndex(idx);
         }
-      } else if (e.key === 'F4') {
+      } else if (action === 'pos.hold') {
         e.preventDefault();
         if (currentCart.length > 0) {
           holdCurrentCart();
         }
-      } else if (e.key === 'F5') {
+      } else if (action === 'pos.recall') {
         e.preventDefault();
         if (heldCarts.length > 0) {
           restoreHeldCart(heldCarts[0].id);
         }
-      } else if (e.key === 'F6') {
+      } else if (action === 'pos.scale') {
         e.preventDefault();
         setShowScaleModal(prev => !prev);
-      } else if (e.key === 'F7') {
+      } else if (action === 'pos.filter') {
         // Instant obsidian catalog search (ArrowUp/Down + Enter)
         e.preventDefault();
         setShowCatalogModal(prev => !prev);
-      } else if (e.key === 'F9') {
+      } else if (action === 'pos.credit' || action === 'pos.settle') {
         e.preventDefault();
         if (currentCart.length === 0) return;
         requestCheckout();
-      } else if (e.key === 'F12') {
-        e.preventDefault();
-        // ADR-005-MKT: F12 opens the Cash Settlement Cockpit directly.
-        // ADR-007-MKT: hard guard — empty cart never reaches the cockpit.
-        if (currentCart.length === 0) return;
-        requestCheckout();
-      } else if (e.key === ' ' && !['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) {
+      } else if (action === 'pos.checkout') {
         // Space bar for quick checkout — suppressed on empty cart.
         e.preventDefault();
         if (currentCart.length === 0) return;

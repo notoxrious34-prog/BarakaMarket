@@ -5,6 +5,7 @@ import { formatDZD } from '../../core/display';
 import { cashChime } from '../../hardware/sound';
 import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
 import { ClientAccountStatement } from './ClientAccountStatement';
+import { ceilingBar, CEILING_TONE_CLASS } from '../../core/ceiling-bar';
 import {
   BookOpen,
   UserPlus,
@@ -229,6 +230,16 @@ export const CarnetDetteView: React.FC = () => {
                     {isAr ? 'السقف:' : 'Plafond:'} <span dir="ltr">{formatDZD(client.max_credit_limit, false)}</span>
                   </span>
                 </div>
+                {/* C3: ceiling consumption bar (hidden when unlimited). */}
+                {(() => {
+                  const bar = ceilingBar(Math.round(client.credit_balance * 100), Math.round(client.max_credit_limit * 100));
+                  if (bar.pct === null) return null;
+                  return (
+                    <div className="mt-1.5 h-1.5 rounded-full bg-[#162030] overflow-hidden" title={isAr ? `استهلاك السقف ${bar.pct}%` : `${bar.pct}% du plafond`}>
+                      <div className={`h-full rounded-full ${CEILING_TONE_CLASS[bar.tone as 'green' | 'amber' | 'red']}`} style={{ width: `${bar.pct}%` }} />
+                    </div>
+                  );
+                })()}
               </div>
             );
           })}
