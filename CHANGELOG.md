@@ -1,4 +1,34 @@
-# CHANGELOG
+# CHANGELOG — Baraka Market
+
+## v1.3.3 (2026-11-02) — cockpit raffiné
+- Cash modal compacted per owner eye: `max-w-2xl`, 200px keypad tray RIGHT (first in RTL),
+  micro-ledger + gold NET band, 50px keys, two-step `Key` scale (compact ~48px / comfort ~56px).
+- Proven: real-Edge lane (`modalW 672 · keyH 50 · cols 426px+200px`) + vision PASS, no defects.
+- 293/293 · tsc/lint/build clean · signed `SIG-OK [ED]` · release 3 assets `uploaded`.
+
+## v1.3.2 (2026-11-02) — cash cockpit two-column
+- Keypad moved RIGHT (248px, big keys) + tender column left; cash-only `max-w-3xl`.
+- Lane COCKPIT 4/4. 293/293 · signed · released.
+
+## v1.3.1 (2026-11-02) — KeyPad unification (owner note)
+- Shared `Key`/`KeyPad` caps for payment + login PIN; role by text color only.
+
+## BarakaKeygen v2 (2026-11-02, `releases/BarakaKeygen.exe`)
+- Owner activation desk: generate → verify → history → quit + argv shortcut.
+- Fixed v1 instant-exit (readline-after-close + Windows pipe line-drop) with a queue line-reader.
+- Proven: `CHECK: VALID` + VERIFY VALID/INVALID + clean quit via piped stdin.
+
+## v1.3.0 (2026-11-02) — Phase 3 C1-C5
+- Touch keypad core, statement ledger, ceiling bars, expiry buckets, shortcuts registry + settings tab.
+- 293/293 · signed · released · iron-smoked.
+
+## v1.2.0 (2026-11-02) — Phase 2 cashier comfort
+- Linguistic unification, daylight contrast 13/13 ≥4.5:1, direct cart qty, money guards, tabbed settings + NIF lock.
+- 278/278 · signed · released · iron-smoked (POS live V1.2.0).
+
+## v1.1.1 (2026-11-01) — Phase 1 trust + safety
+- Outbox badge + inspector (retry / owner-gated discard), legacy boot, live `APP_VERSION`, timbre disclosure.
+- Signed · silently installed + smoke + login E2E on iron.
 
 ## v1.0-rc1 (2026-10-26) — Session delivery
 ### Added

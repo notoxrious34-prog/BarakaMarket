@@ -129,3 +129,18 @@ Live proofs: PAY-C1 keypad + chips + TVA/timbre; DEBTS-C3 ceiling bars; STOCK-FI
 - ADR-003-MKT (2026-10-27): universal scale parser (20/21/22/28/29, EAN-13 gate).
 - ADR-004-MKT (2026-10-27): product_barcodes (alias x1 / pack xN + override);
   scan priority scale → primary → alias → fuzzy; pack-aware qty_milli drain.
+
+## Phase 4 — v1.3.1 → v1.3.3 (cockpit + owner keygen, 2026-11-02)
+| Slice | Change | Files | Result |
+|---|---|---|---|
+| v1.3.1 KeyPad unification (owner note) | shared `Key`/`KeyPad` caps payment + login PIN; role by text color only | `src/components/ui/KeyPad.tsx` | ✅ 293/293 holds |
+| v1.3.2 cash cockpit two-column | keypad RIGHT (first in RTL, 248px, big keys) + tender left; cash-only `max-w-3xl` | `src/components/POS/PaymentModal.tsx` | ✅ lane COCKPIT 4/4 (columns, right side, big uniform keys, no overlap) |
+| BarakaKeygen v2 (owner desk) | menu: generate → verify → history → quit; queue line-reader (pipe+TTY); `keygen-history.log` beside exe | `scripts/keygen-sea.ts`, `releases/BarakaKeygen.exe` (103MB) | ✅ `CHECK: VALID` + VERIFY VALID/INVALID + clean quit, all via piped stdin |
+| v1.3.3 cockpit raffiné (owner: sizes too big) | `max-w-2xl`, 200px keypad tray, micro-ledger + gold NET band, 50px keys, two-step key scale | `PaymentModal.tsx`, `KeyPad.tsx` | ✅ lane: `modalW 672 · keyH 50 · cols 426px+200px` + vision PASS (keypad right, compact, no defects) |
+| **Total** | **47 files** | **293** | **✅ 293/293, 0 fail · `tsc` clean · `lint` clean · `vite build` ✅** |
+
+Live proofs (2026-11-02, real Edge lane via `playwright-core` + `msedge.exe`, see skill `pos-lane-proof`):
+- v1.3.3 modal screenshot analyzed: payment cockpit confirmed, keypad visual-RIGHT, compact keys, totals hierarchy clean, zero defects.
+- Lane archaeology: shared dev-server owner PIN is **5678** (lane #1 retired 1234); 5-strike lockout with 60s·2^cycles cooldown verified live; fresh profiles hit first-run store-setup overlay (name + NIF 15 + RC mandatory).
+- Releases: `v1.3.2` + `v1.3.3` signed `SIG-OK [ED]` (keynum `489b702c66040e7e`), 3 assets each `uploaded` (`-setup.exe` + `.sig` + `latest.json`); auto-updater picks up v1.3.3.
+- Iron status: v1.3.3 proven on web lane only — **silent-install + iron smoke still open** (every prior release had it).

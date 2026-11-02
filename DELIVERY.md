@@ -17,6 +17,18 @@
 4. `npm run seed` → verify `data/baraka.db`. 5. `npm run dev` (UI) and/or `npm run api` (API lane).
 6. Daily: `POST /api/backup` before Z close; copy the dated `.db` to USB.
 
+## Delivered after v1.0 — release log (verified per release)
+- [x] v1.1.1 — outbox inspector, legacy boot, live version, timbre disclosure · signed · iron smoke + login E2E.
+- [x] v1.2.0 — cashier comfort (linguistic, contrast, qty, guards, settings) · signed · iron smoke (POS live V1.2.0).
+- [x] v1.3.0 — Phase 3 C1-C5 (keypad core, ledger, ceilings, expiry, shortcuts) · signed · iron smoke.
+- [x] v1.3.1 — KeyPad unification (payment + login PIN share caps).
+- [x] v1.3.2 — cash cockpit two-column, keypad RIGHT · lane COCKPIT 4/4 · signed · released.
+- [x] v1.3.3 (2026-11-02) — cockpit raffiné: compact keypad-right tray, gold NET band, 50px keys ·
+      293/293 · tsc/lint/build clean · `SIG-OK [ED]` · `v1.3.3` 3 assets `uploaded` ·
+      web-lane vision PASS. **Iron silent-install + smoke: OPEN (next).**
+- [x] BarakaKeygen v2 — owner activation desk (`releases/BarakaKeygen.exe`, 103MB):
+      generate/verify/history/quit, queue line-reader, `CHECK: VALID` proven via piped stdin.
+
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
 - [ ] Real scale/printer hardware (simulation only) → Phase 3 wiring points kept (`ScaleSimulationModal`, ESC/POS lane in API)
