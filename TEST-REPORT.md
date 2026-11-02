@@ -62,6 +62,17 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 | **Total** | **42 files** | **278** | **✅ 278/278, 0 fail** |
 Live proofs: B2 daylight screenshots + computed-style audit 13/13 ≥4.5:1; B3 `12*`→12 + field 12→3 + RTL stepper/bidi; B4 blocked→unblocked close + reason in audit; B5 5 tabs + NIF lock screenshot. Full lane visual tour in session history.
 
+## Phase 3 — v1.3.0 (2026-11-02 · `tsc + lint + build` clean)
+| Suite | File | Tests | Result |
+|---|---|---|---|
+| C1 touch keypad: digits/00/C/back/MAX_LEN guard | src/core/touch-amount.test.ts | 4 | ✅ 4/4 |
+| C2 statement ledger: chrono sort + running balance + overpayment | src/core/statement-ledger.test.ts | 3 | ✅ 3/3 |
+| C3 ceiling-bar thresholds + unlimited + class map | src/core/ceiling-bar.test.ts | 2 | ✅ 2/2 |
+| C4 expiry buckets + tz-proof midnight + bad-date safety | src/core/expiry-bucket.test.ts | 2 | ✅ 2/2 |
+| C5 registry defaults + mode scope + persist + conflict + garbage | src/core/shortcuts.test.ts | 4 | ✅ 4/4 |
+| **Total** | **47 files** | **293** | **✅ 293/293, 0 fail** |
+Live proofs: PAY-C1 keypad + chips + TVA/timbre; DEBTS-C3 ceiling bars; STOCK-FIX full-width expiry strip; SHORT-C5 matrix + live remap `{"pos.hold":"F8"}` persisting reload. Footer OCR note: `SQLITE WAL` verified exact in DOM.
+
 ### Rust lane (T4b, ADR-026 — `cargo test`, same invariants, real SQLite)
 | Area | File | Tests | Result |
 |---|---|---|---|
