@@ -32,7 +32,7 @@ import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calc
 import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
 import { SESSION_IDLE_MS, type Session } from '../core/rbac.js';
-import { mintSaleKey, enqueueOutbox, replayOutbox, pendingOutboxCount, type StorageLike } from '../core/sale-outbox';
+import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
@@ -180,6 +180,9 @@ interface AppContextType {
   outboxPending: number;
   retryOutboxDrain: () => void;
   outboxFailed: boolean;
+  outboxEntries: OutboxEntry[];
+  refreshOutbox: () => void;
+  discardOutboxEntry: (key: string) => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -360,6 +363,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // A1 honesty: a finished drain that leaves entries behind is a failure,
   // not silence — the badge turns red until a drain fully clears the queue.
   const [outboxFailed, setOutboxFailed] = useState<boolean>(false);
+  const [outboxEntries, setOutboxEntries] = useState<OutboxEntry[]>(() => loadOutbox(lsStore));
+
+  /** A1: single refresh point — count + rows + failed flag stay consistent. */
+  const refreshOutbox = (): void => {
+    const q = loadOutbox(lsStore);
+    setOutboxEntries(q);
+    setOutboxPending(q.length);
+    // failed is sticky: once a drain leaves residue, the badge stays red
+    // until the queue is empty (retry success) or the owner discards.
+    if (q.length === 0) setOutboxFailed(false);
+  };
 
   // T8 (ADR-031): authenticated session. Persisted across reloads (never the
   // PIN — only the verified identity + timestamps). Stale sessions die by
@@ -463,7 +477,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // T10 (ADR-033): light transactional audit. Fiscal events land in audit_log
   // with the live operator — fire-and-forget (exe: invoke audit_log;
   // token-less browser: dropped silently, the void/Z server lanes cover it).
-  const auditFiscal = (action: 'sale.commit' | 'settlement.commit', detail: string): void => {
+  const auditFiscal = (action: 'sale.commit' | 'settlement.commit' | 'sale.void', detail: string): void => {
     const actor = sessionRef.current?.username ?? 'till';
     void auditSessionEvent(actor, action, detail);
   };
@@ -931,14 +945,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     } catch { /* next drain will retry — the queue persists */ }
     finally {
-      const left = pendingOutboxCount(lsStore);
-      setOutboxPending(left);
-      setOutboxFailed(left > 0);
+      const q = loadOutbox(lsStore);
+      setOutboxEntries(q);
+      setOutboxPending(q.length);
+      // A1 honesty: a finished drain that leaves residue is a FAILURE —
+      // sticky red until the queue empties (retry success / owner discard).
+      if (q.length > 0) setOutboxFailed(true);
+      else setOutboxFailed(false);
     }
   };
 
   /** A1: manual retry from the footer badge (same lane gate as auto-drain). */
   const retryOutboxDrain = (): void => { void drainOutbox(); };
+
+  /** A1: owner-only discard of a poison entry. Audited, never silent. */
+  const discardOutboxEntry = (key: string): void => {
+    const target = loadOutbox(lsStore).find(e => e.key === key);
+    if (!target) return;
+    auditFiscal('sale.void', `outbox discard ${target.kind} ${target.provisionalId} (key ${key.slice(0, 8)}…) by ${session?.username ?? 'till'}`);
+    removeOutboxEntry(lsStore, key);
+    refreshOutbox();
+  };
 
   // Drain whenever the authority settles on the fiscal lane (probe return,
   // loopback restart, first mount with the server already up).
@@ -1049,7 +1076,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           header: fiscalHeader, items: payloadItems,
           enqueuedAt: createdAt, attempts: 0,
         });
-        setOutboxPending(pendingOutboxCount(lsStore)); // A1: badge now
+        refreshOutbox(); // A1: badge + rows now
         return provisional;
       }
       const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
@@ -1179,7 +1206,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         key: settleKey, kind: 'settlement', provisionalId: settlement.id,
         header: fiscalInput, items: [], enqueuedAt: nowIso, attempts: 0,
       });
-      setOutboxPending(pendingOutboxCount(lsStore)); // A1: badge now
+      refreshOutbox(); // A1: badge + rows now
     } else {
       // T10: authoritative debt collection leaves an audit row.
       auditFiscal('settlement.commit', `${settlement.receipt_number} · ${settlement.total_collected} DZD`);
@@ -1611,6 +1638,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         outboxPending,
         retryOutboxDrain,
         outboxFailed,
+        outboxEntries,
+        refreshOutbox,
+        discardOutboxEntry,
       }}
     >
       {children}

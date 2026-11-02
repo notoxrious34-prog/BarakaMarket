@@ -72,6 +72,14 @@ export function enqueueOutbox(store: StorageLike, entry: OutboxEntry): OutboxEnt
   return q;
 }
 
+/** A1: owner-reviewed discard for poison entries that can never drain.
+ * Removal is explicit + audited at the call site — never silent. */
+export function removeOutboxEntry(store: StorageLike, key: string): OutboxEntry[] {
+  const q = loadOutbox(store).filter(e => e.key !== key);
+  saveOutbox(store, q);
+  return q;
+}
+
 /** A1 (PLAN-v1.2.0): visible pending count — the UI badge reads this. */
 export function pendingOutboxCount(store: StorageLike): number {
   return loadOutbox(store).length;

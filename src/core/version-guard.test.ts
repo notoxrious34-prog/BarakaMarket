@@ -18,7 +18,7 @@ test('A3: APP_VERSION tracks package.json and is semver', () => {
 });
 
 test('A3: no hardcoded vX.Y literals at the former lie sites', () => {
-  for (const f of ['src/App.tsx', 'src/components/Receipts/TicketThermal80mm.tsx', 'src/components/Settings/UpdateManagerView.tsx']) {
+  for (const f of ['src/App.tsx', 'src/components/Receipts/TicketThermal80mm.tsx', 'src/components/Settings/UpdateManagerView.tsx', 'index.html']) {
     const src = fs.readFileSync(path.join(root, f), 'utf8');
     assert.ok(!/v1\.\d/.test(src), `${f} still carries a hardcoded v1.x literal`);
   }

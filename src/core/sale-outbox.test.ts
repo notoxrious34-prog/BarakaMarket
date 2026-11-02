@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  loadOutbox, enqueueOutbox, replayOutbox, mintSaleKey, pendingOutboxCount, OUTBOX_KEY, OUTBOX_CAP,
+  loadOutbox, enqueueOutbox, replayOutbox, mintSaleKey, pendingOutboxCount, removeOutboxEntry, OUTBOX_KEY, OUTBOX_CAP,
   type OutboxEntry, type StorageLike,
 } from './sale-outbox.js';
 
@@ -101,4 +101,14 @@ test('A1: pendingOutboxCount mirrors queue depth (badge source)', () => {
   enqueueOutbox(s, { key: 'K1', kind: 'sale', provisionalId: 'S1', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
   enqueueOutbox(s, { key: 'K2', kind: 'settlement', provisionalId: 'S2', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
   assert.equal(pendingOutboxCount(s), 2);
+});
+
+test('A1: removeOutboxEntry drops one key and keeps the rest (audited discard)', () => {
+  const s = fakeStore();
+  enqueueOutbox(s, { key: 'K1', kind: 'sale', provisionalId: 'S1', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
+  enqueueOutbox(s, { key: 'K2', kind: 'sale', provisionalId: 'S2', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
+  const left = removeOutboxEntry(s, 'K1');
+  assert.equal(left.length, 1);
+  assert.equal(left[0].key, 'K2');
+  assert.equal(pendingOutboxCount(s), 1);
 });

@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { APP_VERSION } from './core/version';
+import { can } from './core/rbac';
 import { Navbar } from './components/Navbar';
 import { PosView } from './components/POS/PosView';
 import { ProductsStockView } from './components/Inventory/ProductsStockView';
@@ -38,7 +39,11 @@ const MainLayout: React.FC = () => {
     outboxPending,
     retryOutboxDrain,
     outboxFailed,
+    outboxEntries,
+    refreshOutbox,
+    discardOutboxEntry,
   } = useApp();
+  const [outboxOpen, setOutboxOpen] = useState(false);
 
   // Global hotkeys: Ctrl+L to toggle language
   useEffect(() => {
@@ -90,21 +95,62 @@ const MainLayout: React.FC = () => {
         </span>
         <span className="flex items-center gap-2">
           {outboxPending > 0 && (
-            <button
-              type="button"
-              onClick={retryOutboxDrain}
-              title={outboxFailed
-                ? (language === 'ar' ? 'تعذّر الإرسال — الخادم لا يستجيب. انقر لإعادة المحاولة' : "Échec d'envoi — serveur injoignable. Cliquer pour réessayer")
-                : (language === 'ar' ? 'عمليات بانتظار الإرسال للقاعدة — انقر لإعادة المحاولة' : 'Opérations en attente — cliquer pour réessayer')}
-              className={outboxFailed
-                ? 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-500/15 border border-red-400/60 text-red-300 font-semibold cursor-pointer hover:bg-red-500/25'
-                : 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-400/50 text-amber-300 font-semibold cursor-pointer hover:bg-amber-500/25'}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full inline-block animate-pulse ${outboxFailed ? 'bg-red-400' : 'bg-amber-400'}`} />
-              {language === 'ar'
-                ? (outboxFailed ? `تعذّر إرسال ${outboxPending}` : `${outboxPending} بانتظار الإرسال`)
-                : (outboxFailed ? `Échec × ${outboxPending}` : `${outboxPending} en attente`)}
-            </button>
+            <span className="relative">
+              <button
+                type="button"
+                onClick={() => { refreshOutbox(); setOutboxOpen(o => !o); }}
+                title={outboxFailed
+                  ? (language === 'ar' ? 'تعذّر الإرسال — الخادم لا يستجيب. انقر للفحص وإعادة المحاولة' : "Échec d'envoi — serveur injoignable. Cliquer pour inspecter")
+                  : (language === 'ar' ? 'عمليات بانتظار الإرسال للقاعدة — انقر للفحص وإعادة المحاولة' : 'Opérations en attente — cliquer pour inspecter')}
+                className={outboxFailed
+                  ? 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-500/15 border border-red-400/60 text-red-300 font-semibold cursor-pointer hover:bg-red-500/25'
+                  : 'flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-400/50 text-amber-300 font-semibold cursor-pointer hover:bg-amber-500/25'}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full inline-block animate-pulse ${outboxFailed ? 'bg-red-400' : 'bg-amber-400'}`} />
+                {language === 'ar'
+                  ? (outboxFailed ? `تعذّر إرسال ${outboxPending}` : `${outboxPending} بانتظار الإرسال`)
+                  : (outboxFailed ? `Échec × ${outboxPending}` : `${outboxPending} en attente`)}
+              </button>
+              {outboxOpen && (
+                <div className="absolute bottom-7 start-0 z-50 w-80 max-h-72 overflow-auto rounded-lg border border-amber-400/40 bg-[#0d1320] p-2 shadow-2xl text-xs">
+                  <div className="px-1 pb-1.5 font-bold text-amber-200">
+                    {language === 'ar' ? 'الطابور الصادر — عمليات لم تصل القاعدة' : 'File sortante — opérations non reçues'}
+                  </div>
+                  {outboxEntries.map(e => (
+                    <div key={e.key} className="mb-1.5 rounded border border-white/10 bg-white/5 p-1.5">
+                      <div className="flex justify-between font-mono">
+                        <span className="text-sky-300">{e.provisionalId}</span>
+                        <span className="text-white/50">{e.kind === 'settlement' ? 'Q' : 'T'} · ×{e.attempts}</span>
+                      </div>
+                      <div className="text-white/40 font-mono truncate" dir="ltr" title={e.key}>{e.key.slice(0, 8)}… · {new Date(e.enqueuedAt).toLocaleString()}</div>
+                      <div className="mt-1 flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => retryOutboxDrain()}
+                          className="flex-1 rounded bg-amber-500/20 border border-amber-400/40 px-1 py-0.5 text-amber-200 hover:bg-amber-500/30"
+                        >
+                          {language === 'ar' ? 'إعادة المحاولة' : 'Réessayer'}
+                        </button>
+                        {session && can(session.role, 'users.manage') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const ok = window.confirm(language === 'ar'
+                                ? `تجاهل ${e.provisionalId} نهائياً؟ تُسجَّل في التدقيق ولا تصل القاعدة أبداً.`
+                                : `Ignorer ${e.provisionalId} définitivement ? Tracé en audit, jamais transmis.`);
+                              if (ok) discardOutboxEntry(e.key);
+                            }}
+                            className="rounded bg-red-500/20 border border-red-400/40 px-2 py-0.5 text-red-200 hover:bg-red-500/30"
+                          >
+                            {language === 'ar' ? 'تجاهل' : 'Ignorer'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </span>
           )}
           {isFiscalMode ? (
             <span className="flex items-center gap-1 text-emerald-400 font-semibold">
