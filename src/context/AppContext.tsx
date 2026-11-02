@@ -33,6 +33,7 @@ import { probeFiscalAuthority, commitSale, commitSettlement, type AuthorityStatu
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
 import { SESSION_IDLE_MS, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
+import { parseQtyPrefix } from '../core/barcode-qty';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
@@ -749,15 +750,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const code = rawInput.trim();
     if (!code) return { success: false, message: 'Code vide' };
 
+    // B3: `N*CODE` — one scan carries the quantity (12 bottles, 3 keys).
+    // Scale labels define their own qty, so the prefix only applies to
+    // unit / pack / alias / fuzzy resolutions below.
+    const { mult, core } = parseQtyPrefix(code);
+
     // ADR-003-MKT: universal scale labels PP IIIII VVVVV C (20/21/22/28/29,
     // checksum-gated). Weight -> kg qty; price -> qty back-calculated so the
     // line total reproduces the label: qtyMilli = round(priceCt*10/sell_price).
-    const scaleResult = parseScaleBarcode(code);
+    const scaleResult = parseScaleBarcode(core);
     if (scaleResult.isScale && scaleResult.itemCode) {
       const product = products.find(
         p => p.scale_item_code === scaleResult.itemCode
           || p.scale_item_code === String(scaleResult.rawNumericCode)
-          || p.barcode === code
+          || p.barcode === core
       );
       if (product) {
         if (scaleResult.mode === 'PRICE' && scaleResult.priceCt !== undefined) {
@@ -778,7 +784,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    const directProduct = products.find(p => p.barcode === code);
+    const directProduct = products.find(p => p.barcode === core);
     if (directProduct) {
       if (directProduct.is_scale_product && isHardwareScaleActive) {
         const weight = Math.round((scaleWeightGrams / 1000) * 1000) / 1000;
@@ -788,10 +794,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           message: `${directProduct.name_fr} (${weight} kg) pesé`,
         };
       } else {
-        addToCart(directProduct, 1);
+        addToCart(directProduct, mult);
         return {
           success: true,
-          message: `${directProduct.name_fr} ajouté`,
+          message: mult > 1 ? `${directProduct.name_fr} x${mult} ajouté` : `${directProduct.name_fr} ajouté`,
         };
       }
     }
@@ -799,7 +805,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // ADR-004-MKT priority 3: alternate barcode / multipack label registry.
     // Alias (x1) resolves transparently; pack (xN) resolves with multiplier +
     // effective price (override wins, else unit x N). Chime as usual.
-    const alias = productBarcodes.find(a => a.barcode === code);
+    const alias = productBarcodes.find(a => a.barcode === core);
     if (alias) {
       const product = products.find(p => p.id === alias.product_id);
       if (product) {
@@ -808,31 +814,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           Math.round(product.sell_price * 100), multiplier, alias.price_override_ct ?? null,
         );
         if (multiplier > 1) {
-          addToCart(product, 1, 0, {
+          addToCart(product, mult, 0, {
             unitPriceTtc: effectiveCt / 100,
             packMultiplier: multiplier,
             packName: alias.pack_name ?? `Pack x${multiplier}`,
-            barcode: code,
+            barcode: core,
           });
           return {
             success: true,
-            message: `${product.name_fr} [${alias.pack_name ?? `Pack x${multiplier}`}] - ${(effectiveCt / 100).toFixed(2)} DZD ajouté`,
+            message: `${product.name_fr} [${alias.pack_name ?? `Pack x${multiplier}`}]${mult > 1 ? ` x${mult}` : ''} - ${(effectiveCt / 100).toFixed(2)} DZD ajouté`,
           };
         }
-        addToCart(product, 1, 0, { barcode: code });
-        return { success: true, message: `${product.name_fr} ajouté` };
+        addToCart(product, mult, 0, { barcode: core });
+        return { success: true, message: mult > 1 ? `${product.name_fr} x${mult} ajouté` : `${product.name_fr} ajouté` };
       }
     }
 
     const fuzzy = products.find(
       p =>
-        p.barcode.includes(code) ||
-        p.name_fr.toLowerCase().includes(code.toLowerCase()) ||
-        p.name_ar.includes(code)
+        p.barcode.includes(core) ||
+        p.name_fr.toLowerCase().includes(core.toLowerCase()) ||
+        p.name_ar.includes(core)
     );
     if (fuzzy) {
-      addToCart(fuzzy, 1);
-      return { success: true, message: `${fuzzy.name_fr} ajouté` };
+      addToCart(fuzzy, mult);
+      return { success: true, message: mult > 1 ? `${fuzzy.name_fr} x${mult} ajouté` : `${fuzzy.name_fr} ajouté` };
     }
 
     return {

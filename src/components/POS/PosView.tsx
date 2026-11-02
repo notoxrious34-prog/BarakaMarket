@@ -240,8 +240,8 @@ export const PosView: React.FC = () => {
               onChange={e => setBarcodeInput(e.target.value)}
               placeholder={
                 isAr
-                  ? 'امسح الباركود أو أدخل كود الميزان (F1)...'
-                  : 'Scanner code-barres ou saisir code balance (F1)...'
+                  ? 'امسح الباركود أو أدخل كود الميزان (F1)... — N*code للكمية'
+                  : 'Scanner code-barres ou saisir code balance (F1)... — N*code = quantité'
               }
               className="w-full bg-[#111722] border border-[#233145] focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl ps-10 pe-24 py-2.5 text-sm text-white placeholder-slate-500 shadow-inner outline-none transition-all"
               autoFocus
@@ -481,7 +481,8 @@ export const PosView: React.FC = () => {
                   </div>
 
                   <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
-                    <span>
+                    {/* B3: pure-LTR numeric run — no more DZD 080 1 jumble in RTL */}
+                    <span dir="ltr">
                       {item.quantity} {item.unit === 'KG' ? 'kg' : 'x'} {formatDZD(item.unit_price_ttc, false)}
                     </span>
                     {item.discount_percent > 0 && (
@@ -492,18 +493,28 @@ export const PosView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Quantity Controls & Line Total */}
+                {/* Quantity Controls & Line Total — B3: stepper locked LTR (± never
+                    mirrors in RTL), qty is an inline numeric field: 12 bottles
+                    = type 12 + Enter, no modal round-trip. */}
                 <div className="flex items-center gap-2">
-                  <div className="flex items-center bg-[#162030] rounded-lg border border-[#2b3a4f] p-0.5">
+                  <div dir="ltr" className="flex items-center bg-[#162030] rounded-lg border border-[#2b3a4f] p-0.5">
                     <button
                       onClick={() => updateCartItemQty(index, item.quantity - (item.unit === 'KG' ? 0.25 : 1))}
                       className="w-6 h-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-[#233145] rounded cursor-pointer"
                     >
                       <Minus className="w-3 h-3" />
                     </button>
-                    <span className="w-10 text-center text-xs font-bold text-white">
-                      {item.unit === 'KG' ? item.quantity.toFixed(2) : item.quantity}
-                    </span>
+                    <input
+                      value={item.unit === 'KG' ? item.quantity.toFixed(2) : String(item.quantity)}
+                      inputMode="decimal"
+                      aria-label={isAr ? 'الكمية' : 'Quantité'}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value.replace(',', '.'));
+                        if (Number.isNaN(v) || v < 0) return;
+                        updateCartItemQty(index, item.unit === 'KG' ? Math.round(v * 1000) / 1000 : Math.floor(v));
+                      }}
+                      className="w-10 text-center text-xs font-bold text-white bg-transparent outline-none border-b border-transparent focus:border-amber-400 [appearance:textfield]"
+                    />
                     <button
                       onClick={() => updateCartItemQty(index, item.quantity + (item.unit === 'KG' ? 0.25 : 1))}
                       className="w-6 h-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-[#233145] rounded cursor-pointer"
