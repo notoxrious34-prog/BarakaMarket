@@ -192,7 +192,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
           {/* Payment Method Selector */}
           <div>
             <label className="text-xs font-semibold text-slate-300 block mb-1.5">
-              {isAr ? 'طريقة الدفع:' : 'Mode de Règlement:'}
+              {isAr ? 'طريقة الدفع:' : 'Mode de Règlement :'}
             </label>
             <div className="grid grid-cols-3 gap-2">
               <button

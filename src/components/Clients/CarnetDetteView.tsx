@@ -54,8 +54,8 @@ export const CarnetDetteView: React.FC = () => {
   const handleDeleteClient = (client: Client) => {
     if (client.credit_balance > 0) {
       setCrudMsg(isAr
-        ? `مستحيل: لا يمكن حذف زبون عليه دين (${formatDZD(client.credit_balance, false)}) / Action impossible: le client a une dette en cours`
-        : `Action impossible: le client a une dette en cours de ${formatDZD(client.credit_balance, false)}`);
+        ? `مستحيل: لا يمكن حذف زبون عليه دين (${formatDZD(client.credit_balance, false)})`
+        : `Action impossible : un client avec une dette en cours (${formatDZD(client.credit_balance, false)})`);
       return;
     }
     if (!window.confirm(isAr ? `حذف الزبون ${client.name}؟` : `Supprimer ${client.name} ?`)) return;
@@ -134,7 +134,7 @@ export const CarnetDetteView: React.FC = () => {
           <div className="flex items-center justify-between text-xs text-rose-300">
             <span className="flex items-center gap-1.5 font-semibold">
               <BookOpen className="w-4 h-4 text-rose-400" />
-              <span>{isAr ? 'إجمالي ديون الزبائن بالسوبرماركت:' : 'Total Crédit Clients (Carnet):'}</span>
+              <span>{isAr ? 'إجمالي ديون الزبائن:' : 'Total Crédit Clients (Carnet) :'}</span>
             </span>
           </div>
           <div className="text-2xl font-black font-mono text-rose-200 mt-1" dir="ltr">
@@ -142,6 +142,10 @@ export const CarnetDetteView: React.FC = () => {
           </div>
           <div className="text-[11px] text-rose-300/80 mt-0.5">
             {filteredClients.length} {isAr ? 'زبائن مسجلين في الدفتر' : 'clients au carnet'}
+            {' · '}
+            <span className="text-rose-200 font-bold">{filteredClients.filter(c => (c.credit_balance || 0) > 0).length} {isAr ? 'مدين' : 'débiteurs'}</span>
+            {' · '}
+            <span className="text-emerald-300 font-bold">{filteredClients.filter(c => (c.credit_balance || 0) <= 0).length} {isAr ? 'مسدد' : 'soldés'}</span>
           </div>
         </div>
 

@@ -138,7 +138,7 @@ export const LicenseManagerView: React.FC = () => {
                   {isActivated
                     ? (isAr ? '● رخصة دائمة مدى الحياة' : '● LICENCE PERPÉTUELLE À VIE')
                     : (isAr
-                      ? `● نسخة تجريبية — متبقي ${trial.salesRemaining} بيعة / ${trial.daysRemaining} يوم`
+                      ? `● نسخة تجريبية — متبقي ${trial.salesRemaining} عملية بيع / ${trial.daysRemaining} يوم`
                       : `● Version d'essai — ${trial.salesRemaining} ventes / ${trial.daysRemaining} j restants`)}
                 </div>
               </div>
@@ -147,7 +147,7 @@ export const LicenseManagerView: React.FC = () => {
             {/* Step 1 — HWID */}
             <div>
               <div className="text-xs font-bold text-white mb-1.5">
-                {isAr ? '1. البصمة الفريدة لصندوقك (HWID):' : '1. EMPREINTE UNIQUE DE VOTRE CAISSE (HWID):'}
+                {isAr ? '1. البصمة الفريدة لصندوقك (HWID):' : '1. EMPREINTE UNIQUE DE VOTRE CAISSE (HWID) :'}
               </div>
               <div className="flex items-center gap-2">
                 <input

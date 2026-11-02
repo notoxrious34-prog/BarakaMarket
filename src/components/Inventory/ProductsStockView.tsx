@@ -389,7 +389,7 @@ export const ProductsStockView: React.FC = () => {
                     {/* Category */}
                     <td className="py-2.5 px-4 text-center">
                       <span className="px-2 py-0.5 rounded-full text-[10px] bg-[#162030] text-slate-400 border border-[#2b3a4f]">
-                        {p.category_id}
+                        {(() => { const c = initialCategories.find(x => x.id === p.category_id); return c ? (isAr ? c.name_ar : c.name_fr) : p.category_id; })()}
                       </span>
                     </td>
 
@@ -679,14 +679,14 @@ export const ProductsStockView: React.FC = () => {
                     className="w-4 h-4 rounded text-amber-500 bg-[#0b0f17] border-[#2b3a4f]"
                   />
                   <label htmlFor="scale-chk" className="text-xs font-semibold text-slate-200 cursor-pointer">
-                    {isAr ? 'مادة توزن بالميزان الإلكتروني (Code Balance 20XXXXX)' : 'Article au poids avec balance'}
+                    {isAr ? 'مادة توزن بالميزان الإلكتروني (رمز الميزان 20XXXXX)' : 'Article au poids avec balance'}
                   </label>
                 </div>
 
                 {isScaleProduct && (
                   <div className="ps-6">
                     <label className="text-[11px] text-slate-400 block mb-0.5">
-                      {isAr ? 'رمز الميزان (5 أرقام):' : 'Code PLU Balance (5 chiffres):'}
+                      {isAr ? 'رمز الميزان (5 أرقام):' : 'Code PLU Balance (5 chiffres) :'}
                     </label>
                     <input
                       type="text"
