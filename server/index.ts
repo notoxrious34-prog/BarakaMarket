@@ -440,11 +440,11 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
         res.status(400).json({ error: 'body must be {sessionId, countedCashCt, notes?, printReceipt?}' }); return;
       }
       const z = baraka.closeCashSessionAndGenerateZ(sessionId, countedCashCt, notes);
-      // T10: Z closes are security events (actor + Z number + cash diff).
+      // T10 + B4: Z closes are security events (actor + Z number + cash diff + gap reason).
       baraka.logAudit({
         actor: typeof actor === 'string' && actor ? actor : 'till',
         action: 'z.close', entity: 'cash_sessions', entityId: sessionId,
-        detail: `${(z as { zNumber?: string }).zNumber ?? ''} diff=${(z as { cashDiffCt?: number }).cashDiffCt ?? 0}ct`,
+        detail: `${(z as { zNumber?: string }).zNumber ?? ''} diff=${(z as { cashDiffCt?: number }).cashDiffCt ?? 0}ct${typeof notes === 'string' && notes.trim() ? ` reason=${notes.trim().slice(0, 120)}` : ''}`,
       });
       let bytes = 0;
       if (printReceipt !== false) {

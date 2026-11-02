@@ -87,7 +87,8 @@ export type AuditAction =
   | 'login.ok' | 'login.fail' | 'login.locked' | 'logout' | 'session.lock' | 'session.unlock'
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
   | 'update.check' | 'update.install'
-  | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close';
+  | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
+  | 'profile.change';
 
 export interface AuditEvent {
   actor: string;

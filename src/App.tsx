@@ -9,13 +9,9 @@ import { CarnetDetteView } from './components/Clients/CarnetDetteView';
 import { DailyZReportView } from './components/Reports/DailyZReportView';
 import { LicenseManagerView } from './components/License/LicenseManagerView';
 import { LoginScreen } from './components/Session/LoginScreen';
-import { UsersManagerView } from './components/Session/UsersManagerView';
-import { AuditLogView } from './components/Session/AuditLogView';
-import { UpdateManagerView } from './components/Settings/UpdateManagerView';
-import { StoreProfileView } from './components/Settings/StoreProfileView';
+import { SettingsView } from './components/Settings/SettingsView';
 import { SuppliersPurchasesView } from './components/Suppliers/SuppliersPurchasesView';
 import { CashSessionsView } from './components/Cash/CashSessionsView';
-import { BackupManagerView } from './components/Settings/BackupManagerView';
 import { AccountingJournalView } from './components/Accounting/AccountingJournalView';
 import { TicketThermal80mm } from './components/Receipts/TicketThermal80mm';
 import { FactureReglementaireA4 } from './components/Receipts/FactureReglementaireA4';
@@ -74,15 +70,7 @@ const MainLayout: React.FC = () => {
         {activeView === 'reports' && <DailyZReportView />}
         {activeView === 'shifts' && <CashSessionsView />}
         {activeView === 'license' && <LicenseManagerView />}
-        {activeView === 'settings' && (
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            <StoreProfileView />
-            <UpdateManagerView />
-            <UsersManagerView />
-            <AuditLogView />
-            <BackupManagerView />
-          </div>
-        )}
+        {activeView === 'settings' && <SettingsView />}
       </main>
 
       {/* Slim status bar: cashier • version • local DB (fiscal IDs live on receipts + settings) */}

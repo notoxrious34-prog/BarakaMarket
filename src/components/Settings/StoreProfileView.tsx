@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { auditSessionEvent } from '../../core/session-authority';
 import { StoreProfile } from '../../types';
 import {
   Settings,
@@ -12,8 +13,27 @@ import {
 } from 'lucide-react';
 
 export const StoreProfileView: React.FC = () => {
-  const { storeProfile, updateStoreProfile, language } = useApp();
+  const { storeProfile, updateStoreProfile, language, sales, session } = useApp();
   const isAr = language === 'ar';
+  const isOwner = session?.role === 'owner';
+
+  // B5: NIF locks after the first recorded sale — a tax ID must not drift
+  // silently once invoices exist. Owner-only override, always audited.
+  const soldOnce = sales.length > 0;
+  const [nifUnlocked, setNifUnlocked] = useState(false);
+  const nifLocked = soldOnce && !nifUnlocked;
+
+  const mask = (nif: string) => nif.length > 6 ? `${nif.slice(0, 3)}***${nif.slice(-3)}` : '***';
+
+  const unlockNif = async () => {
+    if (!isOwner || !session) return;
+    const ok = window.confirm(isAr
+      ? 'فتح تعديل NIF رغم وجود فواتير؟ سيُسجَّل هذا في سجل التدقيق.'
+      : 'Déverrouiller le NIF malgré des factures existantes ? Sera audité.');
+    if (!ok) return;
+    await auditSessionEvent(session.username, 'profile.change', 'nif unlock override by owner');
+    setNifUnlocked(true);
+  };
 
   const [form, setForm] = useState<StoreProfile>({ ...storeProfile });
   const [savedSuccess, setSavedSuccess] = useState(false);
@@ -34,6 +54,11 @@ export const StoreProfileView: React.FC = () => {
     }
 
     setNifError(null);
+    // B5: any NIF change after sales exist is a fiscal event — audit it (masked).
+    if (soldOnce && cleanNif !== storeProfile.nif_number.replace(/\s+/g, '') && session) {
+      void auditSessionEvent(session.username, 'profile.change',
+        `nif ${mask(storeProfile.nif_number)} → ${mask(cleanNif)}`);
+    }
     updateStoreProfile(form);
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
@@ -89,12 +114,24 @@ export const StoreProfileView: React.FC = () => {
                   required
                   maxLength={15}
                   value={form.nif_number}
+                  readOnly={nifLocked}
                   onChange={e => setForm({ ...form, nif_number: e.target.value })}
-                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-amber-300 font-mono font-bold outline-none focus:border-amber-500"
+                  className={`w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-amber-300 font-mono font-bold outline-none focus:border-amber-500 ${nifLocked ? 'opacity-60 cursor-not-allowed' : ''}`}
                 />
                 <span className="text-[10px] text-slate-500 mt-1 block">
                   Ex: 001516012345678 (15 chiffres)
                 </span>
+                {/* B5: lock notice + owner-only override */}
+                {nifLocked && (
+                  <div className="mt-1.5 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-200 flex items-center gap-2 flex-wrap">
+                    <span>{isAr ? 'مقفَل: توجد فواتير مسجلة بهذا NIF.' : 'Verrouillé : des factures existent avec ce NIF.'}</span>
+                    {isOwner && (
+                      <button type="button" onClick={() => void unlockNif()} className="underline font-bold hover:text-amber-100 cursor-pointer">
+                        {isAr ? 'فتح (مالك، يُسجَّل)' : 'Déverrouiller (gérant, audité)'}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div>

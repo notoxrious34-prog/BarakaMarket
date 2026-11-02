@@ -27,8 +27,14 @@ export const CashSessionsView: React.FC = () => {
   const [movAmount, setMovAmount] = useState('');
   const [movReason, setMovReason] = useState('');
   const [counted, setCounted] = useState('');
+  const [closeReason, setCloseReason] = useState('');
   const [lastZ, setLastZ] = useState<ZResult | null>(null);
   const [msg, setMsg] = useState('');
+
+  // B4: live gap = counted − theoretical, computed before anything closes.
+  const countedCt = counted.trim() === '' ? null : Math.round(Number(counted) * 100);
+  const liveDiffCt = live && countedCt !== null && Number.isFinite(countedCt) ? countedCt - live.theoreticalCashCt : null;
+  const closeBlocked = liveDiffCt !== null && liveDiffCt !== 0 && closeReason.trim() === '';
 
   const refresh = useCallback(async () => {
     try {
@@ -132,12 +138,36 @@ export const CashSessionsView: React.FC = () => {
             <h3 className="text-xs font-bold text-amber-300 mb-3">{isAr ? 'الإغلاق وتقرير Z' : 'Clôture & Rapport Z'}</h3>
             <div className="flex gap-3 items-end">
               <div className="flex-1">
+                <label className="text-[11px] text-slate-400 block mb-1">{isAr ? 'النظري (متوقع)' : 'Théorique (attendu)'}</label>
+                <div className="font-mono text-sm text-emerald-300 font-bold" dir="ltr">{live ? dz(live.theoreticalCashCt) : '—'}</div>
+              </div>
+              <div className="flex-1">
                 <label className="text-[11px] text-slate-400 block mb-1">{isAr ? 'النقد المحسوب (دج)' : 'Espèces comptées (DZD)'}</label>
                 <input className={`${input} font-mono`} type="number" value={counted} onChange={e => setCounted(e.target.value)} />
               </div>
+              <div className="flex-1">
+                <label className="text-[11px] text-slate-400 block mb-1">{isAr ? 'الفرق المباشر' : 'Écart en direct'}</label>
+                <div className={`font-mono text-sm font-bold ${liveDiffCt === null ? 'text-slate-500' : liveDiffCt === 0 ? 'text-emerald-300' : liveDiffCt > 0 ? 'text-amber-300' : 'text-rose-300'}`} dir="ltr">
+                  {liveDiffCt === null ? '—' : `${dz(liveDiffCt)}${liveDiffCt === 0 ? (isAr ? ' مثالي' : ' PARFAIT') : liveDiffCt > 0 ? (isAr ? ' فائض' : ' EXCÉDENT') : (isAr ? ' عجز' : ' DÉFICIT')}`}
+                </div>
+              </div>
+            </div>
+            {/* B4: a non-zero gap closes ONLY with a written reason (goes to notes + z.close audit). */}
+            {(liveDiffCt !== null && liveDiffCt !== 0) && (
+              <div className="mt-2">
+                <label className="text-[11px] text-amber-300 block mb-1">{isAr ? 'سبب الفرق (إلزامي للإغلاق)' : 'Motif de l’écart (obligatoire) :'}</label>
+                <input className={input} value={closeReason} onChange={e => setCloseReason(e.target.value)} placeholder={isAr ? 'مثال: فرق صرف، خطأ عد...' : 'Ex : erreur de rendu, différence de comptage…'} />
+              </div>
+            )}
+            <div className="flex gap-3 items-end mt-2">
               <button
-                className={`${btn} bg-amber-600 hover:bg-amber-500 text-white`}
-                onClick={() => void post(`${API}/api/cash/close-and-z`, { sessionId: live.session.id, countedCashCt: Math.round(Number(counted) * 100), printReceipt: true, actor: session?.username ?? cashier }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé')}
+                className={`${btn} ${closeBlocked ? 'bg-slate-700 text-slate-400 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-500 text-white'}`}
+                disabled={closeBlocked}
+                title={closeBlocked ? (isAr ? 'اكتب سبب الفرق أولاً' : 'Motif requis d’abord') : undefined}
+                onClick={() => {
+                  if (!live || countedCt === null) { setMsg(isAr ? 'أدخل المبلغ المحسوب أولاً' : 'Saisissez le compté d’abord'); return; }
+                  void post(`${API}/api/cash/close-and-z`, { sessionId: live.session.id, countedCashCt: countedCt, notes: closeReason.trim() || undefined, printReceipt: true, actor: session?.username ?? cashier }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé');
+                }}
               >
                 {isAr ? 'إغلاق وطبع Z' : 'Clôturer + Z'}
               </button>

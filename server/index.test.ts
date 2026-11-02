@@ -419,3 +419,20 @@ test('api: T10 close-and-z writes a z.close audit row', async () => {
   const row = audit.find(a => a.action === 'z.close' && a.actor === 't10-owner');
   assert.ok(row, 'z.close audit row present');
 });
+
+test('api: B4 close-and-z with notes stores the gap reason in the z.close audit detail', async () => {
+  const o = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'B4', openingFloatCt: 100000 }),
+  });
+  assert.equal(o.status, 201);
+  const sess = await o.json() as { id: string };
+  const c = await fetch(`${base}/api/cash/close-and-z`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: sess.id, countedCashCt: 99900, actor: 'b4-owner', notes: 'erreur de rendu' }),
+  });
+  assert.equal(c.status, 201);
+  const audit = await (await fetch(`${base}/api/audit?limit=100`)).json() as { action: string; actor: string; detail: string }[];
+  const row = audit.find(a => a.action === 'z.close' && a.actor === 'b4-owner');
+  assert.ok(row && row.detail.includes('reason=erreur de rendu'), 'gap reason persisted in audit');
+});
