@@ -10,7 +10,7 @@ import { changeSessionPin } from '../../core/session-authority';
  */
 export const LoginScreen: React.FC = () => {
   const {
-    language, toggleLanguage, session, sessionLocked,
+    language, toggleLanguage, session, sessionLocked, lockNotice,
     sessionUsers, refreshSessionUsers, login, logout, unlockSession, setActiveView,
   } = useApp();
   const ar = language === 'ar';
@@ -192,6 +192,11 @@ export const LoginScreen: React.FC = () => {
           <button onClick={toggleLanguage} className="text-[11px] text-slate-500 hover:text-amber-300 underline">
             {ar ? 'Français' : 'العربية'}
           </button>
+          {lockNotice && (
+            <p className="mt-1 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200 text-center">
+              {lockNotice}
+            </p>
+          )}
         </div>
 
         {!sessionLocked && !mustChange && (

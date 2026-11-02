@@ -163,6 +163,7 @@ interface AppContextType {
    */
   session: Session | null;
   sessionLocked: boolean;
+  lockNotice: string;
   sessionUsers: SessionUser[];
   lockSession: () => void;
   login: (username: string, pin: string) => Promise<
@@ -392,6 +393,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   });
   const [sessionLocked, setSessionLocked] = useState(false);
+  // B2: explains WHY a lock-screen unlock bounced (e.g. stale default PIN).
+  const [lockNotice, setLockNotice] = useState('');
   const [sessionUsers, setSessionUsers] = useState<SessionUser[]>([]);
   const sessionRef = useRef<Session | null>(session);
   sessionRef.current = session;
@@ -427,6 +430,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { ok: false as const, locked: false, mustChange: { userId: r.user.id, username: r.user.username } };
     }
     setSessionLocked(false);
+    setLockNotice('');
     setSession({
       userId: r.user.id, username: r.user.username, displayName: r.user.display_name,
       role: r.user.role, loginAt: Date.now(), lastActivityAt: Date.now(),
@@ -447,7 +451,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!s) return false;
     const r = await loginUser(s.username, pin);
     if (!r.ok) return false;
-    if (r.user.must_change_pin === 1) return false; // forced change goes through changeOwnPin
+    // B2 fix: a stale lock-screen session with must_change_pin=1 used to die
+    // here with a misleading "wrong code". Reset to full login instead — the
+    // proven forced-change flow takes over from there.
+    if (r.user.must_change_pin === 1) {
+      await logout();
+      setLockNotice(language === 'ar'
+        ? 'الرمز الافتراضي يحتاج تغييراً — سجّل الدخول برقمك ثم اختر رمزاً جديداً'
+        : 'Le code par défaut doit être changé — connectez-vous puis choisissez un code');
+      return false;
+    }
     setSession({ ...s, loginAt: Date.now(), lastActivityAt: Date.now() });
     setSessionLocked(false);
     await auditSessionEvent(s.username, 'session.unlock');
@@ -1628,6 +1641,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setScaleWeightGrams,
         session,
         sessionLocked,
+        lockNotice,
         sessionUsers,
         lockSession,
         login,
