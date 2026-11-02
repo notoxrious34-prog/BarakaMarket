@@ -71,7 +71,8 @@ Date: 2026-10-27 · Commit: `fd23dd7` (tag `v1.0.0`) · Runner: `npm run test:al
 
 - `tsc --noEmit`: EXIT 0, empty log.
 - `vite build`: success, `dist/` 1.6MB (< 2.5MB gate), zero warnings.
-- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — 266/266 + Rust 14/14 holds.
+- Gate floor: must never regress below 58/58 (Constitution v2-MKT §4) — **271/271 + Rust 14/14 holds (Phase 1 v1.1.1)**.
+- Phase 1 v1.1.1 (PLAN-v1.2.0) DONE on iron: A1 outbox badge (pending/failed) + inspector panel (retry / owner-gated audited discard via `removeOutboxEntry` + `sale.void` audit) + DRAFT unposted stamp; A2 legacy-boot (`splitSchemaIndexes`, `golden-legacy.test.ts`, `GOLD OPENS v5/36`); A3 live `APP_VERSION` + `version-guard.test.ts` (footer/updater/ticket/index.html — `V1.1.1` on iron); A4 timbre-min disclosure. Live proof: server-down sale → `1 بانتظار الإرسال`; stale `SALE-1793563229219` surfaced red → owner discard → `sales=0`, `outbox=[]`, audit row `outbox discard … by owner`. Release `v1.1.1` signed `SIG-OK [ED]`, silently installed (6988800 B) + smoke + login E2E.
 - ADR-017-MKT (2026-10-26): Algerian reference catalog (257 templates/112 brands,
   28 fiscal categories, BiDi sanitizer, token scorer), `ref_*` seed + REST lane,
   product-modal autofill, standalone Owner keygen GUI with seal self-check.
