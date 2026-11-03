@@ -187,6 +187,27 @@ export const LATEST_SCHEMA_VERSION = 7;
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
 
+/**
+ * Windows locks fresh files briefly (AV/indexer) — a single unlinkSync can
+ * throw EPERM/EBUSY on a file that is really ours to delete. Retry a few
+ * times before treating it as gone; swallowing the first EPERM silently
+ * breaks the retention guarantee (proven by a load-induced flake).
+ */
+function unlinkWithRetry(p: string, tries = 5): void {
+  for (let i = 0; i < tries; i++) {
+    try {
+      fs.unlinkSync(p);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'ENOENT') return; // truly gone or foreign error
+      if (i === tries - 1) return;
+      // Brief backoff — then final attempt; still locked means truly busy.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (i + 1));
+    }
+  }
+}
+
 function schemaVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
 }
@@ -1328,8 +1349,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             'SELECT id, filename, file_path AS filePath, created_at AS created_at FROM backups_log ORDER BY created_at DESC, rowid DESC',
           ).all() as { id: string; filename: string; filePath: string; created_at: string }[];
           for (const old of prunePlan(rows, BACKUP_RETENTION_KEEP)) {
-            try { if (old.filePath) fs.unlinkSync(old.filePath); } catch { /* already gone */ }
-            try { if (old.filePath) fs.unlinkSync(manifestPathFor(old.filePath)); } catch { /* no sidecar */ }
+            if (old.filePath) unlinkWithRetry(old.filePath);
+            if (old.filePath) unlinkWithRetry(manifestPathFor(old.filePath));
             db.prepare('DELETE FROM backups_log WHERE id = ?').run(old.id);
           }
         } catch (e) {
