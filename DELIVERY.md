@@ -36,6 +36,12 @@
       (TS + Rust, 19/19) · ledger-verified close, voids/sales/shifts refused on locked day ·
       UI reprints from the stored row (`TICKET_EQUAL: true`, vision PASS 1366+768) ·
       live: `Z-2026-000003` 714.00 DZD, 2nd close refused `400` · **308/308** · tsc/lint/build clean.
+- [x] Owner 2026-11-03 — manual-only lock (idle ticker removed, lock is an overlay,
+      cart 660 DZD survives lock/unlock, lane-proven) · «بداية نظيفة» owner-PIN clean
+      start (demo wiped, users/identity/license kept, CLEAN_START blocks reseed) ·
+      supplier receipt edit/delete (manager+, stock reversal + PMP, BR number kept,
+      lane: 20→7→deleted + 6/6 unit) · vision PASS (danger zone, receipt cards) ·
+      **314/314** · tsc/lint/build clean.
 - [x] Owner tasks (2026-11-02) — auto-update dry-run PASS on iron (`À jour — 1.3.3`, nothing installed) ·
       reception inline new-product (manual barcode/TVA 9%/epicerie, lane-proven) ·
       products DB read-only audit clean (14 exe / 14 loopback / 14 UI, zero defects, no fixes applied).

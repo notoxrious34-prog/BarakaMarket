@@ -31,9 +31,10 @@ import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
-import { SESSION_IDLE_MS, can, type Session } from '../core/rbac.js';
-import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
+import { can, type Session } from '../core/rbac.js';
+import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, OUTBOX_KEY, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
 import { parseQtyPrefix } from '../core/barcode-qty';
+import { reverseReceiptLines, editReceiptLines } from '../core/purchase-lane';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
@@ -133,6 +134,11 @@ interface AppContextType {
     amountPaid: number,
     note?: string
   ) => PurchaseInvoice;
+  deletePurchaseReceipt: (id: string) => void;
+  updatePurchaseReceipt: (
+    id: string,
+    patch: { items: PurchaseItem[]; note?: string; amountPaid: number; paymentMethod: 'ESPECES' | 'VIREMENT' | 'CHEQUE' | 'CREDIT' }
+  ) => void;
   settleSupplierDebt: (
     supplierId: number,
     amount: number,
@@ -140,6 +146,7 @@ interface AppContextType {
     reference?: string,
     note?: string
   ) => SupplierPayment;
+  factoryResetDemo: (ownerPin: string) => Promise<void>;
 
   // Product & Store management
   addProduct: (product: Omit<Product, 'id'>) => Product;
@@ -208,6 +215,8 @@ const STORAGE_KEYS = {
   ACTIVE_DRAFT: 'baraka_active_draft_cart_v2',
   LANG: 'baraka_lang_v2',
   THEME: 'baraka_theme_v2',
+  /** Owner «بداية نظيفة»: when set, initializers start empty instead of demo seed. */
+  CLEAN_START: 'baraka_clean_start_v1',
   SEQ_FACT_PREFIX: 'baraka_seq_FACT_',
   SEQ_TICKET_PREFIX: 'baraka_seq_T_',
   SEQ_QUITTANCE_PREFIX: 'baraka_seq_Q_',
@@ -241,9 +250,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [products, setProducts] = useState<Product[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
-      return saved ? JSON.parse(saved) : initialProducts;
+      if (saved) return JSON.parse(saved);
+      return isCleanStart() ? [] : initialProducts;
     } catch {
-      return initialProducts;
+      return isCleanStart() ? [] : initialProducts;
     }
   });
 
@@ -254,6 +264,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (saved) return JSON.parse(saved) as ProductBarcodeAlias[];
     } catch { /* fall through to seed */ }
     // Demo colisage: EAU LALLA 1.5L (id 5, 45 DZD) — Pack x6 label at 250 DZD.
+    // Skipped on a clean start (no demo product 5 exists there).
+    if (isCleanStart()) return [];
     return [{ product_id: 5, barcode: '6130000001059', multiplier: 6, pack_name: 'Pack x6', price_override_ct: 25000 }];
   });
   useEffect(() => {
@@ -275,18 +287,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [clients, setClients] = useState<Client[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CLIENTS);
-      return saved ? JSON.parse(saved) : initialClients;
+      if (saved) return JSON.parse(saved);
+      return isCleanStart() ? [] : initialClients;
     } catch {
-      return initialClients;
+      return isCleanStart() ? [] : initialClients;
     }
   });
 
   const [suppliers, setSuppliers] = useState<Supplier[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.SUPPLIERS);
-      return saved ? JSON.parse(saved) : initialSuppliers;
+      if (saved) return JSON.parse(saved);
+      return isCleanStart() ? [] : initialSuppliers;
     } catch {
-      return initialSuppliers;
+      return isCleanStart() ? [] : initialSuppliers;
     }
   });
 
@@ -384,10 +398,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // T8 (ADR-031): authenticated session. Persisted across reloads (never the
-  // PIN — only the verified identity + timestamps). Stale sessions die by
-  // idle timeout, never by wall clock: lastActivityAt refreshes on every
-  // fiscal commit, login and unlock.
+  // PIN — only the verified identity + timestamps). Owner order 2026-11-03:
+  // manual lock only — no idle timeout (lastActivityAt still refreshes on
+  // fiscal commits for the audit trail).
   const SESSION_KEY = 'baraka_session_v1';
+  function isCleanStart(): boolean {
+  try { return localStorage.getItem(STORAGE_KEYS.CLEAN_START) === '1'; } catch { return false; }
+}
   const [session, setSession] = useState<Session | null>(() => {
     try {
       const saved = localStorage.getItem(SESSION_KEY);
@@ -417,18 +434,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSession(prev => (prev ? { ...prev, lastActivityAt: Date.now() } : prev));
   };
 
-  // T8: idle lock — 60s ticker, locks when the session outlives SESSION_IDLE_MS.
-  useEffect(() => {
-    const t = setInterval(() => {
-      const s = sessionRef.current;
-      if (!s) return;
-      if (Date.now() - s.lastActivityAt > SESSION_IDLE_MS) {
-        setSessionLocked(true);
-        void auditSessionEvent(s.username, 'session.lock', 'idle-timeout');
-      }
-    }, 60_000);
-    return () => clearInterval(t);
-  }, []);
+  // Owner order (2026-11-03): the shop locks MANUALLY ONLY (navbar lock
+  // button). No idle timer — auto-lock was destroying in-progress work
+  // (the takeover unmounted the POS). Security tradeoff accepted by owner:
+  // a walked-away terminal stays open until the cashier locks it.
+  // (Previously: 60s ticker vs SESSION_IDLE_MS — removed, do not re-add
+  // without an explicit owner order.)
 
   const login = async (username: string, pin: string) => {
     const r = await loginUser(username.trim(), pin);
@@ -1392,6 +1403,111 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newInvoice;
   };
 
+  /**
+   * Owner order 2026-11-03: full receipt edit/delete (manager+).
+   * Delete reverses stock exactly (refuses when goods were sold since) and
+   * backs out the PMP; the supplier debt is reduced by the receipt's unpaid
+   * remainder, floored at zero. No physical invoice renumbering — the BR
+   * sequence keeps its hole (fiscal trace).
+   */
+  const deletePurchaseReceipt = (id: string): void => {
+    const s = sessionRef.current;
+    if (!s || !can(s.role, 'products.edit')) throw new Error('[receipt] manager or owner required');
+    const receipt = purchases.find(p => p.id === id);
+    if (!receipt) throw new Error('[receipt] not found');
+    const rev = reverseReceiptLines(products, receipt.items);
+    if (!rev.products) throw new Error(`[receipt] ${rev.error}`);
+    setProducts(prev => prev.map(p => {
+      const next = rev.products!.find(x => x.id === p.id);
+      return next ? { ...p, stock_qty: next.stock_qty, buy_price: next.buy_price } : p;
+    }));
+    setSuppliers(prev => prev.map(x => x.id === receipt.supplier_id
+      ? { ...x, balance_due: Math.round(Math.max(0, x.balance_due - receipt.amount_due) * 100) / 100 }
+      : x));
+    setPurchases(prev => prev.filter(p => p.id !== id));
+    void auditSessionEvent(s.username, 'profile.change', `receipt ${receipt.invoice_number} deleted by ${s.username}`);
+  };
+
+  /** Edit = reverse old lines + apply new lines; invoice number kept. */
+  const updatePurchaseReceipt = (
+    id: string,
+    patch: { items: PurchaseItem[]; note?: string; amountPaid: number; paymentMethod: 'ESPECES' | 'VIREMENT' | 'CHEQUE' | 'CREDIT' },
+  ): void => {
+    const s = sessionRef.current;
+    if (!s || !can(s.role, 'products.edit')) throw new Error('[receipt] manager or owner required');
+    const receipt = purchases.find(p => p.id === id);
+    if (!receipt) throw new Error('[receipt] not found');
+    if (patch.items.length === 0) throw new Error('[receipt] a receipt needs at least one line');
+    const out = editReceiptLines(products, receipt.items, patch.items);
+    if (!out.products) throw new Error(`[receipt] ${out.error}`);
+    let totalHT = 0;
+    let totalTTC = 0;
+    for (const item of patch.items) {
+      totalHT += item.total_line_ht;
+      totalTTC += item.total_line_ttc;
+    }
+    totalHT = Math.round(totalHT * 100) / 100;
+    totalTTC = Math.round(totalTTC * 100) / 100;
+    const amountDue = Math.max(0, Math.round((totalTTC - patch.amountPaid) * 100) / 100);
+    setProducts(prev => prev.map(p => {
+      const next = out.products!.find(x => x.id === p.id);
+      return next ? { ...p, stock_qty: next.stock_qty, buy_price: next.buy_price } : p;
+    }));
+    // Debt delta: remove the old unpaid remainder, add the new one.
+    const debtDelta = Math.round((amountDue - receipt.amount_due) * 100) / 100;
+    setSuppliers(prev => prev.map(x => x.id === receipt.supplier_id
+      ? { ...x, balance_due: Math.round(Math.max(0, x.balance_due + debtDelta) * 100) / 100 }
+      : x));
+    setPurchases(prev => prev.map(p => p.id === id
+      ? {
+        ...p, items: [...patch.items], total_ht: totalHT,
+        total_tva: Math.round((totalTTC - totalHT) * 100) / 100, total_ttc: totalTTC,
+        payment_method: patch.paymentMethod, amount_paid: patch.amountPaid,
+        amount_due: amountDue, note: patch.note,
+      }
+      : p));
+    void auditSessionEvent(s.username, 'profile.change', `receipt ${receipt.invoice_number} edited by ${s.username}`);
+  };
+
+  /**
+   * Owner order 2026-11-03: «بداية نظيفة» — wipe all demo/operational data
+   * (products, clients, suppliers, sales, purchases, settlements, payments,
+   * held carts, drafts, outbox residue, seq counters, barcode aliases) and
+   * keep identity: users (SQLite), store profile, license, language/theme,
+   * session. Owner PIN required; refused while the outbox has residue.
+   */
+  const factoryResetDemo = async (ownerPin: string): Promise<void> => {
+    const s = sessionRef.current;
+    if (!s || s.role !== 'owner') throw new Error('[reset] owner required');
+    const v = await loginUser(s.username, ownerPin);
+    if (!v.ok) throw new Error('[reset] PIN incorrect');
+    if (pendingOutboxCount(lsStore) > 0) {
+      throw new Error('[reset] outbox has pending operations — drain first');
+    }
+    const wipeExact = [
+      STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.CLIENTS, STORAGE_KEYS.SUPPLIERS,
+      STORAGE_KEYS.SALES, STORAGE_KEYS.PURCHASES, STORAGE_KEYS.SETTLEMENTS,
+      STORAGE_KEYS.SUPPLIER_PAYMENTS, STORAGE_KEYS.HELD_CARTS,
+      STORAGE_KEYS.ACTIVE_DRAFT, STORAGE_KEYS.BARCODES, OUTBOX_KEY,
+    ];
+    for (const k of wipeExact) {
+      try { localStorage.removeItem(k); } catch { /* private mode */ }
+    }
+    // Seq counters (FACT/T/Q/BL…) restart from zero on a clean shop.
+    try {
+      const seqKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith('baraka_seq_'))) seqKeys.push(k);
+      }
+      for (const k of seqKeys) localStorage.removeItem(k);
+      // Marker: initializers start empty instead of reseeding demo data.
+      localStorage.setItem(STORAGE_KEYS.CLEAN_START, '1');
+    } catch { /* private mode */ }
+    await auditSessionEvent(s.username, 'profile.change', 'danger: factory clean-start by owner (demo data wiped, identity kept)');
+    window.location.reload();
+  };
+
   const settleSupplierDebt = (
     supplierId: number,
     amount: number,
@@ -1658,7 +1774,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateSupplier,
         deleteSupplier,
         recordPurchaseReception,
+        deletePurchaseReceipt,
+        updatePurchaseReceipt,
         settleSupplierDebt,
+        factoryResetDemo,
         addProduct,
         updateProduct,
         deleteProduct,

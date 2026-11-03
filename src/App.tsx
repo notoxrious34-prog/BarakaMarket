@@ -53,9 +53,10 @@ const MainLayout: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [toggleLanguage]);
 
-  // T8 (ADR-031): no session (or a locked one) = no shop. The PIN screen is
-  // a full takeover — no view, no footer, no hotkey surface behind it.
-  if (!session || sessionLocked) return <LoginScreen />;
+  // Owner order 2026-11-03: manual lock only. A locked session renders as an
+  // OVERLAY above the live shop — the POS tree never unmounts, so carts,
+  // modals and drafts survive the lock/unlock cycle.
+  if (!session) return <LoginScreen />;
 
   return (
     <div className="min-h-screen bg-[#0b0f17] text-slate-100 flex flex-col font-sans select-none antialiased">
@@ -182,6 +183,14 @@ const MainLayout: React.FC = () => {
 
       {/* Debt settlement quittance (Art.136) — auto-opened on settleClientDebt */}
       {lastSettlementQuittance && <SettlementQuittanceTicket />}
+
+      {/* Owner order 2026-11-03: manual lock renders ABOVE the live shop.
+          The tree stays mounted — carts, modals and drafts survive. */}
+      {sessionLocked && session && (
+        <div className="fixed inset-0 z-[100] overflow-y-auto bg-black/70 backdrop-blur-[2px]">
+          <LoginScreen />
+        </div>
+      )}
     </div>
   );
 };

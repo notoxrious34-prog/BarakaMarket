@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Product, PurchaseItem, Supplier, TVARate } from '../../types';
+import { Product, PurchaseInvoice, PurchaseItem, Supplier, TVARate } from '../../types';
+import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import { calculateNewPMP } from '../../utils/accounting';
 import {
@@ -35,11 +36,15 @@ export const SuppliersPurchasesView: React.FC = () => {
     updateSupplier,
     deleteSupplier,
     recordPurchaseReception,
+    deletePurchaseReceipt,
+    updatePurchaseReceipt,
     settleSupplierDebt,
     addProduct,
+    session,
     language,
   } = useApp();
   const isAr = language === 'ar';
+  const canEditReceipts = can(session?.role ?? 'cashier', 'products.edit');
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSupplier, setSelectedSupplier] = useState<Supplier>(suppliers[0]);
@@ -105,6 +110,31 @@ export const SuppliersPurchasesView: React.FC = () => {
 
   const supplierPurchases = purchases.filter(p => p.supplier_id === selectedSupplier?.id);
 
+  // Owner order 2026-11-03: receipt edit = prefill the reception modal.
+  const [editingReceiptId, setEditingReceiptId] = useState<string | null>(null);
+  const [receiptError, setReceiptError] = useState('');
+
+  const openEditReceipt = (purchase: PurchaseInvoice) => {
+    setReceiptError('');
+    setEditingReceiptId(purchase.id);
+    setReceptionItems(purchase.items.map(it => ({ ...it })));
+    setPaymentMode(purchase.payment_method);
+    setAmountPaidInput(String(purchase.amount_paid));
+    setReceptionNote(purchase.note ?? '');
+    setShowReceptionModal(true);
+  };
+
+  const handleDeleteReceipt = (purchase: PurchaseInvoice) => {
+    setReceiptError('');
+    if (!window.confirm(isAr
+      ? `حذف الوصل ${purchase.invoice_number} وعكس أثره على المخزون؟`
+      : `Supprimer ${purchase.invoice_number} et annuler son effet stock ?`)) return;
+    try {
+      deletePurchaseReceipt(purchase.id);
+    } catch (e) {
+      setReceiptError((e as Error).message);
+    }
+  };
   // Inline new-product form inside the reception modal (owner request):
   // manual barcode + TVA 9% + epicerie defaults, prices reused from the line.
   const [showNewProduct, setShowNewProduct] = useState(false);
@@ -187,6 +217,8 @@ export const SuppliersPurchasesView: React.FC = () => {
 
   const handleOpenReception = (sup: Supplier) => {
     setSelectedSupplier(sup);
+    setEditingReceiptId(null);
+    setReceiptError('');
     setReceptionItems([]);
     setAmountPaidInput('0');
     setPaymentMode('CREDIT');
@@ -201,13 +233,26 @@ export const SuppliersPurchasesView: React.FC = () => {
     if (receptionItems.length === 0 || !selectedSupplier) return;
 
     const paid = parseFloat(amountPaidInput) || 0;
-    recordPurchaseReception(
-      selectedSupplier.id,
-      receptionItems,
-      paymentMode,
-      paid,
-      receptionNote
-    );
+    setReceiptError('');
+    try {
+      if (editingReceiptId) {
+        updatePurchaseReceipt(editingReceiptId, {
+          items: receptionItems, note: receptionNote, amountPaid: paid, paymentMethod: paymentMode,
+        });
+        setEditingReceiptId(null);
+      } else {
+        recordPurchaseReception(
+          selectedSupplier.id,
+          receptionItems,
+          paymentMode,
+          paid,
+          receptionNote
+        );
+      }
+    } catch (err) {
+      setReceiptError((err as Error).message);
+      return;
+    }
 
     setShowReceptionModal(false);
   };
@@ -466,8 +511,34 @@ export const SuppliersPurchasesView: React.FC = () => {
                               Dû: {formatDZD(purchase.amount_due, false)}
                             </span>
                           )}
+                          {canEditReceipts && (
+                            <span className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => openEditReceipt(purchase)}
+                                title={isAr ? 'تعديل الوصل' : 'Modifier le bon'}
+                                className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-sky-950/60 text-sky-300 border border-sky-800/60 hover:bg-sky-900/60 cursor-pointer"
+                              >
+                                {isAr ? 'تعديل' : 'Modifier'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteReceipt(purchase)}
+                                title={isAr ? 'حذف الوصل وعكس المخزون' : 'Supprimer le bon'}
+                                className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-rose-950/60 text-rose-300 border border-rose-800/60 hover:bg-rose-900/60 cursor-pointer"
+                              >
+                                {isAr ? 'حذف' : 'Supprimer'}
+                              </button>
+                            </span>
+                          )}
                         </div>
                       </div>
+
+                      {receiptError && (
+                        <div className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/50 rounded-lg px-2 py-1">
+                          {receiptError}
+                        </div>
+                      )}
 
                       {/* Items received into stock */}
                       <div className="overflow-x-auto">
@@ -522,7 +593,9 @@ export const SuppliersPurchasesView: React.FC = () => {
                 <PackagePlus className="w-5 h-5 text-emerald-400" />
                 <div>
                   <h3 className="text-sm font-bold text-white">
-                    {isAr ? 'استلام سلع جديدة وإضافتها للمخزن مع احتساب PMP' : 'Bon de Réception Fournisseur (Entrée Stock & PMP)'}
+                    {editingReceiptId
+                      ? (isAr ? 'تعديل وصل الاستلام (يُعاد حساب المخزون وPMP)' : 'Modification du bon (stock & PMP recalculés)')
+                      : (isAr ? 'استلام سلع جديدة وإضافتها للمخزن مع احتساب PMP' : 'Bon de Réception Fournisseur (Entrée Stock & PMP)')}
                   </h3>
                   <p className="text-[11px] text-slate-400">
                     {selectedSupplier.name}

@@ -185,3 +185,23 @@ Owner tasks (2026-11-02, all approved via clarify before implementation):
 | UI (`DailyZReportView.tsx`) | provisional `-P` fallback deleted · mount probe (`/api/z/list` DAY row = reprint source) + `fetchDailyZ.closed` · tickets render from the stored row (`tv.*`), live cards stay managerial · voids locked + close gated `z.close` (manager+) · FR plurals · `onClick={void handleClose()}` render-loop bug fixed · prev_hash display fixed (was own hash) · footer wraps <900px | ✅ lane: `Z-2026-000003 FINALISÉ`, lock banner, ticket reload `TICKET_EQUAL: true`, vision PASS 1366 + 768 |
 | Live ledger proof | loopback restarted on new code (stale v5 process killed) · 2 sales + 1 ESPECES settlement + verified close (`71400ct`, chain genesis→`b47be2d4…`) · 2nd close → `400 already legally closed (Z FINALISÉ)` | ✅ day-lock enforced live, not cosmetic |
 | **Total** | | **✅ 308/308, 0 fail · `tsc` clean · `lint` clean · `vite build` ✅** |
+
+## Owner 2026-11-03 — manual lock + clean start + receipt edit/delete
+- **Manual-only lock** (owner order): the 60s idle ticker deleted (it locked after
+  15 min while seeing only fiscal commits — real shop activity never reset it) and the
+  lock became an overlay (`z-[100]`) above the mounted tree instead of a takeover
+  that unmounted the POS. Lane: cart `TOTAL TTC 660` before lock → `pinScreen+posAlive`
+  → unlock `5678` → cart still `660` (PRESERVED). Security tradeoff (walked-away
+  terminal stays open) explicitly accepted by owner.
+- **«بداية نظيفة»** (`Settings > خطر`, owner + PIN + double confirm): wipes demo/
+  operational localStorage (products/suppliers/clients/sales/purchases/settlements/
+  payments/held/draft/outbox/barcodes/`baraka_seq_*`) + sets `CLEAN_START=1` so
+  initializers start empty instead of reseeding demo; keeps users (SQLite), store
+  identity, license, language, session; refused with pending outbox. Lane + vision PASS.
+- **Receipt edit/delete** (manager+, `products.edit`): `deletePurchaseReceipt`
+  (stock reversal with negative-stock refusal, PMP back-out, supplier debt floored
+  at 0, BR number never reused) + `updatePurchaseReceipt` (reverse-old + apply-new,
+  same invoice, debt delta). Pure math in `src/core/purchase-lane.ts` (6/6 tests).
+  UI: تعديل/حذف on every receipt card; edit prefills the reception modal.
+  Lane: `BR-2026-0002` created `+20` → edited to `+7` → deleted (gone), vision PASS.
+- Gates: **314/314** · `tsc` clean · `lint` clean · `vite build` ✅.

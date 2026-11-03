@@ -20,8 +20,10 @@ const PURGE_KEYS = [
 ];
 
 const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
-  const { session } = useApp();
+  const { session, factoryResetDemo } = useApp();
   const [msg, setMsg] = useState('');
+  const [resetPin, setResetPin] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
   const isOwner = session?.role === 'owner';
 
   const purge = async () => {
@@ -66,6 +68,48 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
         {isAr ? 'مسح الذاكرة المؤقتة' : 'Purger le cache'}
       </button>
       {msg && <p className="text-xs text-amber-200">{msg}</p>}
+
+      {/* Owner order 2026-11-03: «بداية نظيفة» — full clean start for real
+          shop use. Wipes demo/operational data, keeps users (SQLite), store
+          identity, license, language. Owner PIN required. */}
+      <div className="border-t border-rose-800/50 pt-3 space-y-2">
+        <p className="text-xs text-slate-400">
+          {isAr
+            ? 'بداية نظيفة للاستخدام الحقيقي: يمسح كل المنتجات/الموردين/العملاء/المشتريات/المبيعات التجريبية ويُبقي المستخدمين والهوية والرخصة.'
+            : 'Démarrage à neuf pour usage réel : efface démo (produits/fournisseurs/clients/achats/ventes), garde utilisateurs, identité, licence.'}
+        </p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            type="password"
+            inputMode="numeric"
+            value={resetPin}
+            onChange={e => setResetPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+            placeholder={isAr ? 'PIN المالك' : 'PIN gérant'}
+            disabled={!isOwner || resetBusy}
+            className="w-32 px-3 py-2 rounded-xl text-xs bg-[#0b0f17] border border-[#2b3a50] text-slate-200 placeholder:text-slate-500"
+          />
+          <button
+            onClick={() => void (async () => {
+              if (!isOwner || resetBusy) return;
+              const ok = window.confirm(isAr
+                ? 'تأكيد نهائي: مسح كل البيانات التجريبية والبدء من الصفر؟ (المستخدمون والهوية والرخصة محفوظة)'
+                : 'Confirmation finale : tout effacer et repartir de zéro ? (Utilisateurs, identité, licence conservés)');
+              if (!ok) return;
+              setResetBusy(true);
+              try {
+                await factoryResetDemo(resetPin);
+              } catch (e) {
+                setMsg(isAr ? `مرفوض: ${(e as Error).message}` : `Refusé : ${(e as Error).message}`);
+                setResetBusy(false);
+              }
+            })()}
+            disabled={!isOwner || resetBusy || resetPin.length === 0}
+            className={`px-4 py-2 rounded-xl text-xs font-bold ${isOwner && resetPin.length > 0 ? 'bg-rose-700 hover:bg-rose-600 text-white cursor-pointer' : 'bg-slate-700 text-slate-400 cursor-not-allowed'}`}
+          >
+            {isAr ? 'بداية نظيفة (مسح التجريبي)' : 'Démarrage à neuf'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 };

@@ -1,5 +1,17 @@
 # CHANGELOG — Baraka Market
 
+## Unreleased — طلبات المالك 2026-11-03 (قفل يدوي + بداية نظيفة + وصولات)
+- قفل يدوي فقط (بأمر المالك): حذف عدّاد الخمول نهائياً (كان يقفل بعد 15 دقيقة
+  دون رؤية أي نشاط غير مالي)؛ القفل أصبح overlay فوق المحل الحي — السلة (660 DZD
+  قبل/بعد، lane) والمسودات تنجو. مقايضة أمنية مقبولة من المالك صراحة.
+- «بداية نظيفة» في منطقة الخطر (مالك + PIN): مسح التجريبي (منتجات/موردين/عملاء/
+  مشتريات/مبيعات/تسويات/عدادات) مع علامة CLEAN_START فلا تُعاد البذور؛ يُبقي
+  المستخدمين والهوية والرخصة؛ مرفوض عند outbox معلق. Lane: الزر + PIN ظاهران، PASS بصري.
+- وصل المورد (BR): حذف + تعديل كامل (مدير+) — عكس المخزون مع رفض السالب، عكس/إعادة
+  PMP، دين المورد بالفرق، الرقم محفوظ. Lane: إنشاء 20 ← تعديل 7 ← حذف (اختفى)؛
+  `purchase-lane.test.ts` 6/6؛ vision PASS.
+- **314/314** · tsc/lint/build نظيفة.
+
 ## Unreleased — #004 legal day-lock (Z) (2026-11-02)
 - `z_reports.close_kind` (`DAY` legal 1/day vs `SHIFT`); `LATEST_SCHEMA_VERSION 6`.
 - `finalizeZReport` refuses 2nd DAY close + verifies 16 totals vs ledger; locked day refuses
