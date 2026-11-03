@@ -246,3 +246,12 @@ html.light .brand-chip {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* NAVBAR-REDESIGN Phase 3: visible keyboard focus across the top bar.
+   Every interactive element shows the same emerald ring — no exceptions. */
+.topbar button:focus-visible,
+.topbar [role="menuitem"]:focus-visible {
+  outline: 2px solid #34d399;
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}

@@ -81,14 +81,14 @@ export const Navbar: React.FC = () => {
   // Defense in depth — every lane re-checks server-side; hiding buttons is UX.
   const role = session?.role ?? 'cashier';
   const tabs: { view: 'pos' | 'products' | 'suppliers' | 'clients' | 'accounting' | 'reports' | 'shifts' | 'license'; perm: Permission; icon: React.ReactNode; label: string; title?: string; amber?: boolean }[] = [
-    { view: 'pos', perm: 'sell', icon: <ShoppingCart className="w-4 h-4 flex-shrink-0" />, label: isAr ? 'الكاشير' : 'Caisse' },
-    { view: 'products', perm: 'products.edit', icon: <Package className="w-4 h-4" />, label: isAr ? 'المخزون' : 'Stock' },
+    { view: 'pos', perm: 'sell', icon: <ShoppingCart className="w-4 h-4 flex-shrink-0" />, label: isAr ? 'الكاشير' : 'Caisse', title: isAr ? 'نقطة البيع (الكاشير)' : 'Point de vente (Caisse)' },
+    { view: 'products', perm: 'products.edit', icon: <Package className="w-4 h-4" />, label: isAr ? 'المخزون' : 'Stock', title: isAr ? 'المخزون والمنتجات' : 'Stock & Produits' },
     { view: 'suppliers', perm: 'products.edit', icon: <Truck className="w-4 h-4 text-amber-400" />, label: isAr ? 'الموردون' : 'Fournisseurs', title: isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats' },
     { view: 'clients', perm: 'settle', icon: <BookOpen className="w-4 h-4" />, label: isAr ? 'الديون (F9)' : 'Dettes (F9)', title: isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)' },
     { view: 'accounting', perm: 'accounting.view', icon: <PieChart className="w-4 h-4 text-emerald-400" />, label: isAr ? 'المحاسبة' : 'Compta', title: isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF' },
     { view: 'reports', perm: 'accounting.view', icon: <FileText className="w-4 h-4" />, label: isAr ? 'تقرير Z' : 'Rapport Z', title: isAr ? 'تقرير Z اليومي' : 'Rapport Z journalier' },
     { view: 'shifts', perm: 'z.close', icon: <Banknote className="w-4 h-4 text-amber-400" />, label: isAr ? 'إغلاق' : 'Clôture', title: isAr ? 'إغلاق الصندوق وتقرير Z' : 'Caisse & Clôture / Z' },
-    { view: 'license', perm: 'settings.edit', icon: <KeyRound className="w-4 h-4 text-amber-400" />, label: isAr ? 'الرخصة' : 'Licence', amber: true },
+    { view: 'license', perm: 'settings.edit', icon: <KeyRound className="w-4 h-4 text-amber-400" />, label: isAr ? 'الرخصة' : 'Licence', amber: true, title: isAr ? 'رخصة تفعيل المحل' : "Licence d'activation" },
   ];
   const visibleTabs = tabs.filter(t => can(role, t.perm));
   const showSettings = can(role, 'settings.edit') || can(role, 'audit.view');
@@ -112,7 +112,7 @@ export const Navbar: React.FC = () => {
   }, [session?.role, activeView]);
 
   return (
-    <header className="bg-[#0b0f17] border-b border-[#1e293b] text-slate-200 select-none sticky top-0 z-40 transition-colors">
+    <header className="topbar bg-[#0b0f17] border-b border-[#1e293b] text-slate-200 select-none sticky top-0 z-40 transition-colors">
       {/* Main Navbar */}
       <div className="px-4 py-2.5 flex items-center justify-between gap-3">
         {/* Brand & Logo — official Baraka (بركة) emblem tile */}
@@ -151,7 +151,8 @@ export const Navbar: React.FC = () => {
               key={t.view}
               onClick={() => setActiveView(t.view)}
               title={t.title}
-              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 ${
+              aria-current={activeView === t.view ? 'page' : undefined}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap flex-shrink-0 [&_svg]:shrink-0 ${
                 activeView === t.view
                   ? t.amber
                     ? 'bg-amber-600 text-white shadow-md shadow-amber-900/40'
@@ -162,7 +163,9 @@ export const Navbar: React.FC = () => {
               }`}
             >
               {t.icon}
-              <span>{t.label}</span>
+              {/* NAVBAR-REDESIGN Phase 3: single breakpoint — labels collapse to
+                  icons under 1100px (tooltip carries the label). Zero overlap. */}
+              <span className="hidden min-[1100px]:inline">{t.label}</span>
             </button>
           ))}
 
@@ -199,6 +202,7 @@ export const Navbar: React.FC = () => {
                       role="menuitem"
                       onClick={() => { setActiveView(t.view); setShowMore(false); }}
                       title={t.title}
+                      aria-current={activeView === t.view ? 'page' : undefined}
                       className={`w-full px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer text-start ${
                         activeView === t.view
                           ? (t.amber ? 'bg-amber-600 text-white' : 'bg-emerald-600 text-white')
@@ -249,6 +253,7 @@ export const Navbar: React.FC = () => {
                 onClick={() => lockSession()}
                 className="text-slate-400 hover:text-amber-300 transition-colors cursor-pointer"
                 title={isAr ? 'قفل الجلسة' : 'Verrouiller'}
+                aria-label={isAr ? 'قفل الجلسة' : 'Verrouiller'}
               >
                 <Lock className="w-3.5 h-3.5" />
               </button>
@@ -256,6 +261,7 @@ export const Navbar: React.FC = () => {
                 onClick={() => { setShowHeldDropdown(false); void logout(); }}
                 className="text-slate-400 hover:text-red-300 transition-colors cursor-pointer"
                 title={isAr ? 'تسجيل الخروج' : 'Déconnexion'}
+                aria-label={isAr ? 'تسجيل الخروج' : 'Déconnexion'}
               >
                 <LogOut className="w-3.5 h-3.5" />
               </button>
@@ -280,6 +286,8 @@ export const Navbar: React.FC = () => {
                 ? (isAr ? 'تفعيل الوضع النهاري (Light Mode)' : 'Activer Mode Jour')
                 : (isAr ? 'تفعيل الوضع الليلي (Dark Mode)' : 'Activer Mode Nuit')
             }
+            aria-label={isAr ? 'تبديل النهاري/الليلي' : 'Basculer jour/nuit'}
+            aria-pressed={theme === 'light'}
           >
             {theme === 'dark' ? (
               <Sun className="w-4 h-4 text-amber-400" />
@@ -307,7 +315,7 @@ export const Navbar: React.FC = () => {
             </button>
 
             {showHeldDropdown && (
-              <div role="menu" aria-label={isAr ? 'الفواتير المعلقة' : 'Paniers en attente'} className="absolute top-full mt-2 end-0 w-72 bg-[#111722] border border-[#1e293b] rounded-xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95">
+              <div role="menu" aria-label={isAr ? 'الفواتير المعلقة' : 'Paniers en attente'} className="absolute top-full mt-2 end-0 w-72 bg-[#111722] border border-[#1e293b] rounded-xl shadow-2xl p-2 z-50">
                 <div className="p-2 border-b border-[#1e293b] flex items-center justify-between text-xs text-slate-300">
                   <span className="font-semibold">{isAr ? 'الفواتير المعلقة' : 'Paniers en attente'}</span>
                   <span className="text-[11px] text-slate-400">{heldCarts.length} {isAr ? 'سلة' : 'paniers'}</span>
