@@ -43,3 +43,14 @@ test('backup-catalog: age label FR/AR', () => {
   assert.equal(backupAgeLabel('2026-11-03T09:00:00Z', now, false), 'il y a 3 h');
   assert.equal(backupAgeLabel('2026-10-30T12:00:00Z', now, true), 'منذ 4 يوم');
 });
+
+test('backup-catalog: stableStringify is key-order invariant and JSON-compatible', async () => {
+  const { stableStringify } = await import('./backup-catalog.js');
+  const a = { z: 1, a: { d: [1, { y: 2, x: 1 }], c: 3 }, m: 'x' };
+  const b = { m: 'x', a: { c: 3, d: [1, { x: 1, y: 2 }] }, z: 1 };
+  assert.equal(stableStringify(a), stableStringify(b));
+  assert.deepEqual(JSON.parse(stableStringify(a)), JSON.parse(JSON.stringify(a)));
+  assert.equal(stableStringify({ u: undefined, n: null, f: () => 0, k: 1 }), '{"k":1,"n":null}');
+  assert.equal(stableStringify([1, undefined, 2]), '[1,null,2]');
+  assert.equal(stableStringify('héllo'), '"héllo"');
+});

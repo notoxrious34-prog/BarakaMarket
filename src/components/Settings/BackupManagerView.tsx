@@ -82,7 +82,7 @@ export const BackupManagerView: React.FC = () => {
   return (
     <div className="space-y-4">
       {/* ADR-018: offline lane — always available, no server needed. */}
-      <LocalSnapshotPanel isAr={isAr} />
+      <LocalSnapshotPanel isAr={isAr} audit={audit} />
       {/* Fiscal SQLite lane — rendered only when the loopback server answers. No error banners. */}
       {!offline && (
       <div className={card}>

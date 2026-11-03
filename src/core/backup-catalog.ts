@@ -95,3 +95,24 @@ export function backupAgeLabel(createdAt: string, nowMs = Date.now(), isAr = fal
   const d = Math.floor(h / 24);
   return isAr ? `منذ ${d} يوم` : `il y a ${d} j`;
 }
+
+/**
+ * Canonical JSON: object keys sorted recursively so a SHA-256 over the text
+ * is stable across export → import (key order is not preserved by editors).
+ * `undefined` and functions are dropped like JSON.stringify does.
+ */
+export function stableStringify(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
+  if (Array.isArray(v)) {
+    const items: string[] = [];
+    for (let i = 0; i < v.length; i++) items.push(stableStringify(v[i]) ?? 'null');
+    return `[${items.join(',')}]`;
+  }
+  const parts: string[] = [];
+  for (const k of Object.keys(v).sort()) {
+    const val = (v as Record<string, unknown>)[k];
+    if (val === undefined || typeof val === 'function' || typeof val === 'symbol') continue;
+    parts.push(`${JSON.stringify(k)}:${stableStringify(val)}`);
+  }
+  return `{${parts.join(',')}}`;
+}

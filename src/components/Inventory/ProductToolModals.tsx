@@ -263,62 +263,67 @@ export const LossModal: React.FC<{
   );
 };
 
-/** ADR-018: local snapshot export/import — the offline backup lane. */
-const SNAPSHOT_KEYS = ['baraka_products_v2', 'baraka_clients_v2', 'baraka_suppliers_v2', 'baraka_sales_v2', 'baraka_purchases_v2', 'baraka_settlements_v2', 'baraka_supplier_payments_v2', 'baraka_store_v2', LOSS_JOURNAL_KEY];
+/**
+ * ADR-018 (Backup-Pro): local snapshot panel — the offline backup lane.
+ * All logic lives in core/local-snapshot (unit-tested); this is the thin UI shell.
+ */
+export type {
+  LocalSnapshotEnvelope, LocalRestoreResult, SnapshotStore,
+} from '../../core/local-snapshot.js';
+import {
+  collectLocalSnapshotData, buildLocalSnapshot, restoreLocalSnapshot,
+} from '../../core/local-snapshot.js';
 
 export const snapshotLocalState = (): string => {
-  const snap: Record<string, unknown> = { app: 'baraka-market', exportedAt: new Date().toISOString() };
-  for (const k of SNAPSHOT_KEYS) {
-    try {
-      const v = localStorage.getItem(k);
-      snap[k] = v ? JSON.parse(v) : null;
-    } catch { snap[k] = null; }
-  }
-  return JSON.stringify(snap);
+  // Legacy sync export (pre-Pro shape). Kept for API compatibility; the panel
+  // uses buildLocalSnapshot. Reads the same full key set, without integrity.
+  return JSON.stringify({ app: 'baraka-market', exportedAt: new Date().toISOString(), data: collectLocalSnapshotData(localStorage) });
 };
 
-export const restoreLocalSnapshot = (json: string): string[] => {
-  const snap = JSON.parse(json) as Record<string, unknown>;
-  if (!snap || snap.app !== 'baraka-market') throw new Error('not a baraka snapshot');
-  const restored: string[] = [];
-  for (const [k, v] of Object.entries(snap)) {
-    if (k === 'app' || k === 'exportedAt' || v == null) continue;
-    localStorage.setItem(k, JSON.stringify(v));
-    restored.push(k);
-  }
-  return restored;
-};
-
-export const LocalSnapshotPanel: React.FC<{ isAr: boolean }> = ({ isAr }) => {
+export const LocalSnapshotPanel: React.FC<{
+  isAr: boolean;
+  audit?: (action: 'backup.create' | 'backup.restore', detail: string) => void;
+}> = ({ isAr, audit }) => {
   const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const doExport = () => {
-    const blob = new Blob([snapshotLocalState()], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `baraka-snapshot-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    setMsg(isAr ? 'تم تنزيل النسخة المحلية' : 'Snapshot local téléchargé');
+  const doExport = async () => {
+    setBusy(true);
+    try {
+      const text = await buildLocalSnapshot(localStorage);
+      const n = Object.keys(collectLocalSnapshotData(localStorage)).length;
+      downloadTextFile(`baraka-snapshot-${new Date().toISOString().slice(0, 10)}.json`, text, 'application/json');
+      audit?.('backup.create', `local-snapshot ${n} keys`);
+      setMsg(isAr ? `تم تنزيل النسخة المحلية (${n} مفتاحاً، بتكامل SHA-256)` : `Snapshot local téléchargé (${n} clés, SHA-256)`);
+    } catch (e) {
+      setMsg(`${isAr ? 'تعذر الإنشاء: ' : 'Échec export: '}${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const doImport = async (f: File) => {
+    setBusy(true);
     try {
-      const keys = restoreLocalSnapshot(await f.text());
-      setMsg((isAr ? 'تمت الاستعادة — أعد التحميل: ' : 'Restauré — rechargez: ') + keys.length + (isAr ? ' مفاتيح' : ' clés'));
+      const { keys, warnings } = await restoreLocalSnapshot(await f.text(), localStorage);
+      audit?.('backup.restore', `local-snapshot ${keys.length} keys${warnings.length ? ` (${warnings.join('; ')})` : ''}`);
+      setMsg((isAr ? 'تمت الاستعادة — أعد التحميل: ' : 'Restauré — rechargez: ') + keys.length + (isAr ? ' مفاتيح' : ' clés')
+        + (warnings.length ? ` — ${isAr ? 'تنبيه: ' : 'alerte: '}${warnings.join('; ')}` : ''));
     } catch (e) {
-      setMsg(`${isAr ? 'ملف غير صالح: ' : 'Fichier invalide: '}${(e as Error).message}`);
+      setMsg(`${isAr ? 'ملف مرفوض: ' : 'Fichier rejeté: '}${(e as Error).message}`);
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <div className="bg-[#101724] border border-[#1e293b] rounded-xl p-4">
       <h3 className="text-xs font-bold text-white mb-1">{isAr ? 'نسخة محلية (تعمل دون خادم)' : 'Snapshot local (sans serveur)'}</h3>
-      <p className="text-[11px] text-slate-500 mb-3">{isAr ? 'تنزيل/استعادة كاملة لحالة التطبيق من المتصفح.' : 'Export/import complet de l’état applicatif depuis le navigateur.'}</p>
+      <p className="text-[11px] text-slate-500 mb-3">{isAr ? 'تنزيل/استعادة كاملة لحالة التطبيق من المتصفح — كل المفاتيح (بما فيها عدّادات الفواتير) + تحقق SHA-256.' : 'Export/import complet de l’état applicatif depuis le navigateur — toutes les clés (séquences incluses) + SHA-256.'}</p>
       <div className="flex gap-2">
-        <button className={`${btn} bg-emerald-600 hover:bg-emerald-500 text-white`} onClick={doExport}>{isAr ? 'تنزيل نسخة' : 'Exporter'}</button>
-        <button className={`${btn} bg-[#1e293b] hover:bg-[#2b3a4f] text-white`} onClick={() => fileRef.current?.click()}>{isAr ? 'استعادة من ملف' : 'Restaurer'}</button>
+        <button disabled={busy} className={`${btn} bg-emerald-600 hover:bg-emerald-500 text-white`} onClick={() => void doExport()}>{isAr ? 'تنزيل نسخة' : 'Exporter'}</button>
+        <button disabled={busy} className={`${btn} bg-[#1e293b] hover:bg-[#2b3a4f] text-white`} onClick={() => fileRef.current?.click()}>{isAr ? 'استعادة من ملف' : 'Restaurer'}</button>
         <input ref={fileRef} type="file" accept="application/json" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) void doImport(f); e.target.value = ''; }} />
       </div>
       {msg && <div className="text-[11px] text-slate-300 mt-2">{msg}</div>}

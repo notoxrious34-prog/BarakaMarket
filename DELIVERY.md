@@ -48,6 +48,15 @@
       supplier receipt edit/delete (manager+, stock reversal + PMP, BR number kept,
       lane: 20→7→deleted + 6/6 unit) · vision PASS (danger zone, receipt cards) ·
       **314/314** · tsc/lint/build clean.
+- [x] **Owner 3 points + v1.3.5 on iron (2026-11-03)** — TVA/timbre regime toggles
+      (Card 3, per-sale flags, v7 migrate TS+Rust, ticket footnotes) · Stock CSV export
+      + importer hardening (5000 cap, collision counts, `stock.import/export` audit) ·
+      Backup-Pro (manifest sidecar, fail-closed validate, retention 30, USB download,
+      token-gated UI) + local snapshot rebuilt (all `baraka_*` keys incl. seq + SHA-256
+      envelope, 4 unit tests) · lane-found fixes (token attach, bidi `dir=ltr`) ·
+      NSIS `BarakaMarket-1.3.5-setup.exe` (5.13 MiB, `SIG-OK [ED]`, 3 assets, CDN live) ·
+      iron saw `Installer 1.3.5 + redémarrer`, installed (`update.install 1.3.5`, footer
+      `V1.3.5`, totals verified, vision PASS) · **332/332** · tsc/lint/build clean.
 - [x] Owner tasks (2026-11-02) — auto-update dry-run PASS on iron (`À jour — 1.3.3`, nothing installed) ·
       reception inline new-product (manual barcode/TVA 9%/epicerie, lane-proven) ·
       products DB read-only audit clean (14 exe / 14 loopback / 14 UI, zero defects, no fixes applied).

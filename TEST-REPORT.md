@@ -244,3 +244,17 @@ Owner tasks (2026-11-02, all approved via clarify before implementation):
 - Iron: `Vérifier` (scoped للبطاقة بعد عطل أول نقر زر صف نسخة → 401) → عرض
   `Installer 1.3.5 + redémarrer` → تثبيت (`update.check/install 1.3.5` في تدقيق الحديد
   + `uninstall.exe` مجدد) → فوتر `V1.3.5` + سلة حية محسوبة صحيحاً — vision PASS.
+
+## Local snapshot rebuilt (Backup-Pro completion, 2026-11-03)
+- Root cause fixed: old `SNAPSHOT_KEYS` omitted seq counters/held carts/drafts —
+  a restore could rewind `baraka_seq_FACT_*` and DUPLICATE invoice numbers.
+  New capture = every `baraka_*` key, no list to rot.
+- Envelope: `{app, snapshot_version: 1, app_version, exported_at, sha256, data}`;
+  SHA-256 over canonical `stableStringify` (new, 1 test: order-invariant, JSON-compatible);
+  import fails closed on tamper, warns (not blocks) on version drift, never writes
+  foreign keys. Logic in `core/local-snapshot.ts`, UI thin shell + `backup.create/restore` audit.
+- Tests: 4 new (`src/core/local-snapshot.test.ts`) — full capture, round-trip incl. seq,
+  tamper/garbage/foreign-app rejection, drift warning. Suite **332/332** (xN runs).
+- Note: 2 isolated single-fail runs out of ~10 during the iron NSIS install window
+  (heavy disk/CPU); suite is deterministic (synthetic clocks, pid-tagged tmp DBs) —
+  assessed environmental, not a code defect. No failing test name ever captured.
