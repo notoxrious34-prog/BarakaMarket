@@ -36,6 +36,12 @@
       (TS + Rust, 19/19) · ledger-verified close, voids/sales/shifts refused on locked day ·
       UI reprints from the stored row (`TICKET_EQUAL: true`, vision PASS 1366+768) ·
       live: `Z-2026-000003` 714.00 DZD, 2nd close refused `400` · **308/308** · tsc/lint/build clean.
+- [x] **v1.3.4 auto-update pushed & installed (2026-11-03)** — NSIS `BarakaMarket-1.3.4-setup.exe`
+      (5.13 MiB) signed (`SIG-OK [ED]`) + `latest.json` live on the release (`windows-x86_64`
+      key fix — `windows-x64` is rejected by the Tauri v2 updater) · iron `1.3.3` saw `1.3.4`,
+      installed it (`update.install` in the iron audit log, new binary, footer `V1.3.4`,
+      vision PASS on the receipt cards) · carries: manual lock + clean start + receipt
+      edit/delete · **314/314** · tsc/lint/build clean.
 - [x] Owner 2026-11-03 — manual-only lock (idle ticker removed, lock is an overlay,
       cart 660 DZD survives lock/unlock, lane-proven) · «بداية نظيفة» owner-PIN clean
       start (demo wiped, users/identity/license kept, CLEAN_START blocks reseed) ·

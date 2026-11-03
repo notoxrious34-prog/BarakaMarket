@@ -205,3 +205,16 @@ Owner tasks (2026-11-02, all approved via clarify before implementation):
   UI: تعديل/حذف on every receipt card; edit prefills the reception modal.
   Lane: `BR-2026-0002` created `+20` → edited to `+7` → deleted (gone), vision PASS.
 - Gates: **314/314** · `tsc` clean · `lint` clean · `vite build` ✅.
+
+## Release v1.3.4 — auto-update pushed & installed (2026-11-03)
+- `tauri build --bundles nsis` → `Baraka Market_1.3.4_x64-setup.exe` (5.13 MiB);
+  signed with the rsign key (empty password) → `.sig`; `verify-sig` → `SIG-OK [ED]`.
+- `releases/latest.json` rewritten (v1.3.4 + ed25519 signature + installer URL);
+  **platform-key fix**: `windows-x86_64` (the updater rejects `windows-x64` —
+  proven by the iron's own `Échec: None of the fallback platforms ...` on first check).
+- `gh release create v1.3.4` with 3 assets; CDN `latest/download/latest.json` serves v1.3.4.
+- Iron `D:/BarakaMarket-1.3.3` dry-run → saw `1.3.4`; install recorded in the iron
+  audit log (`update.install`, actor owner, 17:03 local) → binary + uninstaller
+  timestamps renewed → footer `V1.3.4` · vision PASS (supplier cards, receipt
+  `BR-2026-0089` with تعديل/حذف, no defects).
+- Gates on the v1.3.4 tree: **314/314** · `tsc`/`lint` clean · `vite build` ✅.
