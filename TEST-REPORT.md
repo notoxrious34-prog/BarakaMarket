@@ -234,3 +234,13 @@ Owner tasks (2026-11-02, all approved via clarify before implementation):
   found+fixed: missing `x-baraka-loopback` on backup POSTs (graceful AR/FR message in
   browser lane) + bidi `4 / 30` and card-price `2 600` (`dir=ltr`).
 - Gates: **327/327** · `tsc` clean · `lint` clean · `vite build` ✅ · `cargo test 20/20` ✅.
+
+## Release v1.3.5 — النقاط الثلاث على الحديد (2026-11-03)
+- Bump `1.3.4→1.3.5` (package.json + tauri.conf.json)؛ `tauri build --bundles nsis`
+  → `Baraka Market_1.3.5_x64-setup.exe` (5.13 MiB, 8m58s + 8 snake_case warnings)؛
+  التوقيع بنفس مفتاح rsign (فارغة) → `SIG-OK [ED]` (keynum `489b702c66040e7e`).
+- `releases/latest.json` (v1.3.5 + `windows-x86_64`) → commit `45413dc` + tag `v1.3.5`
+  + push؛ `gh release create v1.3.5` (exe + .sig + latest.json)؛ CDN يخدم v1.3.5.
+- Iron: `Vérifier` (scoped للبطاقة بعد عطل أول نقر زر صف نسخة → 401) → عرض
+  `Installer 1.3.5 + redémarrer` → تثبيت (`update.check/install 1.3.5` في تدقيق الحديد
+  + `uninstall.exe` مجدد) → فوتر `V1.3.5` + سلة حية محسوبة صحيحاً — vision PASS.

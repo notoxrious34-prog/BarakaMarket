@@ -1,5 +1,14 @@
 # CHANGELOG — Baraka Market
 
+## v1.3.5 (2026-11-03) — النقاط الثلاث على الحديد
+- **نفس بروتوكول v1.3.4**: bump رقمين → `tauri build --bundles nsis` (5.13 MiB)
+  → توقيع rsign (فارغة) → `SIG-OK [ED]` → `latest.json` بـ `windows-x86_64`
+  → `gh release create v1.3.5` (3 أصول) → CDN يخدم v1.3.5.
+- **الحديد** (`D:/BarakaMarket-1.3.3`): رأى `Installer 1.3.5 + redémarrer` → ثبّت
+  (تدقيق `update.install 1.3.5` + `uninstall.exe` مجدد) → فوتر `V1.3.5` + POS حي
+  (سلة 6 أسطر، `1505.86+60.28+158.86+18=1743` ✓) — vision PASS بلا عيوب.
+- يحمل: régime fiscal toggles + Stock CSV export + Backup-Pro (327/327).
+
 ## Unreleased — النقاط الثلاث (régime fiscal + Stock IO + Backup-Pro)
 - **TVA/Timbre قابلان للتعطيل** (Card 3 «النظام الجبائي»): `tva_enabled=false` يصفر
   عند المصدر (HT=TTC حياً)؛ `timbre_enabled=false` يصفر حتى ESPECES؛ الأعلام تُخزن
