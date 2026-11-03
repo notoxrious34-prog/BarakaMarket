@@ -25,6 +25,25 @@ import {
 } from 'lucide-react';
 import { formatDZD } from '../core/display';
 
+/** NAVBAR-REDESIGN Phase 2: shared dismiss (outside-click + Escape) for navbar menus. */
+function useDismissOnOutside(open: boolean, onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, onClose]);
+  return ref;
+}
+
 export const Navbar: React.FC = () => {
   const {
     activeView,
@@ -47,6 +66,14 @@ export const Navbar: React.FC = () => {
   } = useApp();
 
   const [showHeldDropdown, setShowHeldDropdown] = useState(false);
+  // NAVBAR-REDESIGN Phase 2: live cashier clock (latin digits, explicit — never locale-shaped).
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+  const dayStamp = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}`;
 
   const isAr = language === 'ar';
 
@@ -72,20 +99,8 @@ export const Navbar: React.FC = () => {
   const dailyTabs = visibleTabs.filter(t => DAILY_VIEWS.has(t.view));
   const adminTabs = visibleTabs.filter(t => !DAILY_VIEWS.has(t.view));
   const [showMore, setShowMore] = useState(false);
-  const moreRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!showMore) return;
-    const onDown = (e: PointerEvent) => {
-      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setShowMore(false);
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowMore(false); };
-    document.addEventListener('pointerdown', onDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [showMore]);
+  const moreRef = useDismissOnOutside(showMore, () => setShowMore(false));
+  const heldRef = useDismissOnOutside(showHeldDropdown, () => setShowHeldDropdown(false));
   const moreActive = adminTabs.some(t => t.view === activeView) || activeView === 'settings';
 
   // Role change (or a fresh login) never strands the UI on a hidden view.
@@ -220,11 +235,13 @@ export const Navbar: React.FC = () => {
 
         {/* Hardware & Tools Right Bar */}
         <div className="flex items-center gap-2 shrink-0">
-          {/* T8: who is holding the till — lock + logout one tap away. */}
+          {/* T8: who is holding the till — lock + logout one tap away.
+              NAVBAR-REDESIGN Phase 2: always visible (was hidden below md —
+              small screens had NO lock/logout). Name text compacts on xs. */}
           {session && (
-            <span className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 bg-[#162030] border border-[#2b3a4f] rounded-lg text-xs">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
-              <span className="text-slate-200 font-medium max-w-24 truncate">{session.displayName}</span>
+            <span className="flex items-center gap-1.5 px-2.5 py-1.5 bg-[#162030] border border-[#2b3a4f] rounded-lg text-xs">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block shrink-0" />
+              <span className="text-slate-200 font-medium max-w-24 truncate hidden min-[420px]:inline">{session.displayName}</span>
               <span className={`px-1 rounded text-[10px] font-bold ${session.role === 'owner' ? 'bg-amber-500/20 text-amber-300' : session.role === 'manager' ? 'bg-sky-500/20 text-sky-300' : 'bg-slate-500/20 text-slate-300'}`}>
                 {session.role}
               </span>
@@ -244,6 +261,16 @@ export const Navbar: React.FC = () => {
               </button>
             </span>
           )}
+          {/* NAVBAR-REDESIGN Phase 2: live cashier clock — the till's time reference. */}
+          <span
+            className="px-2.5 py-1.5 bg-[#162030] border border-[#2b3a4f] rounded-lg text-xs text-slate-200 flex items-center gap-1.5 tabular-nums"
+            dir="ltr"
+            title={isAr ? 'ساعة الصندوق' : 'Heure de caisse'}
+          >
+            <span className="font-semibold">{clock}</span>
+            <span className="text-slate-500">•</span>
+            <span className="text-slate-400">{dayStamp}</span>
+          </span>
           {/* Day / Night Theme Toggle */}
           <button
             onClick={toggleTheme}
@@ -261,24 +288,15 @@ export const Navbar: React.FC = () => {
             )}
           </button>
 
-          {/* ADR-007-MKT: single park control (F4) — the cart-column
-              Attente/Rappeler pair was the 3rd duplicate. Restore via badge. */}
-          <button
-            onClick={() => holdCurrentCart()}
-            disabled={currentCart.length === 0}
-            className="px-2.5 py-1.5 bg-[#162030] hover:bg-[#1e293b] disabled:opacity-40 disabled:cursor-not-allowed border border-[#2b3a4f] rounded-lg text-xs text-slate-300 flex items-center gap-2 transition-colors cursor-pointer"
-            title={isAr ? 'تعليق السلة (F4)' : 'Mettre en attente (F4)'}
-          >
-            <Clock className="w-3.5 h-3.5 text-amber-400" />
-            <span className="hidden xl:inline">{isAr ? 'تعليق' : 'Attente'}</span>
-          </button>
-
-          {/* Held Carts Badge */}
-          <div className="relative">
+          {/* NAVBAR-REDESIGN Phase 2: ONE held-carts control (was twin Clocks).
+              Park lives inside the menu (F4 shortcut unchanged); badge counts held. */}
+          <div className="relative" ref={heldRef}>
             <button
               onClick={() => setShowHeldDropdown(prev => !prev)}
+              aria-haspopup="menu"
+              aria-expanded={showHeldDropdown}
               className="px-2.5 py-1.5 bg-[#162030] hover:bg-[#1e293b] border border-[#2b3a4f] rounded-lg text-xs text-slate-300 flex items-center gap-2 transition-colors cursor-pointer"
-              title={isAr ? 'الفواتير المعلقة (F5)' : 'Paniers en attente (F5)'}
+              title={isAr ? 'تعليق السلة (F4) / الفواتير المعلقة (F5)' : 'Attente (F4) / Paniers en attente (F5)'}
             >
               <Clock className="w-3.5 h-3.5 text-amber-400" />
               <span className="hidden xl:inline">{isAr ? 'المعلق' : 'En Attente'}</span>
@@ -289,11 +307,21 @@ export const Navbar: React.FC = () => {
             </button>
 
             {showHeldDropdown && (
-              <div className="absolute top-full mt-2 end-0 w-72 bg-[#111722] border border-[#1e293b] rounded-xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95">
+              <div role="menu" aria-label={isAr ? 'الفواتير المعلقة' : 'Paniers en attente'} className="absolute top-full mt-2 end-0 w-72 bg-[#111722] border border-[#1e293b] rounded-xl shadow-2xl p-2 z-50 animate-in fade-in zoom-in-95">
                 <div className="p-2 border-b border-[#1e293b] flex items-center justify-between text-xs text-slate-300">
                   <span className="font-semibold">{isAr ? 'الفواتير المعلقة' : 'Paniers en attente'}</span>
                   <span className="text-[11px] text-slate-400">{heldCarts.length} {isAr ? 'سلة' : 'paniers'}</span>
                 </div>
+
+                <button
+                  role="menuitem"
+                  onClick={() => { holdCurrentCart(); setShowHeldDropdown(false); }}
+                  disabled={currentCart.length === 0}
+                  className="mt-1.5 w-full px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer text-start bg-[#162030] hover:bg-[#1e293b] text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed border border-[#233145]"
+                >
+                  <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                  <span>{isAr ? 'تعليق السلة الحالية (F4)' : 'Mettre le panier en attente (F4)'}</span>
+                </button>
 
                 {heldCarts.length === 0 ? (
                   <div className="py-6 text-center text-xs text-slate-500">
@@ -343,22 +371,28 @@ export const Navbar: React.FC = () => {
             )}
           </div>
 
-          {/* Electronic Scale RS232 Simulator Toggle */}
-          <button
-            onClick={() => setHardwareScaleActive(!isHardwareScaleActive)}
-            className={`px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1.5 border transition-all cursor-pointer ${
+          {/* NAVBAR-REDESIGN Phase 2: scale STATE (read-only) + scale ACTION (toggle).
+              Status is never the switch — the eye reads, the button acts. */}
+          <span
+            className={`px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1.5 border tabular-nums ${
               isHardwareScaleActive
                 ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/50'
-                : 'bg-[#162030] text-slate-400 border-[#2b3a4f] hover:text-slate-200'
+                : 'bg-[#162030] text-slate-400 border-[#2b3a4f]'
             }`}
-            title={isAr ? 'محاكي الميزان الإلكتروني RS232' : 'Balance Électronique RS232'}
+            dir="ltr"
+            title={isAr ? 'حالة الميزان الإلكتروني RS232' : 'État balance RS232'}
           >
-            <Scale className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">
-              {isHardwareScaleActive
-                ? `${(scaleWeightGrams / 1000).toFixed(3)} kg`
-                : (isAr ? 'الميزان' : 'Balance')}
-            </span>
+            <span className={`w-1.5 h-1.5 rounded-full inline-block ${isHardwareScaleActive ? 'bg-emerald-400' : 'bg-slate-600'}`} />
+            {isHardwareScaleActive ? `${(scaleWeightGrams / 1000).toFixed(3)} kg` : (isAr ? 'الميزان' : 'Balance')}
+          </span>
+          <button
+            onClick={() => setHardwareScaleActive(!isHardwareScaleActive)}
+            className="p-2 bg-[#162030] hover:bg-[#1e293b] border border-[#2b3a4f] rounded-lg text-slate-300 hover:text-white transition-colors cursor-pointer"
+            title={isAr ? 'تفعيل/إيقاف محاكي الميزان الإلكتروني' : 'Activer/couper le simulateur balance'}
+            aria-label={isAr ? 'تفعيل/إيقاف محاكي الميزان' : 'Activer/couper le simulateur balance'}
+            aria-pressed={isHardwareScaleActive}
+          >
+            <Scale className="w-4 h-4" />
           </button>
 
           {/* Language Switch */}
