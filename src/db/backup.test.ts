@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openBarakaDb } from './sqlite.js';
+import { openBarakaDb, LATEST_SCHEMA_VERSION } from './sqlite.js';
 import { calculateSaleTotalsCt } from '../core/fiscal.centimes.js';
+import { APP_VERSION } from '../core/version.js';
 
 const TMP = path.resolve('data/.tmp-tests/backups');
 const tmpDb = (name: string): string => {
@@ -173,8 +174,8 @@ test('backup-pro: manifest sidecar written, shaped, and agreed by validate', asy
   const b = openBarakaDb(dbPath);
   b.upsertProduct(PROD(60, '6130000000603'));
   const meta = b.createDatabaseBackup({ destinationDir: TMP, label: 'pro' });
-  assert.equal(meta.appVersion, '1.3.4');
-  assert.equal(meta.schemaVersion, 7);
+  assert.equal(meta.appVersion, APP_VERSION);
+  assert.equal(meta.schemaVersion, LATEST_SCHEMA_VERSION);
   assert.equal(meta.label, 'pro');
   const sidecar = `${meta.filePath}.manifest.json`;
   assert.ok(fs.existsSync(sidecar));
