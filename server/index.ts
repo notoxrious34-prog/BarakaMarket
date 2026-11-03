@@ -582,6 +582,24 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     }
   });
 
+  // Backup-Pro: USB hand-off — download the snapshot (or its manifest sidecar).
+  // Path-gated to the backups dir: no arbitrary file reads.
+  app.get('/api/backups/file', (req, res) => {
+    try {
+      const backupPath = String(req.query.backupPath ?? '');
+      const kind = String(req.query.kind ?? 'db');
+      if (!backupPath) { res.status(400).json({ error: 'query must be ?backupPath=…&kind=db|manifest' }); return; }
+      const backupsDir = path.resolve('data/backups');
+      const resolved = path.resolve(backupsDir, path.basename(backupPath));
+      if (!resolved.startsWith(backupsDir + path.sep)) { res.status(400).json({ error: 'path rejected' }); return; }
+      const target = kind === 'manifest' ? `${resolved}.manifest.json` : resolved;
+      if (!fs.existsSync(target)) { res.status(404).json({ error: 'file not found' }); return; }
+      res.download(target, path.basename(target));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   app.get('/api/z/summary', (req, res) => {
     const date = String(req.query.date ?? new Date().toISOString().slice(0, 10));
     const rows = baraka.db.prepare(

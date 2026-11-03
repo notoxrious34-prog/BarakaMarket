@@ -1,7 +1,9 @@
 import React, { useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, TVARate } from '../../types';
+import { auditSessionEvent } from '../../core/session-authority.js';
 import { preflightCsv, ParsedProductRow } from '../../core/csv-importer.js';
+import { buildStockCsv, stockCsvFilename, downloadTextFile } from '../../core/csv-exporter.js';
 import { generateA4LabelsHtml, ShelfLabelItem } from '../../core/shelf-labels.js';
 import { generateEan13Svg } from '../../core/barcode-svg.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../../core/reference-search.js';
@@ -36,16 +38,28 @@ const toProduct = (r: ParsedProductRow, isAr: boolean): Omit<Product, 'id'> => (
 
 /** ADR-018: bulk CSV importer — 100% in-client (preflightCsv + AppContext UPSERT). */
 export const CsvImportModal: React.FC<{ isAr: boolean; onClose: () => void }> = ({ isAr, onClose }) => {
-  const { products, addProduct, updateProduct } = useApp();
-  const [csv, setCsv] = useState('barcode;name_fr;sell_price_ct;tva_rate\n6130000000015;HUILE ELIO 5L;65000;0');
+  const { products, addProduct, updateProduct, session } = useApp();
+  const [csv, setCsv] = useState('barcode;name_fr;name_ar;buy_price;sell_price;tva;stock;unit;category\n6130000000015;HUILE ELIO 5L;زيت المائدة;580;650;0;50;PIECE;epicerie');
   const [rows, setRows] = useState<ParsedProductRow[] | null>(null);
+  const [collisions, setCollisions] = useState(0);
+  const [unmappedCats, setUnmappedCats] = useState(0);
   const [errs, setErrs] = useState<string[]>([]);
   const [msg, setMsg] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const doPreview = () => {
     setMsg('');
     try {
       const rep = preflightCsv(csv);
+      if (rep.summary.total > 5000) {
+        setRows(null);
+        setErrs([isAr ? `الملف كبير (${rep.summary.total} سطر) — الحد 5000 سطر لكل عملية` : `Fichier trop grand (${rep.summary.total} lignes) — limite 5000 par lot`]);
+        return;
+      }
+      const inDb = new Set(products.map(p => p.barcode));
+      setCollisions(rep.validRows.filter(r => inDb.has(r.barcode)).length);
+      const known = new Set([...initialCategories.map(c => c.id), ...Object.keys(REF_TO_PRODUCT_CATEGORY)]);
+      setUnmappedCats(rep.validRows.filter(r => !known.has((r.category || '').trim())).length);
       setRows(rep.validRows);
       setErrs(rep.errors.map(e => `L${e.row} [${e.field}] ${e.message}`));
     } catch (e) {
@@ -67,26 +81,50 @@ export const CsvImportModal: React.FC<{ isAr: boolean; onClose: () => void }> = 
       }
     }
     const n = inserted + updated;
+    if (session) {
+      void auditSessionEvent(session.username, 'stock.import', `${n} rows (${inserted} new, ${updated} updated)`);
+    }
     setMsg(isAr
       ? `${n} منتج مستورد بنجاح (${inserted} جديد، ${updated} محدّث)`
       : `${n} produits importés avec succès (${inserted} nouveaux, ${updated} màj)`);
     setRows(null);
   };
 
+  const doLoadFile = (f: File | undefined) => {
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => setCsv(String(rd.result ?? ''));
+    rd.readAsText(f, 'utf-8');
+  };
+
+  const doExport = () => {
+    downloadTextFile(stockCsvFilename(), buildStockCsv(products));
+    if (session) {
+      void auditSessionEvent(session.username, 'stock.export', `${products.length} products → CSV`);
+    }
+    setMsg(isAr ? `تم تصدير ${products.length} منتجاً (CSV)` : `${products.length} produits exportés (CSV)`);
+  };
+
   return (
     <div className={overlay} onClick={onClose}>
       <div className={card} onClick={e => e.stopPropagation()}>
-        <h3 className="text-sm font-bold text-white mb-3">{isAr ? 'استيراد CSV بالجملة' : 'Importer CSV (vrac)'}</h3>
+        <h3 className="text-sm font-bold text-white mb-3">{isAr ? 'استيراد / تصدير CSV للمخزون' : 'Importer / Exporter CSV (stock)'}</h3>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={e => { doLoadFile(e.target.files?.[0]); e.target.value = ''; }} />
         <textarea className={`${input} font-mono h-28`} value={csv} onChange={e => setCsv(e.target.value)} dir="ltr" />
-        <div className="flex gap-2 mt-3">
+        <div className="flex flex-wrap gap-2 mt-3">
+          <button className={`${btn} bg-[#1e293b] hover:bg-[#2b3a4f] text-white`} onClick={() => fileRef.current?.click()}>{isAr ? 'ملف…' : 'Fichier…'}</button>
           <button className={`${btn} bg-[#1e293b] hover:bg-[#2b3a4f] text-white`} onClick={doPreview}>{isAr ? 'معاينة' : 'Prévisualiser'}</button>
           <button disabled={!rows} className={`${btn} bg-emerald-600 hover:bg-emerald-500 text-white`} onClick={doExecute}>{isAr ? 'تنفيذ UPSERT' : 'Exécuter (UPSERT)'}</button>
+          <button className={`${btn} bg-sky-950/60 border border-sky-800/60 text-sky-300 hover:bg-sky-900/60`} onClick={doExport}>{isAr ? 'تصدير الكل (CSV)' : 'Exporter tout (CSV)'}</button>
           <button className={`${btn} bg-transparent text-slate-400 hover:text-white`} onClick={onClose}>{isAr ? 'إغلاق' : 'Fermer'}</button>
         </div>
         {msg && <div className="text-[11px] text-emerald-300 mt-2">{msg}</div>}
         {(rows || errs.length > 0) && (
           <div className="mt-3 text-[11px]">
-            {rows && <div className="text-slate-300 mb-1">{isAr ? 'صفوف صالحة: ' : 'Lignes valides: '}{rows.length}</div>}
+            {rows && <div className="text-slate-300 mb-1">{isAr ? 'صفوف صالحة: ' : 'Lignes valides: '}{rows.length}
+              <span className="text-amber-300"> · {collisions} {isAr ? 'سيُحدَّث (موجود)' : 'màj (existant)'}</span>
+              {unmappedCats > 0 && <span className="text-rose-300"> · {unmappedCats} {isAr ? 'قسم غير معروف ← epicerie' : 'rayon inconnu → epicerie'}</span>}
+            </div>}
             {errs.slice(0, 8).map((e, i) => <div key={i} className="text-rose-300 font-mono">{e}</div>)}
             {(rows ?? []).slice(0, 10).map((r, i) => (
               <div key={i} className="text-slate-400 font-mono truncate">{r.barcode} · {r.name_fr} · {(r.priceCt / 100).toFixed(2)} DA · TVA {r.tvaRate}%</div>

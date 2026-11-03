@@ -28,7 +28,7 @@ import {
   initialSuppliers,
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
-import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt } from '../core/fiscal.centimes';
+import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
 import { can, type Session } from '../core/rbac.js';
@@ -352,7 +352,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [storeProfile, setStoreProfile] = useState<StoreProfile>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.STORE);
-      return saved ? JSON.parse(saved) : initialStoreProfile;
+      const base = saved ? JSON.parse(saved) : initialStoreProfile;
+      // Legacy profiles predate the regime toggles — absent means the tax applies.
+      return {
+        ...base,
+        tva_enabled: base.tva_enabled !== false,
+        timbre_enabled: base.timbre_enabled !== false,
+      };
     } catch {
       return initialStoreProfile;
     }
@@ -904,6 +910,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       created_at: dateNow.toISOString(),
       is_facture_reglementaire: isFactureReglementaire,
       is_provisional: true,
+      fiscal_regime: {
+        tva_enabled: storeProfile.tva_enabled !== false,
+        timbre_enabled: storeProfile.timbre_enabled !== false,
+      },
     };
 
     // Deduct stock quantities (ADR-004-MKT: packs drain multiplier x base units)
@@ -1045,12 +1055,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // POST, failure, outbox, and replay (T1 slice B, ADR-022).
     const saleKey = mintSaleKey();
     try {
+      // Regime TVA off forces rate 0 at the source: lines, tiers, payload and
+      // header stay mutually consistent (server re-verifies with the same flags).
+      const regime = { tva_enabled: storeProfile.tva_enabled, timbre_enabled: storeProfile.timbre_enabled };
       const ctItems = currentCart.map(it => {
+        const eff = effectiveTvaRate(it.tva_rate, regime);
         const l = calculateLineTotalsCt(
-          dzdToCentimes(it.unit_price_ttc), it.quantity, it.tva_rate, it.discount_percent,
+          dzdToCentimes(it.unit_price_ttc), it.quantity, eff, it.discount_percent,
         );
         return {
-          tva_rate: it.tva_rate,
+          tva_rate: eff,
           total_line_ht_ct: l.total_line_ht_ct,
           total_line_tva_ct: l.total_line_tva_ct,
           total_line_ttc_ct: l.total_line_ttc_ct,
@@ -1060,6 +1074,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         timbre_rate: storeProfile.timbre_rate,
         timbre_min: storeProfile.timbre_min,
         timbre_max: storeProfile.timbre_max,
+        ...regime,
       });
       const createdAt = new Date().toISOString();
       const payloadItems = currentCart.map((it, i) => ({
@@ -1071,7 +1086,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // ADR-004-MKT: packs drain multiplier x base units (12 000 milli = 12 units).
         qty_milli: Math.round(it.quantity * (it.packMultiplier ?? 1) * 1000),
         unit: it.unit,
-        tva_rate: it.tva_rate,
+        tva_rate: ctItems[i].tva_rate,
         discount_bp: Math.round((it.discount_percent || 0) * 100),
         line_ht_ct: ctItems[i].total_line_ht_ct,
         line_tva_ct: ctItems[i].total_line_tva_ct,
@@ -1083,6 +1098,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         client_id: selectedClient.id,
         client_name: selectedClient.name,
         payment_method: paymentMethod,
+        fiscal_regime: {
+          tva_enabled: storeProfile.tva_enabled !== false,
+          timbre_enabled: storeProfile.timbre_enabled !== false,
+        },
         amount_paid_ct: dzdToCentimes(amountPaid),
         amount_returned_ct: Math.max(0, dzdToCentimes(amountPaid) - t.total_ttc_ct),
         totals: {
@@ -1136,6 +1155,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         created_at: createdAt,
         is_facture_reglementaire: isFactureReglementaire,
         is_provisional: false,
+        fiscal_regime: {
+          tva_enabled: storeProfile.tva_enabled !== false,
+          timbre_enabled: storeProfile.timbre_enabled !== false,
+        },
       };
       setProducts(prev =>
         prev.map(p => {
@@ -1212,6 +1235,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       timbre_rate: storeProfile.timbre_rate,
       timbre_min: storeProfile.timbre_min,
       timbre_max: storeProfile.timbre_max,
+      timbre_enabled: storeProfile.timbre_enabled,
     });
     const timbre = centimesToDzd(timbreCt);
     const totalCollected = Math.round((amount + timbre) * 100) / 100;
@@ -1223,6 +1247,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       client_id: clientId, client_name: clientName, amount_ct: amountCt,
       payment_method: paymentMethod, timbre_ct: timbreCt,
       total_collected_ct: amountCt + timbreCt,
+      timbre_enabled: storeProfile.timbre_enabled !== false,
       client_settlement_key: settleKey, date: nowIso, note: note ?? null,
     };
     const out = authorityRef.current === 'FISCAL_SQLITE'
@@ -1242,6 +1267,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       timbre_fiscal: timbre,
       total_collected: totalCollected,
       receipt_number,
+      timbre_enabled: storeProfile.timbre_enabled !== false,
     };
 
     setClients(prev =>

@@ -5,6 +5,7 @@ import { Sale } from '../../types';
 import { formatDZD } from '../../core/display';
 import { Printer, X, Download, Copy, Check, Cpu } from 'lucide-react';
 import { buildReceipt, downloadRaw } from '../../hardware/escpos';
+import { regimeNoteFor } from '../../core/fiscal.centimes';
 
 interface TicketThermalProps {
   sale: Sale;
@@ -13,6 +14,7 @@ interface TicketThermalProps {
 
 export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose }) => {
   const { storeProfile, language } = useApp();
+  const regimeNote = regimeNoteFor(sale.fiscal_regime, language === 'ar');
   const [copied, setCopied] = useState(false);
   const [ticketWidth, setTicketWidth] = useState<'80mm' | '58mm'>('80mm');
 
@@ -48,6 +50,7 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
       paymentMethod: sale.payment_method,
       amountPaid: sale.amount_paid,
       changeDue: sale.amount_returned,
+      regimeNote: regimeNoteFor(sale.fiscal_regime, isAr) ?? undefined,
     });
     downloadRaw(buf, `${sale.ticket_number}.bin`);
   };
@@ -206,6 +209,11 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
                 <div className="flex justify-between font-semibold">
                   <span>Droit de Timbre (Espèces, min 10):</span>
                   <span>{sale.timbre_fiscal.toFixed(2)}</span>
+                </div>
+              )}
+              {regimeNote && (
+                <div className="text-center text-[10px] font-bold border border-black rounded px-1 py-0.5 my-1">
+                  {regimeNote}
                 </div>
               )}
 

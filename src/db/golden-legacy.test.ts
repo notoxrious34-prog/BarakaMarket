@@ -24,13 +24,13 @@ function craftLegacyShape(p: string): void {
 }
 
 describe('A2 golden-legacy boot', () => {
-  it('opens the oldest shop shape: climbs to v6, indexes restored, owner seeded', () => {
+  it('opens the oldest shop shape: climbs to v7, indexes restored, owner seeded', () => {
     const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'baraka-legacy-')), 'legacy.db');
     craftLegacyShape(p);
     const { db, close } = openBarakaDb(p); // must NOT throw
     try {
       const v = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-      assert.equal(v, 6);
+      assert.equal(v, 7);
       const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_z_day'").get();
       assert.ok(idx, 'idx_z_day restored post-migration');
       const owner = db.prepare("SELECT username, must_change_pin FROM users WHERE username='owner'").get() as { username: string; must_change_pin: number } | undefined;

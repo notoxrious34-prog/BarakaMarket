@@ -2,6 +2,7 @@ import React from 'react';
 import { useApp } from '../../context/AppContext';
 import { formatDZD } from '../../core/display';
 import { buildQuittance, downloadRaw } from '../../hardware/escpos';
+import { regimeNoteFor } from '../../core/fiscal.centimes';
 import { Printer, X } from 'lucide-react';
 
 /**
@@ -32,6 +33,7 @@ export const SettlementQuittanceTicket: React.FC = () => {
       collected: q.total_collected ?? q.amount,
       newBalance: q.new_balance,
       paymentMethod: q.payment_method,
+      regimeNote: regimeNoteFor({ timbre_enabled: q.timbre_enabled }, isAr) ?? undefined,
     });
     downloadRaw(buf, `${q.receipt_number ?? q.id}.bin`);
   };
@@ -69,6 +71,11 @@ export const SettlementQuittanceTicket: React.FC = () => {
             <div>Dette avant: {formatDZD(q.prev_balance, false)}</div>
             <div>Montant encaissé: {formatDZD(q.amount, false)}</div>
             <div>Droit de Timbre (Art.136): {timbre > 0 ? `+${formatDZD(timbre, false)}` : 'Exempté'}</div>
+            {q.timbre_enabled === false && (
+              <div className="text-center font-bold border border-black rounded px-1 my-1">
+                {isAr ? 'الطابع غير مطبق (موقف من الإعدادات)' : 'Timbre non appliqué (désactivé)'}
+              </div>
+            )}
             <div className="font-bold">Total collecté: {formatDZD(collected, false)}</div>
             <div>Solde restant: {formatDZD(q.new_balance, false)}</div>
             {q.note && <div>Note: {q.note}</div>}

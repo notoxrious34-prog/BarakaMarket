@@ -136,6 +136,24 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         conn.execute_batch("PRAGMA user_version = 6;")
             .map_err(|e| e.to_string())?;
     }
+    // v6 → v7 (régime fiscal): per-sale tva_enabled/timbre_enabled flags.
+    // Fresh files get them from schema.sql; legacy files climb here.
+    if v < 7 {
+        if !has_col("sales", "tva_enabled")? {
+            conn.execute_batch(
+                "ALTER TABLE sales ADD COLUMN tva_enabled INTEGER NOT NULL DEFAULT 1;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !has_col("sales", "timbre_enabled")? {
+            conn.execute_batch(
+                "ALTER TABLE sales ADD COLUMN timbre_enabled INTEGER NOT NULL DEFAULT 1;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 7;")
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -180,7 +198,16 @@ fn bump_seq(tx: &rusqlite::Transaction, kind: &str, year: i64) -> Result<i64, St
 }
 
 /// Art.136 timbre, mirrored from calculateTimbreFiscalCt (DZD-ceiled, floored).
-fn timbre_expected(conn: &Connection, sum_ttc_ct: i64, method: &str) -> Result<i64, String> {
+/// Regime timbre off (owner Card 3) zeroes it even on ESPECES.
+fn timbre_expected(
+    conn: &Connection,
+    sum_ttc_ct: i64,
+    method: &str,
+    enabled: bool,
+) -> Result<i64, String> {
+    if !enabled {
+        return Ok(0);
+    }
     if method != "ESPECES" || sum_ttc_ct < EXEMPT_BELOW_CT {
         return Ok(0);
     }
@@ -199,6 +226,12 @@ fn timbre_expected(conn: &Connection, sum_ttc_ct: i64, method: &str) -> Result<i
         t = max_ct;
     }
     Ok(t)
+}
+
+/// Fiscal regime flag from a commit payload (owner Card 3 toggles).
+/// Absent = tax applies (legacy rows behave exactly as before).
+fn regime_flag(v: &Value, key: &str) -> bool {
+    v.get(key).and_then(|x| x.as_bool()).unwrap_or(true)
 }
 
 fn tva_ok(r: i64) -> bool {
@@ -275,6 +308,15 @@ pub fn record_sale(
     if sh != ht || sv != tva {
         return Err("[fiscal] item sums do not match header HT/TVA".to_string());
     }
+    // Fiscal regime travels with the commit; absent flags = legacy (both apply).
+    let tva_on = regime_flag(&header["fiscal_regime"], "tva_enabled");
+    let timbre_on = regime_flag(&header["fiscal_regime"], "timbre_enabled");
+    // Regime TVA off: the header must carry zero TVA (client coerced lines to tier 0).
+    if !tva_on && tva != 0 {
+        return Err(
+            "[fiscal] regime TVA off but header carries TVA — refusing to record".to_string(),
+        );
+    }
     for (i, r) in [0, 9, 19].iter().enumerate() {
         let b = &t["tva_breakdown"][&r.to_string()];
         if ct(&b["base_ht_ct"], "tier base")? != tier[i].0
@@ -284,7 +326,7 @@ pub fn record_sale(
             return Err(format!("[fiscal] tier {r}% breakdown mismatch"));
         }
     }
-    if timbre_expected(conn, st, &method)? != timbre {
+    if timbre_expected(conn, st, &method, timbre_on)? != timbre {
         return Err("[fiscal] timbre mismatch against Art.136 engine".to_string());
     }
     let paid = ct(&header["amount_paid_ct"], "amount_paid_ct")?;
@@ -336,9 +378,9 @@ pub fn record_sale(
           total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
           tva0_base_ct, tva0_amt_ct, tva0_ttc_ct, tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
           tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
-          payment_method, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
+          payment_method, tva_enabled, timbre_enabled, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
           client_sale_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,'COMPLETED',?29,?30,?31)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,'COMPLETED',?31,?32,?33)",
         rusqlite::params![
             id, invoice, ticket,
             str_field(&header["cashier_id"], "cashier_id")?,
@@ -352,7 +394,7 @@ pub fn record_sale(
             opt_str(&header["client_address"], "client_address")?.unwrap_or_default(),
             ht, tva, timbre, ttc,
             tier[0].0, tier[0].1, tier[0].2, tier[1].0, tier[1].1, tier[1].2, tier[2].0, tier[2].1, tier[2].2,
-            method, paid, ret, is_facture,
+            method, tva_on as i64, timbre_on as i64, paid, ret, is_facture,
             str_field(&header["created_at"], "created_at")?, key,
         ],
     );
@@ -433,7 +475,8 @@ pub fn record_settlement(conn: &mut Connection, input: &Value) -> Result<Value, 
     }
     let timbre = ct(&input["timbre_ct"], "timbre_ct")?;
     let collected = ct(&input["total_collected_ct"], "total_collected_ct")?;
-    if timbre_expected(conn, amount, &method)? != timbre {
+    let timbre_on = regime_flag(input, "timbre_enabled");
+    if timbre_expected(conn, amount, &method, timbre_on)? != timbre {
         return Err("[fiscal] settlement timbre mismatch".to_string());
     }
     let id = str_field(&input["id"], "id")?;
@@ -907,7 +950,16 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
+        // Regime v7: the climb also adds per-sale tva/timbre flags on legacy files.
+        let has_regime: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sales') WHERE name IN ('tva_enabled','timbre_enabled')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_regime, 2);
         // #004: the climb also adds close_kind (DAY lock marker) on legacy files.
         let has_kind: i64 = conn
             .query_row(
@@ -1057,6 +1109,41 @@ mod tests {
             z["hash"].as_str().unwrap()
         );
         assert!(z_close(&mut db, "11-02", "08:00", "20:00").is_err()); // bad day
+    }
+
+    #[test]
+    fn regime_off_records_clean_ttc_only_sale() {
+        // Owner Card 3: both taxes off — coerced tier-0 lines, zero TVA/timbre,
+        // flags stored per sale for audit replay.
+        let mut db = memdb();
+        let mut h = sale_header(Some("RG-1"));
+        h["fiscal_regime"] = serde_json::json!({"tva_enabled": false, "timbre_enabled": false});
+        // Client coerces every line to tier 0 (HT=TTC, TVA=0).
+        let items = vec![
+            serde_json::json!({"product_id": 1, "barcode": "a", "name_fr": "LAIT", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 2000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 36000, "line_tva_ct": 0, "line_ttc_ct": 36000}),
+        ];
+        h["totals"] = serde_json::json!({ "total_ht_ct": 36000, "total_tva_ct": 0, "timbre_ct": 0,
+            "total_ttc_ct": 36000,
+            "tva_breakdown": {
+                "0": {"base_ht_ct": 36000, "tva_amount_ct": 0, "total_ttc_ct": 36000},
+                "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0},
+                "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}});
+        h["amount_paid_ct"] = serde_json::json!(36000);
+        h["amount_returned_ct"] = serde_json::json!(0);
+        let r = record_sale(&mut db, &h, &items).unwrap();
+        let flags: (i64, i64) = db
+            .query_row(
+                "SELECT tva_enabled, timbre_enabled FROM sales WHERE id = 's1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(flags, (0, 0));
+        assert!(r["invoice_number"].as_str().unwrap().starts_with("FACT-"));
+        // Regime TVA off but header carries TVA → refused.
+        let mut bad = sale_header(Some("RG-2"));
+        bad["fiscal_regime"] = serde_json::json!({"tva_enabled": false, "timbre_enabled": true});
+        assert!(record_sale(&mut db, &bad, &sale_items()).is_err());
     }
 
     #[test]

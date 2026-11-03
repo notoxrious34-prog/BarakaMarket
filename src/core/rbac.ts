@@ -88,7 +88,7 @@ export type AuditAction =
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
-  | 'profile.change';
+  | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
 
 export interface AuditEvent {
   actor: string;

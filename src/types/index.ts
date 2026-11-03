@@ -140,6 +140,10 @@ export interface BackupMetadata {
   productsCount: number;
   status: 'VERIFIED' | 'CORRUPT' | 'RESTORED';
   createdAt: string;
+  /** Backup-Pro: human label, app + schema versions (from the manifest sidecar). */
+  label?: string;
+  appVersion?: string;
+  schemaVersion?: number;
 }
 
 export interface BackupValidationReport {
@@ -237,6 +241,9 @@ export interface StoreProfile {
   timbre_rate: number;      // 0.01 (1%)
   timbre_min: number;       // 10 DZD
   timbre_max: number;       // 2500 DZD
+  /** Fiscal regime toggles (owner Card 3). Absent/true = tax applies (legacy). */
+  tva_enabled: boolean;     // false → forfait: every sale line TVA 0 (HT=TTC)
+  timbre_enabled: boolean;  // false → no Droit de Timbre even on ESPECES
 }
 
 export interface Product {
@@ -324,6 +331,9 @@ export interface Sale {
   status: 'COMPLETED' | 'CANCELLED';
   created_at: string;
   is_facture_reglementaire?: boolean;
+  /** Fiscal regime the totals were computed under (owner toggles).
+   * Absent = legacy row (both taxes apply). Drives the ticket regime note. */
+  fiscal_regime?: { tva_enabled: boolean; timbre_enabled: boolean };
   /**
    * EXEC-DIR-2023-001 INVARIANT 2: browser-lane numbers are PROVISIONAL.
    * Authoritative fiscal numbers come from SQLite seq (FACT-YYYY-XXXXXX).
@@ -360,6 +370,8 @@ export interface DebtSettlement {
   total_collected?: number;
   /** Thermal quittance number: Q-YYYY-XXXXXX (monotonic, 6 digits). */
   receipt_number?: string;
+  /** Fiscal regime (timbre toggle) the quittance was computed under. */
+  timbre_enabled?: boolean;
 }
 
 export interface HeldCart {

@@ -148,6 +148,8 @@ CREATE TABLE IF NOT EXISTS sales (
   tva19_amt_ct      INTEGER NOT NULL DEFAULT 0,
   tva19_ttc_ct      INTEGER NOT NULL DEFAULT 0,
   payment_method    TEXT    NOT NULL CHECK (payment_method IN ('ESPECES', 'CIB', 'DAHABIYA', 'CREDIT')),
+  tva_enabled       INTEGER NOT NULL DEFAULT 1,   -- v7: fiscal regime toggles
+  timbre_enabled    INTEGER NOT NULL DEFAULT 1,   -- (owner Card 3), stored per sale
   amount_paid_ct    INTEGER NOT NULL DEFAULT 0,
   amount_returned_ct INTEGER NOT NULL DEFAULT 0,
   status            TEXT    NOT NULL DEFAULT 'COMPLETED' CHECK (status IN ('COMPLETED', 'CANCELLED')),

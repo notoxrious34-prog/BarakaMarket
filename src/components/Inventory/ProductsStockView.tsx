@@ -310,11 +310,11 @@ export const ProductsStockView: React.FC = () => {
 
           <button
             onClick={() => setCsvOpen(true)}
-            title={isAr ? 'استيراد CSV بالجملة' : 'Importer CSV (ADR-009)'}
+            title={isAr ? 'استيراد / تصدير CSV للمخزون' : 'Importer / Exporter CSV (stock)'}
             className="px-4 py-2 bg-[#111722] hover:bg-[#162030] text-slate-200 border border-[#233145] rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer shrink-0"
           >
             <Upload className="w-4 h-4 text-sky-400" />
-            <span>{isAr ? 'CSV' : 'Importer CSV'}</span>
+            <span>{isAr ? 'CSV ⇄' : 'CSV ⇄'}</span>
           </button>
 
           <button

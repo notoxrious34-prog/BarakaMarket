@@ -100,6 +100,10 @@ export interface AuthorityHeaderInput {
   };
   is_facture?: number;
   created_at?: string;
+  /** Fiscal regime under which the client computed the totals (owner toggles).
+   * The authority re-verifies with THESE flags and stores them per sale for
+   * audit replay. Absent = both taxes apply (legacy rows). */
+  fiscal_regime?: { tva_enabled: boolean; timbre_enabled: boolean };
   /** T1 slice B (ADR-022): checkout-minted idempotency key, stable across retries. */
   client_sale_id?: string | null;
 }
@@ -228,6 +232,8 @@ export interface AuthoritySettlementInput {
   client_id: number; client_name?: string; amount_ct: number;
   payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
   timbre_ct: number; total_collected_ct: number;
+  /** Fiscal regime (owner toggle): absent = timbre applies (legacy callers). */
+  timbre_enabled?: boolean;
   client_settlement_key?: string | null; date?: string; note?: string | null;
 }
 

@@ -218,3 +218,19 @@ Owner tasks (2026-11-02, all approved via clarify before implementation):
   timestamps renewed → footer `V1.3.4` · vision PASS (supplier cards, receipt
   `BR-2026-0089` with تعديل/حذف, no defects).
 - Gates on the v1.3.4 tree: **314/314** · `tsc`/`lint` clean · `vite build` ✅.
+
+## النقاط الثلاث — régime fiscal + Stock IO + Backup-Pro (2026-11-03)
+- **Regime**: `fiscal_regime` per-sale (v7 TS+Rust + migrate + `regime_off` test);
+  `Sale.fiscal_regime` + `DebtSettlement.timbre_enabled` → ticket/quittance footnote
+  (ESC/POS `.bin` + DOM 80mm + quittance); Card 3 switches audited (`profile.change`).
+  Lane5: `switches:2` ON, vision «no defect».
+- **Stock IO**: `csv-exporter` (`;` + BOM + quoting) round-trips through `preflightCsv`
+  (2/2); importer hardened (valid FR example, 5000-row cap, collision/unmapped counts,
+  file picker, `stock.import/export` audit).
+- **Backup-Pro**: sidecar manifest + `validate` fail-closed + retention 30 (test: 33→30,
+  files+sidecars+rows pruned) + `GET /api/backups/file` (200/200, traversal 404);
+  BackupManagerView rebuilt (stats + provenance + USB/manifest/restore + audit).
+  Lane6 (API-seeded): rows render `v1.3.4 schema v7 [lane6b]` + 4 buttons, vision PASS;
+  found+fixed: missing `x-baraka-loopback` on backup POSTs (graceful AR/FR message in
+  browser lane) + bidi `4 / 30` and card-price `2 600` (`dir=ltr`).
+- Gates: **327/327** · `tsc` clean · `lint` clean · `vite build` ✅ · `cargo test 20/20` ✅.

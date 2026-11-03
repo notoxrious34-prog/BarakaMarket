@@ -1,5 +1,23 @@
 # CHANGELOG — Baraka Market
 
+## Unreleased — النقاط الثلاث (régime fiscal + Stock IO + Backup-Pro)
+- **TVA/Timbre قابلان للتعطيل** (Card 3 «النظام الجبائي»): `tva_enabled=false` يصفر
+  عند المصدر (HT=TTC حياً)؛ `timbre_enabled=false` يصفر حتى ESPECES؛ الأعلام تُخزن
+  per-facture (`sales.tva_enabled/timbre_enabled`، ترقية v7 في TS+Rust) وتظهر على
+  التذكرة/Quittance (`Régime forfaitaire — TVA non applicable`)؛ قلب أي مفتاح حدث
+  `profile.change` مدقق. `fiscal.centimes 23/23` + `cargo 20/20`.
+- **Stock IO**: مراجعة الاستيراد (مثال FR-canonical صحيح، حد 5000 سطر، عدّاد تصادم
+  الباركود/الأقسام، زر ملف) + **تصدير CSV** (`;` + BOM + RFC-4180، أرقام DZD آمنة
+  الفاصلة) مع round-trip test أخضر؛ تدقيق `stock.import/export`.
+- **Backup-Pro**: manifest sidecar (app v + schema v + sha) يُكتب مع كل snapshot؛
+  `list` تُغنيه؛ `validate` يفشل مغلقاً عند mismatch؛ احتفاظ **آخر 30** (ملف+sidecar
+  +row)؛ `GET /api/backups/file` path-gated للـUSB؛ واجهة مُعاد بناؤها (إحصائيات
+  + provenance + تحقق/تنزيل/manifest/استعادة بحجر) + تدقيق `backup.create/restore`؛
+  إصلاح token-gating (التوكن يُرفق من الواجهة، رسالة عربية واضحة في المتصفح).
+- إصلاحان بصريان من الـlane: سعر البطاقة `dir=ltr` (كان `600 2` بدل `2 600`) +
+  عدّاد النسخ `dir=ltr`؛ lane5/6: switches:2 + CSV ⇄ + backup rows + stats PASS بصرياً.
+- **327/327** · tsc/lint/build نظيفة.
+
 ## v1.3.4 (2026-11-03) — التحديث التلقائي مدفوع
 - **التحديث التلقائي يعمل**: `latest.json` حي على GitHub (v1.3.4 + توقيع ed25519 +
   رابط المثبت)؛ الحديد `D:/BarakaMarket-1.3.3` رأى `1.3.4` وثبّته (تدقيق `update.install`

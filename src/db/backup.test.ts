@@ -166,3 +166,51 @@ test('backup: catalog lists newest-first, tampered files flagged CORRUPT', () =>
   fs.rmSync(first.filePath);
   fs.rmSync(second.filePath);
 });
+
+test('backup-pro: manifest sidecar written, shaped, and agreed by validate', async () => {
+  const { checkManifestShape } = await import('../core/backup-catalog.js');
+  const dbPath = tmpDb('manifest.db');
+  const b = openBarakaDb(dbPath);
+  b.upsertProduct(PROD(60, '6130000000603'));
+  const meta = b.createDatabaseBackup({ destinationDir: TMP, label: 'pro' });
+  assert.equal(meta.appVersion, '1.3.4');
+  assert.equal(meta.schemaVersion, 7);
+  assert.equal(meta.label, 'pro');
+  const sidecar = `${meta.filePath}.manifest.json`;
+  assert.ok(fs.existsSync(sidecar));
+  const m = JSON.parse(fs.readFileSync(sidecar, 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(checkManifestShape(m), []);
+  assert.equal(m['sha256'], meta.sha256Checksum);
+  const rep = b.validateBackupForRestore(meta.filePath);
+  assert.equal(rep.isValid, true);
+  // Swapped bytes under a valid sidecar fail closed.
+  fs.appendFileSync(meta.filePath, 'swap');
+  const bad = b.validateBackupForRestore(meta.filePath);
+  assert.equal(bad.isValid, false);
+  b.close();
+  fs.rmSync(meta.filePath, { force: true });
+  fs.rmSync(sidecar, { force: true });
+});
+
+test('backup-pro: retention keeps newest 30, prunes files + sidecars + rows', () => {
+  const dbPath = tmpDb('retention.db');
+  const b = openBarakaDb(dbPath);
+  const made: string[] = [];
+  for (let i = 0; i < 33; i++) {
+    made.push(b.createDatabaseBackup({ destinationDir: TMP, label: 'ret' }).filePath);
+  }
+  const listed = b.listDatabaseBackups();
+  assert.equal(listed.length, 30);
+  assert.equal(listed[0].filePath, made[32]);
+  // The 3 oldest are gone from disk (db file and sidecar) and from the log.
+  for (const gone of made.slice(0, 3)) {
+    assert.equal(fs.existsSync(gone), false);
+    assert.equal(fs.existsSync(`${gone}.manifest.json`), false);
+  }
+  for (const kept of made.slice(3)) {
+    assert.equal(fs.existsSync(kept), true);
+    assert.equal(fs.existsSync(`${kept}.manifest.json`), true);
+  }
+  b.close();
+  for (const p of made.slice(3)) { fs.rmSync(p, { force: true }); fs.rmSync(`${p}.manifest.json`, { force: true }); }
+});

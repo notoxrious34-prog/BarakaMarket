@@ -355,7 +355,7 @@ export const PosView: React.FC = () => {
 
                   {/* Price & Stock */}
                   <div className="mt-1 pt-1.5 border-t border-[#1e293b] flex items-center justify-between">
-                    <span className="text-sm font-bold text-emerald-400">
+                    <span className="text-sm font-bold text-emerald-400" dir="ltr">
                       {formatDZD(product.sell_price, false)}
                     </span>
                     <span className="text-[10px] text-slate-400">

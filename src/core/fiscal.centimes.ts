@@ -86,15 +86,51 @@ export interface TimbreProfile {
 }
 
 /**
+ * Shop fiscal regime (owner toggles, Card 3 «Régime fiscal»).
+ * - tva_enabled=false: every sale line is computed as TVA 0 (TTC becomes HT,
+ *   Algerian forfait/IFU practice) — the Z chain stays coherent (sums are sums).
+ * - timbre_enabled=false: no Droit de Timbre is added, even on ESPECES.
+ * Both travel with every commit (header.fiscal_regime) and are stored per sale
+ * so an auditor can replay WHY a 5000 DZD cash sale carries timbre 0.
+ * Defaults (absent flags) = enabled: existing rows behave exactly as before.
+ */
+export interface FiscalRegime {
+  tva_enabled?: boolean;
+  timbre_enabled?: boolean;
+}
+
+export type FiscalProfile = TimbreProfile & FiscalRegime;
+
+/** Fresh-line rate under the active regime: disabled TVA forces 0 at the source. */
+export function effectiveTvaRate(rate: TVARate, regime?: FiscalRegime): TVARate {
+  assertTvaRate(rate);
+  return regime?.tva_enabled === false ? 0 : rate;
+}
+
+/** Ticket/quittance regime footnote (null = standard taxed ticket, nothing to say). */
+export function regimeNoteFor(regime: FiscalRegime | undefined, isAr: boolean): string | null {
+  if (!regime) return null;
+  const parts: string[] = [];
+  if (regime.tva_enabled === false) {
+    parts.push(isAr ? 'نظام جزافي — TVA غير مطبقة' : 'Régime forfaitaire — TVA non applicable');
+  }
+  if (regime.timbre_enabled === false) {
+    parts.push(isAr ? 'الطابع غير مطبق' : 'Timbre non appliqué');
+  }
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+/**
  * Algerian Droit de Timbre Fiscal (Art. 136 Code du Timbre) in centimes.
  * ESPECES only; ceil(TTC_DZD * rate); clamped to [min, max]; exempt below 50 DZD.
  */
 export function calculateTimbreFiscalCt(
   totalTtcCt: Centimes,
   paymentMethod: PaymentMethod,
-  storeProfile?: TimbreProfile | Partial<StoreProfile>,
+  storeProfile?: TimbreProfile | FiscalProfile | Partial<StoreProfile>,
 ): Centimes {
   assertIntegerCentimes(totalTtcCt, 'totalTtcCt');
+  if ((storeProfile as FiscalProfile | undefined)?.timbre_enabled === false) return 0;
   if (paymentMethod !== 'ESPECES') return 0;
   if (totalTtcCt < TIMBRE_EXEMPT_BELOW_CT) return 0;
 
@@ -117,7 +153,7 @@ export function calculateTimbreFiscalCt(
 export function calculateSaleTotalsCt(
   items: SaleItemCtInput[],
   paymentMethod: PaymentMethod,
-  storeProfile?: TimbreProfile | Partial<StoreProfile>,
+  storeProfile?: TimbreProfile | FiscalProfile | Partial<StoreProfile>,
 ): SaleTotalsCt {
   const breakdown: Record<TVARate, TvaBreakdownCt> = {
     0: { rate: 0, base_ht_ct: 0, tva_amount_ct: 0, total_ttc_ct: 0 },
@@ -127,6 +163,7 @@ export function calculateSaleTotalsCt(
   let sumHt = 0;
   let sumTva = 0;
   let sumTtc = 0;
+  const tvaOff = (storeProfile as FiscalProfile | undefined)?.tva_enabled === false;
   for (const item of items) {
     assertTvaRate(item.tva_rate);
     assertIntegerCentimes(item.total_line_ht_ct, 'item.total_line_ht_ct');
@@ -138,12 +175,17 @@ export function calculateSaleTotalsCt(
         `[fiscal] line invariant broken: HT(${item.total_line_ht_ct}) + TVA(${item.total_line_tva_ct}) !== TTC(${item.total_line_ttc_ct})`,
       );
     }
-    const b = breakdown[item.tva_rate];
-    b.base_ht_ct += item.total_line_ht_ct;
-    b.tva_amount_ct += item.total_line_tva_ct;
+    // Regime TVA off: the TTC line total is ground truth; the whole line
+    // collapses into tier 0 (HT=TTC, TVA=0) — HT+TVA=TTC preserved by construction.
+    const effRate: TVARate = tvaOff ? 0 : item.tva_rate;
+    const lh = tvaOff ? item.total_line_ttc_ct : item.total_line_ht_ct;
+    const la = tvaOff ? 0 : item.total_line_tva_ct;
+    const b = breakdown[effRate];
+    b.base_ht_ct += lh;
+    b.tva_amount_ct += la;
     b.total_ttc_ct += item.total_line_ttc_ct;
-    sumHt += item.total_line_ht_ct;
-    sumTva += item.total_line_tva_ct;
+    sumHt += lh;
+    sumTva += la;
     sumTtc += item.total_line_ttc_ct;
   }
   const timbre = calculateTimbreFiscalCt(sumTtc, paymentMethod, storeProfile);

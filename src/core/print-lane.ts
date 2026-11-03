@@ -14,6 +14,7 @@
 import { buildReceipt, type EscPosSale } from '../hardware/escpos.js';
 import { buildPoleTotal, buildPoleTendered, buildPoleThanks, buildPoleWelcome } from '../hardware/pole-display.js';
 import { LOOPBACK_BASE, getLoopbackToken } from './fiscal-authority.js';
+import { regimeNoteFor } from './fiscal.centimes.js';
 import type { Sale } from '../types/index.js';
 
 export function toHex(buf: Uint8Array): string {
@@ -72,6 +73,7 @@ function saleToEscPos(sale: Sale, store: { store_name: string; rc_number?: strin
       paymentMethod: sale.payment_method,
       amountPaid: sale.amount_paid,
       changeDue: sale.amount_returned,
+      regimeNote: regimeNoteFor(sale.fiscal_regime, isAr) ?? undefined,
     } satisfies EscPosSale,
     { kickDrawer },
   );

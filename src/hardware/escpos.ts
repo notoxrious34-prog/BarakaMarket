@@ -77,6 +77,8 @@ export interface EscPosSale {
   paymentMethod: string;
   amountPaid: number;
   changeDue: number;
+  /** Fiscal regime footnote (forfait / timbre off) — printed when present. */
+  regimeNote?: string;
 }
 
 const money = (n: number) => `${n.toFixed(2)} DZD`;
@@ -110,6 +112,11 @@ export function buildReceipt(s: EscPosSale, opts: { kickDrawer?: boolean } = {})
   out.push(...line(`TVA 9% base ${money(s.tva9Base)} +${money(s.tva9Amt)}`));
   out.push(...line(`TVA 19% base ${money(s.tva19Base)} +${money(s.tva19Amt)}`));
   out.push(...line(`Timbre Art.136 +${money(s.timbre)}`));
+  if (s.regimeNote) {
+    out.push(...ESC_ALIGN_CENTER);
+    out.push(...line(`[${s.regimeNote}]`.slice(0, 32)));
+    out.push(...ESC_ALIGN_LEFT);
+  }
   out.push(...ESC_BOLD_ON);
   out.push(...line(`TOTAL TTC ${money(s.totalTtc)}`.padStart(32)));
   out.push(...ESC_BOLD_OFF);
@@ -132,6 +139,8 @@ export interface EscPosQuittance {
   collected: number;
   newBalance: number;
   paymentMethod: string;
+  /** Timbre toggle footnote — printed when timbre was disabled by regime. */
+  regimeNote?: string;
 }
 
 /** Compile a debt-settlement quittance buffer (Art.136 receipt). */
@@ -148,6 +157,11 @@ export function buildQuittance(q: EscPosQuittance): Uint8Array {
   out.push(...line(`Dette avant: ${money(q.prevBalance)}`));
   out.push(...line(`Encaisse: ${money(q.amount)}`));
   out.push(...line(`Timbre Art.136: +${money(q.timbre)}`));
+  if (q.regimeNote) {
+    out.push(...ESC_ALIGN_CENTER);
+    out.push(...line(`[${q.regimeNote}]`.slice(0, 32)));
+    out.push(...ESC_ALIGN_LEFT);
+  }
   out.push(...ESC_BOLD_ON);
   out.push(...line(`Collecte: ${money(q.collected)}`.padStart(32)));
   out.push(...ESC_BOLD_OFF);

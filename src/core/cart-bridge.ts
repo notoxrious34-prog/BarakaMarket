@@ -9,6 +9,7 @@ import { centimesToDzd, dzdToCentimes, assertIntegerCentimes } from './money.js'
 import {
   calculateLineTotalsCt,
   calculateSaleTotalsCt,
+  effectiveTvaRate,
   type SaleTotalsCt,
 } from './fiscal.centimes.js';
 import type { PaymentMethod, SaleItem, StoreProfile, TVABreakdown, TVARate } from '../types/index.js';
@@ -39,11 +40,13 @@ export function calculateSaleTotals(
   tva_breakdown: Record<TVARate, TVABreakdown>;
 } {
   // Recompute lines from (unit price, qty) — never trust stored floats.
+  // Regime TVA off forces rate 0 at the source (cart shows HT=TTC live).
   const ctItems = items.map((it) => {
+    const eff = effectiveTvaRate(it.tva_rate, storeProfile);
     const l = calculateLineTotalsCt(
-      dzdToCentimes(it.unit_price_ttc), it.quantity, it.tva_rate, it.discount_percent,
+      dzdToCentimes(it.unit_price_ttc), it.quantity, eff, it.discount_percent,
     );
-    return { tva_rate: it.tva_rate, ...l };
+    return { tva_rate: eff, ...l };
   });
   const t: SaleTotalsCt = calculateSaleTotalsCt(ctItems, paymentMethod, storeProfile);
   const conv = (ct: number) => ct / 100;

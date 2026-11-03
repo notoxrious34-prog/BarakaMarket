@@ -26,6 +26,11 @@ import type {
   BackupMetadata, BackupValidationReport, RestoreResult,
 } from '../types';
 import { createPinHash, verifyPin, MANAGER_PIN_META_KEY, isValidPinFormat as isValidP } from '../core/security.js';
+import { APP_VERSION } from '../core/version.js';
+import {
+  backupFilename, manifestPathFor, buildManifest, checkManifestShape, prunePlan,
+  type BackupManifest,
+} from '../core/backup-catalog.js';
 import { isRole, registerAttempt, type Role, type AuditAction, type AuditEvent } from '../core/rbac.js';
 import { loadReferenceCatalog, searchCatalog, type ProductTemplate } from '../core/reference-catalog.js';
 
@@ -66,6 +71,10 @@ export interface SaleHeaderInput {
   totals: SaleTotalsCt;
   is_facture?: number;
   created_at?: string;
+  /** Fiscal regime under which the client computed the totals (owner toggles).
+   * The authority re-verifies with THESE flags and stores them per sale.
+   * Absent = both taxes apply (legacy callers). */
+  fiscal_regime?: { tva_enabled: boolean; timbre_enabled: boolean };
   /** T1 (ADR-021): checkout-minted idempotency key. Retried commits with the
    *  same key return the original row — seq is never consumed twice. */
   client_sale_id?: string | null;
@@ -173,7 +182,10 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 6;
+export const LATEST_SCHEMA_VERSION = 7;
+
+/** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
+export const BACKUP_RETENTION_KEEP = 30;
 
 function schemaVersion(db: DatabaseSync): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
@@ -309,6 +321,19 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     }
     db.exec('PRAGMA user_version = 6');
     v = 6;
+  }
+  // v6 → v7 (régime fiscal): per-sale tva_enabled/timbre_enabled flags.
+  // Fresh files get them from schema.sql; legacy files climb here.
+  if (v < 7) {
+    const cols = db.prepare('PRAGMA table_info(sales)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'tva_enabled')) {
+      db.exec('ALTER TABLE sales ADD COLUMN tva_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    if (!cols.some(c => c.name === 'timbre_enabled')) {
+      db.exec('ALTER TABLE sales ADD COLUMN timbre_enabled INTEGER NOT NULL DEFAULT 1');
+    }
+    db.exec('PRAGMA user_version = 7');
+    v = 7;
   }
   // Always-ensured: partial unique index lives here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
@@ -1256,16 +1281,15 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     createDatabaseBackup(options?: { destinationDir?: string; label?: string }): BackupMetadata {
       const dir = path.resolve(options?.destinationDir ?? 'data/backups');
       fs.mkdirSync(dir, { recursive: true });
-      const d = new Date();
-      const p2 = (n: number): string => String(n).padStart(2, '0');
-      const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
-      const label = (options?.label ?? '').replace(/[^A-Za-z0-9-_]/g, '').slice(0, 24);
+      const now = new Date();
+      // Backup-Pro: canonical name from the shared catalog (same in every lane).
       let n = 0;
-      let filename = `baraka-backup-${stamp}${label ? `-${label}` : ''}.sqlite`;
+      let filename = backupFilename(now, options?.label ?? '', 0);
       while (fs.existsSync(path.join(dir, filename))) {
         n += 1;
-        filename = `baraka-backup-${stamp}${label ? `-${label}` : ''}-${n}.sqlite`;
+        filename = backupFilename(now, options?.label ?? '', n);
       }
+      const label = (options?.label ?? '').replace(/[^A-Za-z0-9-_]/g, '').slice(0, 24);
       const filePath = path.join(dir, filename);
       // Hot snapshot: atomic, non-blocking under WAL (readers keep serving).
       db.exec(`VACUUM INTO '${filePath.replace(/'/g, "''")}'`);
@@ -1275,6 +1299,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         if (check.integrity_check !== 'ok') throw new Error(`[db] snapshot integrity_check failed: ${check.integrity_check}`);
         const sales = (snap.prepare('SELECT COUNT(*) AS n FROM sales').get() as { n: number }).n;
         const products = (snap.prepare('SELECT COUNT(*) AS n FROM products').get() as { n: number }).n;
+        const schemaVersion = (snap.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
         const sha256 = createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
         const size = fs.statSync(filePath).size;
         const createdAt = new Date().toISOString();
@@ -1284,10 +1309,33 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             sales_count, products_count, status, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?)`,
         ).run(id, filename, filePath, size, sha256, sales, products, createdAt);
-        return {
+        // Backup-Pro: manifest sidecar — the catalog survives even if the live
+        // DB (and its backups_log) is lost. Verify + list read it back.
+        const manifest: BackupManifest = buildManifest({
+          app_version: APP_VERSION, schema_version: schemaVersion, label,
+          created_at: createdAt, filename, sha256,
+          size_bytes: size, sales_count: sales, products_count: products,
+        });
+        fs.writeFileSync(manifestPathFor(filePath), JSON.stringify(manifest, null, 2));
+        const meta: BackupMetadata = {
           id, filename, filePath, fileSizeBytes: size, sha256Checksum: sha256,
           salesCount: sales, productsCount: products, status: 'VERIFIED', createdAt,
+          label, appVersion: APP_VERSION, schemaVersion,
         };
+        // Backup-Pro: retention — keep the newest 30, delete files + sidecars + rows.
+        try {
+          const rows = db.prepare(
+            'SELECT id, filename, file_path AS filePath, created_at AS created_at FROM backups_log ORDER BY created_at DESC, rowid DESC',
+          ).all() as { id: string; filename: string; filePath: string; created_at: string }[];
+          for (const old of prunePlan(rows, BACKUP_RETENTION_KEEP)) {
+            try { if (old.filePath) fs.unlinkSync(old.filePath); } catch { /* already gone */ }
+            try { if (old.filePath) fs.unlinkSync(manifestPathFor(old.filePath)); } catch { /* no sidecar */ }
+            db.prepare('DELETE FROM backups_log WHERE id = ?').run(old.id);
+          }
+        } catch (e) {
+          console.warn(`[db] backup retention prune skipped: ${(e as Error).message}`);
+        }
+        return meta;
       } finally {
         snap.close();
       }
@@ -1307,10 +1355,23 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           db.prepare("UPDATE backups_log SET status = 'CORRUPT' WHERE id = ?").run(r.id);
           continue;
         }
+        // Backup-Pro: sidecar enriches the row (label/app/schema); absent on
+        // legacy snapshots — the row itself stays authoritative.
+        let label = '';
+        let appVersion = '';
+        let schemaVersion = 0;
+        try {
+          const raw = fs.readFileSync(manifestPathFor(r.file_path), 'utf8');
+          const m = JSON.parse(raw) as BackupManifest;
+          if (checkManifestShape(m).length === 0 && m.sha256.toLowerCase() === actual.toLowerCase()) {
+            label = m.label; appVersion = m.app_version; schemaVersion = m.schema_version;
+          }
+        } catch { /* legacy snapshot without sidecar */ }
         out.push({
           id: r.id, filename: r.filename, filePath: r.file_path, fileSizeBytes: r.file_size_bytes,
           sha256Checksum: r.sha256_checksum, salesCount: r.sales_count, productsCount: r.products_count,
           status: r.status as BackupMetadata['status'], createdAt: r.created_at,
+          label, appVersion, schemaVersion,
         });
       }
       return out;
@@ -1339,6 +1400,21 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       let integrity = 'not-run';
       if (errors.length === 0) {
         sha256 = createHash('sha256').update(fs.readFileSync(resolved)).digest('hex');
+        // Backup-Pro: when a manifest sidecar exists it must agree with the
+        // bytes on disk — a swapped/renamed file fails closed here.
+        try {
+          const raw = fs.readFileSync(manifestPathFor(resolved), 'utf8');
+          const m = JSON.parse(raw) as BackupManifest;
+          const shapeErrors = checkManifestShape(m);
+          if (shapeErrors.length > 0) errors.push(`manifest malformed: ${shapeErrors.join(', ')}`);
+          else {
+            if (m.sha256.toLowerCase() !== sha256.toLowerCase()) errors.push('manifest sha256 mismatch');
+            if (m.size_bytes !== size) errors.push('manifest size mismatch');
+            if (m.filename !== path.basename(resolved)) errors.push('manifest filename mismatch');
+          }
+        } catch {
+          // No sidecar (legacy snapshot) — byte checks below still gate.
+        }
         const snap = new DatabaseSync(resolved);
         try {
           const check = snap.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
@@ -1424,6 +1500,11 @@ export function openBarakaDb(dbPath: string): BarakaDb {
 
     recordSale(header: SaleHeaderInput, items: SaleItemInput[]) {
       if (items.length === 0) throw new Error('[db] cannot record a sale with zero items');
+      // Fiscal regime travels with the commit; absent flags = legacy (both apply).
+      const regime = {
+        tva_enabled: header.fiscal_regime?.tva_enabled !== false,
+        timbre_enabled: header.fiscal_regime?.timbre_enabled !== false,
+      };
       const t = header.totals;
       for (const k of ['total_ht_ct', 'total_tva_ct', 'timbre_ct', 'total_ttc_ct'] as const) {
         assertIntegerCentimes(t[k], `totals.${k}`);
@@ -1458,7 +1539,11 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           throw new Error(`[db] item sums do not match header TVA ${r}% breakdown`);
         }
       }
-      const expectedTimbre = calculateTimbreFiscalCt(sumTtc, header.payment_method, timbreProfile());
+      // Regime TVA off: the header must carry zero TVA (client coerced lines to tier 0).
+      if (!regime.tva_enabled && t.total_tva_ct !== 0) {
+        throw new Error('[db] regime TVA off but header carries TVA — refusing to record');
+      }
+      const expectedTimbre = calculateTimbreFiscalCt(sumTtc, header.payment_method, { ...timbreProfile(), ...regime });
       if (expectedTimbre !== t.timbre_ct) {
         throw new Error(`[db] timbre mismatch: engine says ${t.timbre_ct}ct, fiscal rule says ${expectedTimbre}ct`);
       }
@@ -1497,9 +1582,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
             tva0_base_ct, tva0_amt_ct, tva0_ttc_ct, tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
             tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
-            payment_method, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
+            payment_method, tva_enabled, timbre_enabled, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
             client_sale_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)`,
         ).run(
           id, invoice, ticket, header.cashier_id, header.cashier_name, header.client_id ?? null,
           header.client_name ?? null, header.client_nif ?? null, header.client_nis ?? null,
@@ -1508,7 +1593,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           t.tva_breakdown[0].base_ht_ct, t.tva_breakdown[0].tva_amount_ct, t.tva_breakdown[0].total_ttc_ct,
           t.tva_breakdown[9].base_ht_ct, t.tva_breakdown[9].tva_amount_ct, t.tva_breakdown[9].total_ttc_ct,
           t.tva_breakdown[19].base_ht_ct, t.tva_breakdown[19].tva_amount_ct, t.tva_breakdown[19].total_ttc_ct,
-          header.payment_method, header.amount_paid_ct, header.amount_returned_ct,
+          header.payment_method, regime.tva_enabled ? 1 : 0, regime.timbre_enabled ? 1 : 0,
+          header.amount_paid_ct, header.amount_returned_ct,
           header.is_facture ?? 0, createdAt, clientSaleId,
         );
         const insItem = db.prepare(
@@ -1614,6 +1700,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       payment_method: 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
       timbre_ct?: number; total_collected_ct?: number; receipt_number?: string;
       date?: string; note?: string | null;
+      /** Fiscal regime (owner toggle): absent = timbre applies (legacy callers). */
+      timbre_enabled?: boolean;
+      /** T2b (ADR-024): checkout-minted idempotency key, stable across retries. */
       client_settlement_key?: string | null;
     }) {
       assertIntegerCentimes(input.amount_ct, 'amount_ct');
@@ -1623,7 +1712,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       assertIntegerCentimes(timbreCt, 'timbre_ct');
       assertIntegerCentimes(collectedCt, 'total_collected_ct');
       // Fiscal cross-check: recompute timbre from the engine (client row may not exist in tests).
-      const expected = calculateTimbreFiscalCt(input.amount_ct, input.payment_method, timbreProfile());
+      const expected = calculateTimbreFiscalCt(input.amount_ct, input.payment_method, {
+        ...timbreProfile(), timbre_enabled: input.timbre_enabled !== false,
+      });
       if (expected !== timbreCt) {
         throw new Error(`[db] settlement timbre mismatch: got ${timbreCt}ct, fiscal rule says ${expected}ct`);
       }

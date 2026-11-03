@@ -10,6 +10,8 @@ import {
   calculateLineTotalsCt,
   calculateTimbreFiscalCt,
   calculateSaleTotalsCt,
+  effectiveTvaRate,
+  regimeNoteFor,
   parseScaleBarcodeCt,
   isValidEan13,
 } from './fiscal.centimes.js';
@@ -189,4 +191,50 @@ test('fiscal.ct: scale parse trims whitespace, keeps zero-padded code', () => {
   assert.equal(r.isScale, true);
   assert.equal(r.itemCode, '00055');
   assert.equal(r.rawNumericCode, 55);
+});
+
+// ---- fiscal regime toggles (owner Card 3) ----
+test('fiscal.ct regime: tva_enabled=false collapses every tier into 0 (HT=TTC)', () => {
+  const items = [
+    { tva_rate: 9 as const, ...calculateLineTotalsCt(18000, 2, 9) },
+    { tva_rate: 0 as const, ...calculateLineTotalsCt(65000, 1, 0) },
+    { tva_rate: 19 as const, ...calculateLineTotalsCt(12000, 3, 19) },
+  ];
+  const t = calculateSaleTotalsCt(items, 'ESPECES', { tva_enabled: false });
+  assert.equal(t.total_tva_ct, 0);
+  assert.equal(t.total_ht_ct + t.timbre_ct, t.total_ttc_ct);
+  assert.equal(t.tva_breakdown[0].total_ttc_ct, 36000 + 65000 + 36000);
+  assert.equal(t.tva_breakdown[9].total_ttc_ct, 0);
+  assert.equal(t.tva_breakdown[19].total_ttc_ct, 0);
+});
+
+test('fiscal.ct regime: timbre_enabled=false zeroes timbre even on ESPECES', () => {
+  assert.equal(calculateTimbreFiscalCt(177600, 'ESPECES', { timbre_enabled: false }), 0);
+  const items = [{ tva_rate: 9 as const, ...calculateLineTotalsCt(18000, 2, 9) }];
+  const t = calculateSaleTotalsCt(items, 'ESPECES', { timbre_enabled: false });
+  assert.equal(t.timbre_ct, 0);
+  assert.equal(t.total_ttc_ct, t.total_ht_ct + t.total_tva_ct);
+});
+
+test('fiscal.ct regime: both off — clean TTC-only receipt', () => {
+  const items = [{ tva_rate: 19 as const, ...calculateLineTotalsCt(119000, 1, 19) }];
+  const t = calculateSaleTotalsCt(items, 'ESPECES', { tva_enabled: false, timbre_enabled: false });
+  assert.equal(t.total_tva_ct, 0);
+  assert.equal(t.timbre_ct, 0);
+  assert.equal(t.total_ht_ct, 119000);
+  assert.equal(t.total_ttc_ct, 119000);
+});
+
+test('fiscal.ct regime: effectiveTvaRate forces 0 only when disabled', () => {
+  assert.equal(effectiveTvaRate(19, { tva_enabled: false }), 0);
+  assert.equal(effectiveTvaRate(19, { tva_enabled: true }), 19);
+  assert.equal(effectiveTvaRate(9, undefined), 9);
+});
+
+test('fiscal.ct regime: regimeNoteFor footnotes only when a tax is off', () => {
+  assert.equal(regimeNoteFor(undefined, false), null);
+  assert.equal(regimeNoteFor({ tva_enabled: true, timbre_enabled: true }, false), null);
+  assert.equal(regimeNoteFor({ tva_enabled: false }, false), 'Régime forfaitaire — TVA non applicable');
+  assert.equal(regimeNoteFor({ timbre_enabled: false }, true), 'الطابع غير مطبق');
+  assert.ok((regimeNoteFor({ tva_enabled: false, timbre_enabled: false }, false) ?? '').includes('·'));
 });

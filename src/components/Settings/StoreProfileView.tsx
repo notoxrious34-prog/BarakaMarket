@@ -35,7 +35,12 @@ export const StoreProfileView: React.FC = () => {
     setNifUnlocked(true);
   };
 
-  const [form, setForm] = useState<StoreProfile>({ ...storeProfile });
+  const [form, setForm] = useState<StoreProfile>({
+    ...storeProfile,
+    // Legacy profiles predate the toggles — absent means the tax applies.
+    tva_enabled: storeProfile.tva_enabled !== false,
+    timbre_enabled: storeProfile.timbre_enabled !== false,
+  });
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [nifError, setNifError] = useState<string | null>(null);
 
@@ -58,6 +63,20 @@ export const StoreProfileView: React.FC = () => {
     if (soldOnce && cleanNif !== storeProfile.nif_number.replace(/\s+/g, '') && session) {
       void auditSessionEvent(session.username, 'profile.change',
         `nif ${mask(storeProfile.nif_number)} → ${mask(cleanNif)}`);
+    }
+    // Fiscal regime flips are legal events too — audit ON/OFF explicitly.
+    // They apply to NEW sales only (each recorded sale keeps its own flags).
+    if (session) {
+      const wasTva = storeProfile.tva_enabled !== false, nowTva = form.tva_enabled !== false;
+      if (wasTva !== nowTva) {
+        void auditSessionEvent(session.username, 'profile.change',
+          `régime TVA ${wasTva ? 'ON' : 'OFF'} → ${nowTva ? 'ON' : 'OFF'} (ventes futures uniquement)`);
+      }
+      const wasTimbre = storeProfile.timbre_enabled !== false, nowTimbre = form.timbre_enabled !== false;
+      if (wasTimbre !== nowTimbre) {
+        void auditSessionEvent(session.username, 'profile.change',
+          `régime timbre ${wasTimbre ? 'ON' : 'OFF'} → ${nowTimbre ? 'ON' : 'OFF'} (encaissements futurs uniquement)`);
+      }
     }
     updateStoreProfile(form);
     setSavedSuccess(true);
@@ -245,6 +264,45 @@ export const StoreProfileView: React.FC = () => {
               <Percent className="w-4 h-4" />
               <span>{isAr ? '3. محددات حق الطابع المالي (Droit de Timbre Fiscal)' : 'Configuration Droit de Timbre (Art. 136)'}</span>
             </h3>
+
+            {/* Fiscal regime toggles (owner): forfait/exemptions per shop need. */}
+            <div className="bg-[#0b0f17] border border-amber-900/50 rounded-xl p-3 space-y-3">
+              <div className="text-[11px] font-bold text-amber-300">
+                {isAr ? 'النظام الجبائي للبيع (يطبق على المبيعات الجديدة فقط — كل فاتورة تحتفظ بنظامها)' : 'Régime fiscal des ventes (ventes futures uniquement — chaque facture garde son régime)'}
+              </div>
+              {([
+                { key: 'tva_enabled' as const,
+                  title: isAr ? 'TVA مطبقة على المبيعات (0 / 9 / 19%)' : 'TVA appliquée aux ventes (0 / 9 / 19 %)',
+                  offHint: isAr ? 'متوقف: نظام جزافي — كل الأسطر TVA 0 (HT = TTC)' : 'OFF : régime forfaitaire — toutes les lignes en TVA 0 (HT = TTC)' },
+                { key: 'timbre_enabled' as const,
+                  title: isAr ? 'حق الطابع على الدفع نقداً (المادة 136)' : 'Droit de timbre sur espèces (Art. 136)',
+                  offHint: isAr ? 'متوقف: لا طابع مهما كانت طريقة الدفع' : 'OFF : aucun timbre quelle que soit la méthode' },
+              ]).map(sw => {
+                const on = form[sw.key] !== false;
+                return (
+                  <div key={sw.key} className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-semibold text-slate-200">{sw.title}</div>
+                      {!on && <div className="text-[10px] text-amber-400/80 mt-0.5">{sw.offHint}</div>}
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={on}
+                      onClick={() => setForm({ ...form, [sw.key]: !on })}
+                      className={`relative w-11 h-6 rounded-full transition-colors shrink-0 cursor-pointer ${on ? 'bg-emerald-600' : 'bg-slate-700'}`}
+                    >
+                      <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all ${on ? (isAr ? 'left-0.5' : 'left-[22px]') : (isAr ? 'left-[22px]' : 'left-0.5')}`} />
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="text-[10px] text-slate-500">
+                {isAr
+                  ? 'تنبيه: أي تغيير يُسجَّل في التدقيق مع اسم المستخدم. الفواتير السابقة لا تتأثر.'
+                  : 'Tout changement est audité (utilisateur horodaté). Les factures existantes sont intangibles.'}
+              </div>
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>

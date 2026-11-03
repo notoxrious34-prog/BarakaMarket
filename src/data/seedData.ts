@@ -15,6 +15,8 @@ export const initialStoreProfile: StoreProfile = {
   timbre_rate: 0.01,
   timbre_min: 10,
   timbre_max: 2500,
+  tva_enabled: true,
+  timbre_enabled: true,
 };
 
 export const initialCategories: Category[] = [
