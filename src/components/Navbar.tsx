@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { can, type Permission } from '../core/rbac';
 import {
@@ -20,6 +20,7 @@ import {
   Sun,
   Moon,
   Lock,
+  MoreHorizontal,
   LogOut,
 } from 'lucide-react';
 import { formatDZD } from '../core/display';
@@ -65,6 +66,28 @@ export const Navbar: React.FC = () => {
   const visibleTabs = tabs.filter(t => can(role, t.perm));
   const showSettings = can(role, 'settings.edit') || can(role, 'audit.view');
 
+  // NAVBAR-REDESIGN Phase 1: daily tasks stay visible; admin views collapse
+  // into «المزيد». Same RBAC, same views — only the grouping changes.
+  const DAILY_VIEWS = new Set(['pos', 'products', 'suppliers', 'clients']);
+  const dailyTabs = visibleTabs.filter(t => DAILY_VIEWS.has(t.view));
+  const adminTabs = visibleTabs.filter(t => !DAILY_VIEWS.has(t.view));
+  const [showMore, setShowMore] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showMore) return;
+    const onDown = (e: PointerEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setShowMore(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowMore(false); };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [showMore]);
+  const moreActive = adminTabs.some(t => t.view === activeView) || activeView === 'settings';
+
   // Role change (or a fresh login) never strands the UI on a hidden view.
   useEffect(() => {
     if (!session) return;
@@ -106,9 +129,9 @@ export const Navbar: React.FC = () => {
           {/* BRK-020: trial badge removed — license status lives in Licence/Settings only. */}
         </div>
 
-        {/* Navigation Tabs */}
-        <nav className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto no-scrollbar">
-          {visibleTabs.map(t => (
+        {/* Navigation Tabs — daily tasks visible, admin lives under «المزيد» */}
+        <nav className="flex-1 min-w-0 flex items-center gap-1" aria-label={isAr ? 'التنقل الرئيسي' : 'Navigation principale'}>
+          {dailyTabs.map(t => (
             <button
               key={t.view}
               onClick={() => setActiveView(t.view)}
@@ -128,19 +151,70 @@ export const Navbar: React.FC = () => {
             </button>
           ))}
 
-          {showSettings && (
-            <button
-              onClick={() => setActiveView('settings')}
-              className={`p-2 rounded-lg text-xs font-medium transition-all cursor-pointer flex-shrink-0 ${
-                activeView === 'settings'
-                  ? 'bg-slate-700 text-white'
-                  : 'text-slate-400 hover:bg-[#162030] hover:text-white'
-              }`}
-              title={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
-              aria-label={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
-            >
-              <Settings className="w-4 h-4" />
-            </button>
+          {(adminTabs.length > 0 || showSettings) && (
+            <div className="relative flex-shrink-0" ref={moreRef}>
+              <button
+                onClick={() => setShowMore(prev => !prev)}
+                aria-haspopup="menu"
+                aria-expanded={showMore}
+                title={isAr ? 'مهام إدارية: المحاسبة، التقارير، الإغلاق، الإعدادات' : 'Tâches admin : compta, rapports, clôture, paramètres'}
+                aria-label={isAr ? 'المزيد — مهام إدارية' : 'Plus — tâches admin'}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1 transition-all cursor-pointer whitespace-nowrap ${
+                  moreActive
+                    ? 'bg-slate-700 text-white shadow-md'
+                    : 'text-slate-300 hover:bg-[#162030] hover:text-white'
+                }`}
+              >
+                <MoreHorizontal className="w-4 h-4 flex-shrink-0" />
+                <span>{isAr ? 'المزيد' : 'Plus'}</span>
+              </button>
+
+              {showMore && (
+                <div
+                  role="menu"
+                  aria-label={isAr ? 'مهام إدارية' : 'Tâches admin'}
+                  className="absolute top-full mt-2 start-0 w-60 bg-[#111722] border border-[#1e293b] rounded-xl shadow-2xl p-1.5 z-50"
+                >
+                  <div className="px-2.5 py-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                    {isAr ? 'الإدارة والتقارير' : 'Admin & rapports'}
+                  </div>
+                  {adminTabs.map(t => (
+                    <button
+                      key={t.view}
+                      role="menuitem"
+                      onClick={() => { setActiveView(t.view); setShowMore(false); }}
+                      title={t.title}
+                      className={`w-full px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer text-start ${
+                        activeView === t.view
+                          ? (t.amber ? 'bg-amber-600 text-white' : 'bg-emerald-600 text-white')
+                          : 'text-slate-300 hover:bg-[#162030] hover:text-white'
+                      }`}
+                    >
+                      {t.icon}
+                      <span>{t.label}</span>
+                    </button>
+                  ))}
+                  {showSettings && (
+                    <>
+                      <div className="my-1 border-t border-[#1e293b]" />
+                      <button
+                        role="menuitem"
+                        onClick={() => { setActiveView('settings'); setShowMore(false); }}
+                        title={isAr ? 'إعدادات المحل والضرائب' : 'Paramètres Store & Fiscalité'}
+                        className={`w-full px-2.5 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer text-start ${
+                          activeView === 'settings'
+                            ? 'bg-slate-700 text-white'
+                            : 'text-slate-300 hover:bg-[#162030] hover:text-white'
+                        }`}
+                      >
+                        <Settings className="w-4 h-4 flex-shrink-0" />
+                        <span>{isAr ? 'الإعدادات والضرائب' : 'Paramètres & Fiscalité'}</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </nav>
 
