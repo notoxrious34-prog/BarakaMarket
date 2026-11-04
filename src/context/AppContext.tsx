@@ -755,9 +755,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clients,
       suppliers,
       settlements,
-      supplierPayments
+      supplierPayments,
+      expenses
     );
-  }, [sales, purchases, products, clients, suppliers, settlements, supplierPayments]);
+  }, [sales, purchases, products, clients, suppliers, settlements, supplierPayments, expenses]);
 
   const addToCart = (product: Product, quantity = 1, discountPercent = 0, pack?: { unitPriceTtc?: number; packMultiplier?: number; packName?: string; barcode?: string }) => {
     // ADR-004-MKT: pack rows carry their own unit price + multiplier; the
@@ -1019,7 +1020,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       client_rc: selectedClient.rc,
       client_ai: selectedClient.ai,
       client_address: selectedClient.address,
-      items: [...currentCart],
+      // C2-fix: stamp the cost actually borne, before any later PMP drift.
+      items: currentCart.map(it => ({
+        ...it,
+        unit_cost_ht: products.find(p => p.id === it.product_id)?.buy_price ?? it.unit_cost_ht,
+      })),
       total_ht: totals.total_ht,
       tva_breakdown: totals.tva_breakdown,
       total_tva: totals.total_tva,
@@ -1264,7 +1269,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...cashierStamp(),
         client_id: selectedClient.id,
         client_name: selectedClient.name,
-        items: [...currentCart],
+        // C2-fix: stamp the cost actually borne, before any later PMP drift.
+        items: currentCart.map(it => ({
+          ...it,
+          unit_cost_ht: products.find(p => p.id === it.product_id)?.buy_price ?? it.unit_cost_ht,
+        })),
         total_ht: totals.total_ht,
         tva_breakdown: totals.tva_breakdown,
         total_tva: totals.total_tva,

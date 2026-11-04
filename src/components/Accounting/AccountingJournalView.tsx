@@ -1,7 +1,14 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ExpensesWorkersView } from './ExpensesWorkersView';
 import { formatDZD } from '../../core/display';
+import {
+  buildJournalEntries,
+  filterJournalByPeriod,
+  journalToCsv,
+  type JournalPeriod,
+} from '../../core/compta-kernel';
+import { calculateAccountingSummary } from '../../utils/accounting';
 import {
   PieChart,
   TrendingUp,
@@ -11,123 +18,85 @@ import {
   Building,
   Printer,
   FileSpreadsheet,
-  ArrowUpRight,
-  ArrowDownRight,
-  Calendar,
   Layers,
-  CheckCircle2,
 } from 'lucide-react';
 
+/**
+ * Compta (v1.4.5 rebuild, C-lane institutional audit).
+ * Thin renderer over two tested kernels:
+ * - compta-kernel: SCF journal (voids excluded, 530/512 split, timbre memo),
+ *   live period filter, accountant CSV handoff.
+ * - utils/accounting: margins/PMP/treasury (expenses deducted, cost-at-sale).
+ * Period cards show the selected window; snapshot cards (stock, balances,
+ * treasury) are cumulative by nature and labelled as such.
+ */
 export const AccountingJournalView: React.FC = () => {
-  const { accountingSummary, sales, purchases, settlements, supplierPayments, expenses, language } = useApp();
+  const { accountingSummary, sales, purchases, products, clients, suppliers, settlements, supplierPayments, expenses, language } = useApp();
   const isAr = language === 'ar';
 
-  const [filterPeriod, setFilterPeriod] = useState<'all' | 'today' | 'month'>('all');
+  // C4-fix: the period filter is now wired to the journal AND the flow KPIs.
+  const [filterPeriod, setFilterPeriod] = useState<JournalPeriod>('all');
 
   const handlePrint = () => {
     window.print();
   };
 
-  // Compile general journal entries chronologically
-  const journalEntries: {
-    id: string;
-    date: string;
-    type: 'VENTE' | 'ACHAT' | 'ENCAISSEMENT' | 'DECAISSEMENT';
-    ref: string;
-    label: string;
-    debitAccount: string;
-    creditAccount: string;
-    amount: number;
-  }[] = [];
+  // SCF journal from the tested kernel (C3/C6/C7/C9 fixed at the source).
+  const journalEntries = useMemo(
+    () => buildJournalEntries({ sales, purchases, settlements, supplierPayments, expenses }),
+    [sales, purchases, settlements, supplierPayments, expenses]
+  );
+  const visibleJournal = useMemo(
+    () => filterJournalByPeriod(journalEntries, filterPeriod),
+    [journalEntries, filterPeriod]
+  );
 
-  // 1. Sales
-  for (const s of sales) {
-    journalEntries.push({
-      id: s.id,
-      date: s.created_at,
-      type: 'VENTE',
-      ref: s.ticket_number,
-      label: `Vente au comptoir (${s.items.length} articles) - ${s.payment_method}`,
-      debitAccount: s.payment_method === 'CREDIT' ? '411000 Clients (Crédit)' : '530000 Caisse Espèces',
-      creditAccount: '700000 Ventes Marchandises + 4457 TVA',
-      amount: s.total_ttc,
-    });
-  }
-
-  // 2. Inbound Purchases from Suppliers
-  for (const p of purchases) {
-    journalEntries.push({
-      id: p.id,
-      date: p.date,
-      type: 'ACHAT',
-      ref: p.invoice_number,
-      label: `Approvisionnement stock - ${p.supplier_name}`,
-      debitAccount: '300000 Stock Marchandises (au PMP)',
-      creditAccount: p.payment_method === 'CREDIT' ? '401000 Fournisseurs' : '530000 Caisse / 512 Banque',
-      amount: p.total_ttc,
-    });
-  }
-
-  // 3. Client Debt Settlements
-  for (const cs of settlements) {
-    journalEntries.push({
-      id: cs.id,
-      date: cs.date,
-      type: 'ENCAISSEMENT',
-      ref: cs.id,
-      label: `Règlement créance client - ${cs.client_name}`,
-      debitAccount: cs.payment_method === 'ESPECES' ? '530000 Caisse Espèces' : '512000 Banque CIB',
-      creditAccount: '411000 Clients (Carnet de Dette)',
-      amount: cs.amount,
-    });
-  }
-
-  // 4. Supplier Payments
-  for (const sp of supplierPayments) {
-    journalEntries.push({
-      id: sp.id,
-      date: sp.date,
-      type: 'DECAISSEMENT',
-      ref: sp.reference || sp.id,
-      label: `Paiement dette fournisseur - ${sp.supplier_name}`,
-      debitAccount: '401000 Fournisseurs',
-      creditAccount: sp.payment_method === 'ESPECES' ? '530000 Caisse' : '512000 Banque Chèque',
-      amount: sp.amount,
-    });
-  }
-
-  // 5. P2 (v1.4.4): shop expenses — SCF charges (61/62/63) against till/bank.
-  const EXPENSE_DEBIT: Record<string, string> = {
-    LOYER: '613000 Locations',
-    ELEC_EAU: '607000 Énergie / Eau',
-    TRANSPORT: '625000 Transports',
-    MAINTENANCE: '615000 Entretien',
-    TELECOM: '626000 Télécom',
-    SALAIRES: '631000 Salaires',
-    AVANCES: '425000 Avances employés',
-    AUTRE: '658000 Charges diverses',
+  const handleCsv = () => {
+    const blob = new Blob([journalToCsv(visibleJournal)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `journal-scf-${filterPeriod}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
-  for (const ex of expenses) {
-    journalEntries.push({
-      id: ex.id,
-      date: ex.date,
-      type: 'DECAISSEMENT',
-      ref: ex.id,
-      label: `Dépense boutique - ${ex.note ?? ex.category}`,
-      debitAccount: EXPENSE_DEBIT[ex.category] ?? '658000 Charges diverses',
-      creditAccount: ex.method === 'ESPECES' ? '530000 Caisse' : '512000 Banque',
-      amount: ex.amountCt / 100,
-    });
-  }
 
-  // Sort descending by date
-  journalEntries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  // Period-scoped flows for the margin/CA cards (snapshots stay global).
+  const inPeriod = (dateStr: string) => {
+    if (filterPeriod === 'all') return true;
+    const now = new Date();
+    if (filterPeriod === 'today') return dateStr.slice(0, 10) === now.toISOString().slice(0, 10);
+    return dateStr.slice(0, 7) === now.toISOString().slice(0, 7);
+  };
+  const periodSummary = useMemo(
+    () =>
+      calculateAccountingSummary(
+        sales.filter(s => inPeriod(s.created_at)),
+        purchases.filter(p => inPeriod(p.date)),
+        products,
+        clients,
+        suppliers,
+        settlements.filter(s => inPeriod(s.date)),
+        supplierPayments.filter(s => inPeriod(s.date)),
+        expenses.filter(e => inPeriod(e.date))
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sales, purchases, products, clients, suppliers, settlements, supplierPayments, expenses, filterPeriod]
+  );
+
+  const periodLabel = filterPeriod === 'all'
+    ? (isAr ? 'كل الفترات' : 'Toutes périodes')
+    : filterPeriod === 'today'
+      ? (isAr ? 'اليوم' : "Aujourd'hui")
+      : (isAr ? 'هذا الشهر' : 'Ce mois');
 
   // Latent stock margin (Valeur Retail - Valeur PMP)
   const potentialStockMargin = Math.max(
     0,
     accountingSummary.total_stock_value_retail - accountingSummary.total_stock_value_pmp
   );
+
+  const netDebt = accountingSummary.total_client_receivables - accountingSummary.total_supplier_payables;
 
   return (
     <div className="flex-1 bg-[#0b0f17] p-5 overflow-y-auto space-y-6">
@@ -145,15 +114,38 @@ export const AccountingJournalView: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={handlePrint}
-          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-950/40 cursor-pointer"
-        >
-          <Printer className="w-4 h-4" />
-          <span>{isAr ? 'طباعة التقرير المحاسبي' : 'Imprimer Synthèse'}</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {/* C4: period selector — اليوم / الشهر / الكل */}
+          <div className="flex rounded-xl overflow-hidden border border-[#2b3a4f] text-xs font-bold" role="group" aria-label={isAr ? 'الفترة' : 'Période'}>
+            {(['today', 'month', 'all'] as const).map(p => (
+              <button
+                key={p}
+                onClick={() => setFilterPeriod(p)}
+                className={`px-3 py-2 cursor-pointer ${filterPeriod === p ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                {p === 'today' ? (isAr ? 'اليوم' : 'Jour') : p === 'month' ? (isAr ? 'الشهر' : 'Mois') : (isAr ? 'الكل' : 'Tout')}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={handleCsv}
+            className="px-4 py-2 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] text-slate-200 rounded-xl text-xs font-bold flex items-center gap-2 cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+            <span>CSV</span>
+          </button>
+          <button
+            onClick={handlePrint}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-950/40 cursor-pointer"
+          >
+            <Printer className="w-4 h-4" />
+            <span>{isAr ? 'طباعة التقرير المحاسبي' : 'Imprimer Synthèse'}</span>
+          </button>
+        </div>
       </div>
 
+      {/* Printable SCF synthesis (C10-fix: window.print() now has a target). */}
+      <div id="printable-compta">
       {/* Primary Financial KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Gross Margin */}
@@ -164,14 +156,15 @@ export const AccountingJournalView: React.FC = () => {
               <span>{isAr ? 'الهامش التجاري الإجمالي:' : 'Marge Commerciale Brute:'}</span>
             </span>
             <span className="font-mono bg-emerald-950 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-800">
-              {accountingSummary.gross_margin_percent}%
+              {periodSummary.gross_margin_percent}%
             </span>
           </div>
           <div className="text-2xl font-black font-mono text-emerald-400 mt-2" dir="ltr">
-            {formatDZD(accountingSummary.gross_margin_dzd, false)}
+            {formatDZD(periodSummary.gross_margin_dzd, false)}
           </div>
           <div className="text-[11px] text-slate-400 mt-1">
-            CAMV: <strong dir="ltr">{formatDZD(accountingSummary.total_cost_of_goods_sold, false)}</strong>
+            CAMV: <strong dir="ltr">{formatDZD(periodSummary.total_cost_of_goods_sold, false)}</strong>
+            {' '}• {periodLabel}
           </div>
         </div>
 
@@ -259,7 +252,6 @@ export const AccountingJournalView: React.FC = () => {
               {isAr ? 'صافي الموقف المالي للديون:' : 'Solde Net Créances / Dettes:'}
             </span>
             {(() => {
-              const netDebt = accountingSummary.total_client_receivables - accountingSummary.total_supplier_payables;
               return (
                 <div
                   className={`text-xl font-bold font-mono ${netDebt >= 0 ? 'text-emerald-400' : 'text-amber-400'}`}
@@ -279,10 +271,10 @@ export const AccountingJournalView: React.FC = () => {
               {isAr ? 'التدفق المالي للمبيعات (Chiffre d\'Affaires):' : 'Chiffre d\'Affaires Global:'}
             </span>
             <div className="text-xl font-bold font-mono text-white" dir="ltr">
-              {formatDZD(accountingSummary.total_sales_ttc, false)}
+              {formatDZD(periodSummary.total_sales_ttc, false)}
             </div>
             <p className="text-[10px] text-slate-400">
-              HT: <strong dir="ltr">{formatDZD(accountingSummary.total_sales_ht, false)}</strong> • {sales.length} transactions
+              HT: <strong dir="ltr">{formatDZD(periodSummary.total_sales_ht, false)}</strong> • {periodLabel}
             </p>
           </div>
         </div>
@@ -298,10 +290,11 @@ export const AccountingJournalView: React.FC = () => {
             </h3>
             <p className="text-[11px] text-slate-400">
               {isAr ? 'تتبع زمني دقيق لكل حركة بيع، شراء، دفع أو تسديد وفق مدونة الحسابات' : 'Enregistrement chronologique débit / crédit conforme au SCF'}
+              {' '}• {periodLabel}
             </p>
           </div>
           <span className="text-xs text-slate-400 font-mono">
-            {journalEntries.length} {isAr ? 'قيد محاسبي' : 'écritures'}
+            {visibleJournal.length} {isAr ? 'قيد محاسبي' : 'écritures'}
           </span>
         </div>
 
@@ -318,7 +311,7 @@ export const AccountingJournalView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#162030] text-slate-300">
-              {journalEntries.map(entry => (
+              {visibleJournal.map(entry => (
                 <tr key={entry.id} className="hover:bg-[#162030]/60 transition-colors">
                   <td className="py-2.5 px-3 font-mono text-[11px] text-slate-400">
                     {new Date(entry.date).toLocaleString('fr-FR', {
@@ -332,7 +325,19 @@ export const AccountingJournalView: React.FC = () => {
                     {entry.ref}
                   </td>
                   <td className="py-2.5 px-3">
-                    <div className="font-semibold text-white">{entry.label}</div>
+                    <div className="font-semibold text-white">
+                      {entry.label}
+                      {entry.provisional && (
+                        <span className="ms-2 text-[10px] font-mono text-amber-300 border border-amber-700 rounded px-1">
+                          {isAr ? 'مؤقت' : 'PROV'}
+                        </span>
+                      )}
+                    </div>
+                    {entry.timbreDzd > 0 && (
+                      <div className="text-[10px] text-slate-500 font-mono" dir="ltr">
+                        + timbre {formatDZD(entry.timbreDzd, false)}
+                      </div>
+                    )}
                   </td>
                   <td className="py-2.5 px-3 font-mono text-[11px] text-sky-400">
                     {entry.debitAccount}
@@ -341,13 +346,19 @@ export const AccountingJournalView: React.FC = () => {
                     {entry.creditAccount}
                   </td>
                   <td className="py-2.5 px-3 text-end font-mono font-bold text-emerald-400" dir="ltr">
-                    {formatDZD(entry.amount, false)}
+                    {formatDZD(entry.amountDzd, false)}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+          {visibleJournal.length === 0 && (
+            <div className="py-8 text-center text-xs text-slate-500">
+              {isAr ? 'لا قيود في هذه الفترة' : 'Aucune écriture sur cette période'}
+            </div>
+          )}
         </div>
+      </div>
       </div>
 
       {/* P2 (v1.4.4): shop expenses + worker accounts */}

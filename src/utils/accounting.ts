@@ -2,6 +2,7 @@ import {
   AccountingSummary,
   Client,
   DebtSettlement,
+  Expense,
   Product,
   PurchaseInvoice,
   Sale,
@@ -46,7 +47,10 @@ export function calculateAccountingSummary(
   clients: Client[],
   suppliers: Supplier[],
   clientSettlements: DebtSettlement[],
-  supplierPayments: SupplierPayment[]
+  supplierPayments: SupplierPayment[],
+  // C1-fix (v1.4.5): shop expenses MUST move the treasury. Optional so all
+  // existing callers/tests keep compiling; absent = legacy behaviour.
+  expenses: Expense[] = []
 ): AccountingSummary {
   // 1. Sales aggregates
   const completedSales = sales.filter(s => s.status === 'COMPLETED');
@@ -54,7 +58,8 @@ export function calculateAccountingSummary(
   const totalSalesTTC = completedSales.reduce((sum, s) => sum + s.total_ttc, 0);
 
   // 2. Cost of Goods Sold (CAMV: Coût d'Achat des Marchandises Vendues)
-  // Map product id to current buy price PMP
+  // C2-fix: prefer the cost stamped AT SALE TIME (unit_cost_ht); current-PMP
+  // fallback only for legacy rows that predate the stamp.
   const prodCostMap = new Map<number, number>();
   for (const p of products) {
     prodCostMap.set(p.id, p.buy_price);
@@ -63,7 +68,9 @@ export function calculateAccountingSummary(
   let totalCAMV = 0;
   for (const sale of completedSales) {
     for (const item of sale.items) {
-      const unitCost = prodCostMap.get(item.product_id) ?? (item.total_line_ht / item.quantity) * 0.75;
+      const unitCost = item.unit_cost_ht
+        ?? prodCostMap.get(item.product_id)
+        ?? (item.total_line_ht / item.quantity) * 0.75;
       totalCAMV += item.quantity * unitCost;
     }
   }
@@ -102,9 +109,11 @@ export function calculateAccountingSummary(
   }
 
   // Add client settlements
+  // C5-fix: ESPECES settlements bring principal + Art.136 timbre into the
+  // drawer (the Z lane counts both) — card settlements carry no timbre.
   for (const cs of clientSettlements) {
     if (cs.payment_method === 'ESPECES') {
-      cashTreasury += cs.amount;
+      cashTreasury += cs.amount + (cs.timbre_fiscal ?? 0);
     } else {
       bankTreasury += cs.amount;
     }
@@ -127,6 +136,19 @@ export function calculateAccountingSummary(
       } else if (p.payment_method === 'VIREMENT' || p.payment_method === 'CHEQUE') {
         bankTreasury -= p.amount_paid;
       }
+    }
+  }
+
+  // C1-fix: shop expenses (charges, advances, payroll) leave the shop's money.
+  // ESPECES from the till, VIREMENT/CHEQUE from the bank — same rule the Z
+  // lane applies to its EXPENSE movements (tillPosted or hors-caisse alike:
+  // the shop spent it either way).
+  for (const ex of expenses) {
+    const eDzd = ex.amountCt / 100;
+    if (ex.method === 'ESPECES') {
+      cashTreasury -= eDzd;
+    } else {
+      bankTreasury -= eDzd;
     }
   }
 

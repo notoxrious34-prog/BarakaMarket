@@ -236,6 +236,31 @@ html.light .brand-chip {
     color: #111827 !important;
     font-family: 'Plus Jakarta Sans', 'Cairo', sans-serif !important;
   }
+
+  /* C10 (v1.4.5): the Compta synthesis finally has a print target —
+     A4 landscape ledger, dark UI flattened to black on white. */
+  #printable-compta, #printable-compta * {
+    visibility: visible;
+  }
+
+  #printable-compta {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 277mm !important;
+    margin: 0 !important;
+    padding: 10mm !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-size: 11px !important;
+  }
+
+  #printable-compta * {
+    background: #ffffff !important;
+    color: #111827 !important;
+    border-color: #9ca3af !important;
+    box-shadow: none !important;
+  }
 }
 
 /* ADR-007-MKT: hide scrollbars on horizontal tab rails while keeping scroll. */

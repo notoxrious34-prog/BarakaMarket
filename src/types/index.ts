@@ -286,6 +286,12 @@ export interface SaleItem {
   total_line_ht: number;
   total_line_tva: number;
   total_line_ttc: number;
+  /**
+   * C2-fix (v1.4.5): unit purchase cost (HT, DZD) stamped AT SALE TIME.
+   * CAMV prefers this over the live PMP so historical margins survive
+   * later cost changes; absent on legacy rows (fallback: current PMP).
+   */
+  unit_cost_ht?: number;
   /** ADR-004-MKT colisage: base units per scanned row (>1 for packs). */
   packMultiplier?: number;
   /** ADR-004-MKT colisage: display label, e.g. 'Pack x6'. */
