@@ -378,6 +378,14 @@ export const PosView: React.FC = () => {
               <span>{isAr ? 'البحث/الباركود' : 'Recherche/Code'}</span>
             </span>
             <span className="flex items-center gap-1">
+              <kbd className="px-1.5 py-0.5 bg-[#162030] text-violet-400 font-mono rounded border border-[#2b3a4f]">F2</kbd>
+              <span>{isAr ? 'الكمية' : 'Quantité'}</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <kbd className="px-1.5 py-0.5 bg-[#162030] text-violet-400 font-mono rounded border border-[#2b3a4f]">F3</kbd>
+              <span>{isAr ? 'التخفيض' : 'Remise'}</span>
+            </span>
+            <span className="flex items-center gap-1">
               <kbd className="px-1.5 py-0.5 bg-[#162030] text-amber-400 font-mono rounded border border-[#2b3a4f]">F4</kbd>
               <span>{isAr ? 'تعليق الفاتورة' : 'Mettre attente'}</span>
             </span>

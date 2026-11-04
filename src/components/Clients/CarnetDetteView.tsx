@@ -170,6 +170,7 @@ export const CarnetDetteView: React.FC = () => {
             onClick={() => setShowAddClientModal(true)}
             className="p-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl shadow cursor-pointer shrink-0"
             title={isAr ? 'إضافة زبون جديد في الدفتر' : 'Nouveau Client'}
+            aria-label={isAr ? 'إضافة زبون جديد في الدفتر' : 'Nouveau Client'}
           >
             <UserPlus className="w-4 h-4" />
           </button>
