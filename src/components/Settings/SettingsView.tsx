@@ -29,6 +29,7 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
   const [scopeClients, setScopeClients] = useState(true);
   const [scopeWorkers, setScopeWorkers] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreFileName, setRestoreFileName] = useState('');
   const isOwner = session?.role === 'owner';
   const isManager = isOwner || session?.role === 'manager';
 
@@ -147,30 +148,35 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
           ))}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <input
-            type="file"
-            accept="application/json,.json"
-            disabled={!isManager || restoreBusy}
-            onChange={e => void (async () => {
-              const f = e.target.files?.[0];
-              if (!f || !isManager) return;
-              setRestoreBusy(true);
-              try {
-                const text = await f.text();
-                const keys = await restoreReferenceScope(text, {
-                  products: scopeProducts, suppliers: scopeSuppliers, clients: scopeClients, workers: scopeWorkers,
-                });
-                setMsg(isAr
-                  ? `تمت الاستعادة الانتقائية (${keys.length}): ${keys.join('، ')} — جارٍ إعادة التحميل…`
-                  : `Restauration sélective (${keys.length}) : ${keys.join(', ')} — rechargement…`);
-                window.setTimeout(() => window.location.reload(), 1500);
-              } catch (err) {
-                setMsg(isAr ? `مرفوضة: ${(err as Error).message}` : `Refusée : ${(err as Error).message}`);
-                setRestoreBusy(false);
-              }
-            })()}
-            className="text-xs text-slate-300 file:mr-2 file:px-3 file:py-1.5 file:rounded-lg file:text-xs file:font-bold file:bg-emerald-700 file:text-white hover:file:bg-emerald-600 file:border-0 file:cursor-pointer"
-          />
+          <label className={`px-3 py-1.5 rounded-lg text-xs font-bold ${!isManager || restoreBusy ? 'bg-slate-700 text-slate-400' : 'bg-emerald-700 hover:bg-emerald-600 text-white cursor-pointer'}`}>
+            {restoreFileName || (isAr ? 'اختيار ملف اللقطة…' : 'Choisir le snapshot…')}
+            <input
+              type="file"
+              accept="application/json,.json"
+              disabled={!isManager || restoreBusy}
+              className="hidden"
+              onChange={e => void (async () => {
+                const f = e.target.files?.[0];
+                if (!f || !isManager) return;
+                setRestoreFileName(f.name);
+                setRestoreBusy(true);
+                try {
+                  const text = await f.text();
+                  const keys = await restoreReferenceScope(text, {
+                    products: scopeProducts, suppliers: scopeSuppliers, clients: scopeClients, workers: scopeWorkers,
+                  });
+                  setMsg(isAr
+                    ? `تمت الاستعادة الانتقائية (${keys.length}): ${keys.join('، ')} — جارٍ إعادة التحميل…`
+                    : `Restauration sélective (${keys.length}) : ${keys.join(', ')} — rechargement…`);
+                  window.setTimeout(() => window.location.reload(), 1500);
+                } catch (err) {
+                  setMsg(isAr ? `مرفوضة: ${(err as Error).message}` : `Refusée : ${(err as Error).message}`);
+                  setRestoreBusy(false);
+                }
+              })()}
+            />
+          </label>
+          {restoreFileName && <span className="text-[11px] text-slate-400 font-mono" dir="ltr">{restoreFileName}</span>}
         </div>
       </div>
     </div>
