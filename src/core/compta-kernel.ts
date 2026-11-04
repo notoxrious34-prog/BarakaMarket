@@ -71,7 +71,10 @@ export interface JournalInput {
 /**
  * C3/C6/C7/C9-fix: one tested builder for the whole journal.
  * - CANCELLED sales are legally dead: excluded (they live in the void journal).
- * - Provisional DRAFT sales are real money in the drawer: included, flagged.
+ * - X1 (cross-audit): DRAFT/provisional rows are not fiscal yet — the Z lane,
+ *   the server aggregates and the close payload all exclude them, so the
+ *   journal does too (one rule, every book).
+ * - Non-COMPLETED rows that survive (legacy) ride flagged PROV, never silent.
  * - Card/bank flows hit 512xxx, never the cash account.
  * - Settlement timbre rides along as an explicit memo amount.
  */
@@ -80,6 +83,7 @@ export function buildJournalEntries(input: JournalInput): JournalEntry[] {
 
   for (const s of input.sales) {
     if (s.status === 'CANCELLED') continue;
+    if ((s as { is_provisional?: boolean }).is_provisional) continue; // X1: DRAFT is not fiscal yet
     const provisional = s.status !== 'COMPLETED';
     out.push({
       id: s.id,

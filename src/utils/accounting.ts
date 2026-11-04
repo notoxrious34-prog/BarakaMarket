@@ -53,7 +53,9 @@ export function calculateAccountingSummary(
   expenses: Expense[] = []
 ): AccountingSummary {
   // 1. Sales aggregates
-  const completedSales = sales.filter(s => s.status === 'COMPLETED');
+  // X1 (cross-audit): provisional DRAFT rows are not fiscal yet — same rule
+  // as the journal, the Z lane and the server aggregates.
+  const completedSales = sales.filter(s => s.status === 'COMPLETED' && !s.is_provisional);
   const totalSalesHT = completedSales.reduce((sum, s) => sum + s.total_ht, 0);
   const totalSalesTTC = completedSales.reduce((sum, s) => sum + s.total_ttc, 0);
 

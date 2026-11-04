@@ -2130,7 +2130,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const generateDailyZReport = (): DailyZReport => {
     const today = new Date().toISOString().split('T')[0];
-    const todaySales = sales.filter(s => s.created_at.startsWith(today) && s.status === 'COMPLETED');
+    // X1 (cross-audit): provisional DRAFT rows are not fiscal yet — the server
+    // aggregates, the close verifier and the journal all exclude them.
+    const todaySales = sales.filter(s => s.created_at.startsWith(today) && s.status === 'COMPLETED' && !s.is_provisional);
     const todaySettlements = settlements.filter(st => st.date.startsWith(today));
 
     let totalHT = 0;

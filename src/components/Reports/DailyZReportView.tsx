@@ -114,7 +114,7 @@ export const DailyZReportView: React.FC = () => {
   }), [zReport]);
 
   const todayInvoices = useMemo(() => sales
-    .filter(s => s.created_at.startsWith(zReport.date) && s.status === 'COMPLETED')
+    .filter(s => s.created_at.startsWith(zReport.date) && s.status === 'COMPLETED' && !s.is_provisional)
     .map(s => s.invoice_number)
     .sort(), [sales, zReport.date]);
   const firstInvoice = todayInvoices[0] ?? '—';

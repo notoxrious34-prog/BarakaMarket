@@ -71,6 +71,12 @@ describe('compta-kernel (C-lane)', () => {
     assert.ok(filterJournalByPeriod(j, 'month', now).length >= 5);
     assert.equal(filterJournalByPeriod(j, 'all', now).length, 5); // S2 voided out
   });
+  it('X1 (cross-audit): provisional DRAFT rows never reach the fiscal journal', () => {
+    const draft = { ...(base.sales[0] as object), id: 'draft-1', invoice_number: 'DRAFT-FACT-1', is_provisional: true, status: 'COMPLETED' };
+    const j = buildJournalEntries({ ...base, sales: [...base.sales, draft as never] });
+    assert.equal(j.length, 5); // no growth: the DRAFT row is excluded like the void
+    assert.ok(!j.some(e => e.id === 'draft-1'));
+  });
   it('CSV: header + rows, semicolon, semicolon-safe escaping', () => {
     const csv = journalToCsv(buildJournalEntries(base));
     assert.ok(csv.startsWith('﻿Date;Type;'), 'missing BOM/header');
