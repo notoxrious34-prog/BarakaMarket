@@ -42,7 +42,10 @@ export const CarnetDetteView: React.FC = () => {
   const [settlementAmount, setSettlementAmount] = useState<number>(0);
   const [settlementMethod, setSettlementMethod] = useState<PaymentMethod>('ESPECES');
   const [settlementNote, setSettlementNote] = useState('');
-  const [lastSettlementReceipt, setLastSettlementReceipt] = useState<any | null>(null);
+  // D4-fix: settlement failures surface in-modal (login / overpay / lane).
+  const [settleError, setSettleError] = useState('');
+  // D6/D7-fix: client create/edit guard failures surface in-modal.
+  const [clientFormMsg, setClientFormMsg] = useState('');
   const [showStatement, setShowStatement] = useState(false);
 
   // Form for new client
@@ -76,8 +79,9 @@ export const CarnetDetteView: React.FC = () => {
   });
 
   // Client's unpaid/credit sales history
+  // D3-fix: legally voided sales leave the carnet (status CANCELLED).
   const clientCreditSales = sales.filter(
-    s => s.client_id === liveSelected?.id && s.payment_method === 'CREDIT'
+    s => s.client_id === liveSelected?.id && s.payment_method === 'CREDIT' && s.status !== 'CANCELLED'
   );
 
   // Client's settlement history
@@ -89,21 +93,28 @@ export const CarnetDetteView: React.FC = () => {
   const handleOpenSettlement = (client: Client) => {
     setSelectedClient(client);
     setSettlementAmount(client.credit_balance);
+    setSettleError('');
     setShowSettlementModal(true);
   };
 
   const handleExecuteSettlement = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedClient || settlementAmount <= 0) return;
+    setSettleError('');
 
-    const record = await settleClientDebt(
-      liveSelected.id,
-      settlementAmount,
-      settlementMethod,
-      settlementNote || (isAr ? 'تسديد دفعة على الحساب' : 'Versement acompte sur dette')
-    );
+    // D8-fix: settle the client the modal was opened for (no liveSelected detour).
+    try {
+      await settleClientDebt(
+        selectedClient.id,
+        settlementAmount,
+        settlementMethod,
+        settlementNote || (isAr ? 'تسديد دفعة على الحساب' : 'Versement acompte sur dette')
+      );
+    } catch (err) {
+      setSettleError((err as Error).message);
+      return;
+    }
 
-    setLastSettlementReceipt(record);
     // Gate-02 TASK 2+4: drawer kick on cash encaissement + acoustic seal.
     if (settlementMethod === 'ESPECES') kickDrawerViaLoopback();
     cashChime();
@@ -113,14 +124,21 @@ export const CarnetDetteView: React.FC = () => {
   const handleCreateClient = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newClientName.trim()) return;
+    setClientFormMsg('');
 
-    const created = addClient({
-      name: newClientName,
-      phone: newClientPhone,
-      address: newClientAddress,
-      max_credit_limit: newClientLimit,
-      nif: newClientNif,
-    });
+    let created;
+    try {
+      created = addClient({
+        name: newClientName,
+        phone: newClientPhone,
+        address: newClientAddress,
+        max_credit_limit: newClientLimit,
+        nif: newClientNif,
+      });
+    } catch (err) {
+      setClientFormMsg((err as Error).message);
+      return;
+    }
 
     setSelectedClient(created);
     setShowAddClientModal(false);
@@ -473,6 +491,7 @@ export const CarnetDetteView: React.FC = () => {
               </div>
 
               <div className="pt-2 flex justify-end gap-2">
+                {settleError && <span className="text-[11px] text-rose-300 self-center me-auto">{settleError}</span>}
                 <button
                   type="button"
                   onClick={() => setShowSettlementModal(false)}
@@ -509,13 +528,20 @@ export const CarnetDetteView: React.FC = () => {
               onSubmit={e => {
                 e.preventDefault();
                 if (!editingClient.name.trim()) return;
-                updateClient(editingClient.id, {
-                  name: editingClient.name,
-                  phone: editingClient.phone,
-                  address: editingClient.address,
-                  max_credit_limit: editingClient.max_credit_limit,
-                  notes: editingClient.notes,
-                });
+                setClientFormMsg('');
+                try {
+                  updateClient(editingClient.id, {
+                    name: editingClient.name,
+                    phone: editingClient.phone,
+                    address: editingClient.address,
+                    max_credit_limit: editingClient.max_credit_limit,
+                    nif: editingClient.nif,
+                    notes: editingClient.notes,
+                  });
+                } catch (err) {
+                  setClientFormMsg((err as Error).message);
+                  return;
+                }
                 setSelectedClient({ ...editingClient });
                 setEditingClient(null);
               }}
@@ -561,7 +587,18 @@ export const CarnetDetteView: React.FC = () => {
                   className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none"
                 />
               </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-300 block mb-1">{isAr ? 'NIF (للشركات):' : 'NIF (Entreprises):'}</label>
+                <input
+                  type="text"
+                  value={editingClient.nif ?? ''}
+                  onChange={e => setEditingClient({ ...editingClient, nif: e.target.value })}
+                  placeholder="15 chiffres"
+                  className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none font-mono"
+                />
+              </div>
               <div className="pt-2 flex justify-end gap-2">
+                {clientFormMsg && <span className="text-[11px] text-rose-300 self-center me-auto">{clientFormMsg}</span>}
                 <button type="button" onClick={() => setEditingClient(null)} className="px-4 py-2 bg-[#162030] text-slate-300 rounded-lg text-xs">
                   {isAr ? 'إلغاء' : 'Annuler'}
                 </button>
@@ -639,6 +676,7 @@ export const CarnetDetteView: React.FC = () => {
                   </label>
                   <input
                     type="number"
+                    min="0"
                     value={newClientLimit}
                     onChange={e => setNewClientLimit(parseFloat(e.target.value) || 0)}
                     className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-2 text-xs text-white outline-none"
@@ -659,6 +697,7 @@ export const CarnetDetteView: React.FC = () => {
               </div>
 
               <div className="pt-2 flex justify-end gap-2">
+                {clientFormMsg && <span className="text-[11px] text-rose-300 self-center me-auto">{clientFormMsg}</span>}
                 <button
                   type="button"
                   onClick={() => setShowAddClientModal(false)}

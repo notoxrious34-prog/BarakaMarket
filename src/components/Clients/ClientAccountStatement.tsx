@@ -38,6 +38,9 @@ export const ClientAccountStatement: React.FC<Props> = ({ client, creditSales, s
   const totalCreditCt = rows.reduce((a, r) => a + r.creditCt, 0);
   const netCt = totalDebitCt - totalCreditCt;
   const timbreMemoCt = settlements.reduce((a, s) => a + dzdToCentimes(s.timbre_fiscal ?? 0), 0);
+  // D12-fix: the ledger is event-sourced, so seeded/historical debt is invisible
+  // to it. Reconcile honestly: opening = current header balance − ledger net.
+  const openingCt = Math.round(client.credit_balance * 100) - netCt;
   const now = new Date().toLocaleString('fr-FR');
 
   const ledger = (wide: boolean) => (
@@ -56,7 +59,7 @@ export const ClientAccountStatement: React.FC<Props> = ({ client, creditSales, s
           <td className="py-1">—</td>
           <td>{isAr ? 'الرصيد الافتتاحي' : 'Solde initial'}</td>
           <td className="text-end">—</td><td className="text-end">—</td>
-          <td className="text-end">{formatDZD(0, false)}</td>
+          <td className="text-end">{formatDZD(openingCt / 100, false)}</td>
         </tr>
         {rows.map((r, i) => (
           <tr key={i} className="border-t border-slate-800/60 text-slate-200">
@@ -106,7 +109,7 @@ export const ClientAccountStatement: React.FC<Props> = ({ client, creditSales, s
             )}
             <div className="flex justify-between text-sm pt-1 border-t border-slate-700">
               <span className="font-bold text-white">{isAr ? 'الرصيد المدين الحالي' : 'SOLDE DÉBITEUR ACTUEL'}</span>
-              <b className="text-amber-300">{formatDZD(netCt / 100, false)}</b>
+              <b className="text-amber-300">{formatDZD((openingCt + netCt) / 100, false)}</b>
             </div>
           </div>
           <div className={`grid grid-cols-2 gap-4 mt-6 text-[10px] text-slate-400 ${format === '80mm' ? 'pb-2' : 'pb-2'}`}>

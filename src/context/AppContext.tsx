@@ -45,6 +45,7 @@ import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCoun
 import { parseQtyPrefix } from '../core/barcode-qty';
 import { reverseReceiptLines, editReceiptLines, applyReceiptLines } from '../core/purchase-lane';
 import { nextBRNumber, validateReceptionPayment, validateSupplierPayment, isValidNIF } from '../core/supplier-finance';
+import { validateSettlementAmount, reverseCreditOnVoid, validateCreditLimit } from '../core/client-debt';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative, upsertProductsNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
@@ -1334,6 +1335,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const out = await commitVoid(saleId, why, s.username);
     if (!out) throw new Error('[void] fiscal lane unreachable — retry when MODE FISCAL ACTIF');
     setSales(prev => prev.map(x => (x.id === saleId ? { ...x, status: 'CANCELLED' as const } : x)));
+    // D3-fix: voiding a CREDIT sale gives the debt back — the carnet must not
+    // keep charging a legally cancelled sale (same rounding as the increment).
+    if (target.payment_method === 'CREDIT' && target.client_id) {
+      const voidedClientId = target.client_id;
+      const voidedTotal = target.total_ttc;
+      setClients(prev =>
+        prev.map(c => (c.id === voidedClientId
+          ? { ...c, credit_balance: reverseCreditOnVoid(c.credit_balance, voidedTotal) }
+          : c)),
+      );
+    }
     auditFiscal('sale.void', `${target.invoice_number} (${why}) by ${s.username}`);
   };
 
@@ -1345,9 +1357,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ): Promise<DebtSettlement> => {
     if (!sessionRef.current) throw new Error('[settle] login required');
     touchSession();
+    // D1-fix: no ghost settlements, no overpayment, no zero/negative amounts.
+    // The UI caps max={balance}, but the context is the last line of defence.
     const client = clients.find(c => c.id === clientId);
-    const clientName = client ? client.name : `Client #${clientId}`;
-    const prevBalance = client ? client.credit_balance : amount;
+    if (!client) throw new Error('[settle] client not found');
+    validateSettlementAmount(amount, client.credit_balance);
+    const clientName = client.name;
+    const prevBalance = client.credit_balance;
 
     // INVARIANT 3 (Art. 136): ESPECES settlements >= 50 DZD carry timbre.
     // Principal reduces the debt; timbre is collected ON TOP for the Treasury.
@@ -1833,6 +1849,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addClient = (clientData: Omit<Client, 'id' | 'credit_balance'>): Client => {
+    // D6/D7-fix: NIF optional but 15 digits when present; ceiling >= 0 (0 = unlimited).
+    if (!isValidNIF(clientData.nif ?? '')) throw new Error('[client] NIF must be exactly 15 digits');
+    validateCreditLimit(clientData.max_credit_limit);
     const newId = clients.length > 0 ? Math.max(...clients.map(c => c.id)) + 1 : 1;
     const newClient: Client = {
       ...clientData,
@@ -1844,6 +1863,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateClient = (id: number, clientData: Partial<Client>) => {
+    if (clientData.nif !== undefined && !isValidNIF(clientData.nif ?? '')) {
+      throw new Error('[client] NIF must be exactly 15 digits');
+    }
+    if (clientData.max_credit_limit !== undefined) validateCreditLimit(clientData.max_credit_limit);
     setClients(prev => prev.map(c => (c.id === id ? { ...c, ...clientData } : c)));
   };
 
