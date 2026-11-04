@@ -86,6 +86,15 @@
       (`sig 424`, no `name`, CDN-verified) → iron `Vérifier` sees **1.4.3** + `Installer` →
       official install → **`update.install|system|1.4.2 → 1.4.3 (upgraded, silent/boot-detected)`**
       as newest audit row + `lastSeen=1.4.3` + license still ACTIVATED + footer **`V1.4.3`**.
+- [x] **v1.4.4 IRON PROOF (2026-11-04)** — P1/P2/P3 cumulative bundle (`5.15 MiB`, `SIG-OK [ED]`,
+      CDN `1.4.4:424 has_name=false` first-try) · iron `Vérifier` sees **1.4.4** + `Installer`
+      (no error) but the in-app NSIS upgrade did NOT replace the running binary (fresh PID,
+      exe timestamp unchanged — disclosed, under study; the running exe locks its own dir).
+      Manual silent install of the same signed bundle worked:
+      footer **`V1.4.4`** + POS alive + license **`LICENCE PERPÉTUELLE`** persists +
+      audit **`update.install|1.4.3 → 1.4.4 (upgraded, silent/boot-detected)`** + `update.check|1.4.4`.
+      P3 dev-lane chain proven separately: exempt SNAP 201 → RESET 200 (14 tables cleared,
+      `audit=[factory_reset]` genesis) → RESTORE 200 + server healthy.
 
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
