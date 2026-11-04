@@ -8,6 +8,10 @@ import { generateA4LabelsHtml, ShelfLabelItem } from '../../core/shelf-labels.js
 import { generateEan13Svg } from '../../core/barcode-svg.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../../core/reference-search.js';
 import { initialCategories } from '../../data/seedData';
+import { upsertProductsNative } from '../../core/product-authority';
+import { getLoopbackToken } from '../../core/fiscal-authority.js';
+
+const LOOPBACK = 'http://127.0.0.1:3100';
 
 const card = 'bg-[#101724] border border-[#1e293b] rounded-2xl p-4 w-full max-w-2xl max-h-[85vh] overflow-y-auto';
 const input = 'w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white';
@@ -38,7 +42,7 @@ const toProduct = (r: ParsedProductRow, isAr: boolean): Omit<Product, 'id'> => (
 
 /** ADR-018: bulk CSV importer — 100% in-client (preflightCsv + AppContext UPSERT). */
 export const CsvImportModal: React.FC<{ isAr: boolean; onClose: () => void }> = ({ isAr, onClose }) => {
-  const { products, addProduct, updateProduct, session } = useApp();
+  const { products, session, upsertProductsBatch } = useApp();
   const [csv, setCsv] = useState('barcode;name_fr;name_ar;buy_price;sell_price;tva;stock;unit;category\n6130000000015;HUILE ELIO 5L;زيت المائدة;580;650;0;50;PIECE;epicerie');
   const [rows, setRows] = useState<ParsedProductRow[] | null>(null);
   const [collisions, setCollisions] = useState(0);
@@ -69,24 +73,17 @@ export const CsvImportModal: React.FC<{ isAr: boolean; onClose: () => void }> = 
   };
   const doExecute = () => {
     if (!rows) return;
-    let inserted = 0, updated = 0;
-    for (const r of rows) {
-      const existing = products.find(p => p.barcode === r.barcode);
-      if (existing) {
-        updateProduct(existing.id, toProduct(r, isAr));
-        updated += 1;
-      } else {
-        addProduct(toProduct(r, isAr));
-        inserted += 1;
-      }
-    }
+    // S1-fix: atomic batch UPSERT (sequential ids, in-batch dedupe) instead
+    // of the old per-row loop that duplicated ids. Then mirror mid-session.
+    const { inserted, updated, skippedDup, affected } = upsertProductsBatch(rows.map(r => toProduct(r, isAr)));
     const n = inserted + updated;
+    if (affected.length > 0) void upsertProductsNative(affected);
     if (session) {
-      void auditSessionEvent(session.username, 'stock.import', `${n} rows (${inserted} new, ${updated} updated)`);
+      void auditSessionEvent(session.username, 'stock.import', `${n} rows (${inserted} new, ${updated} updated${skippedDup ? `, ${skippedDup} in-file dups skipped` : ''})`);
     }
     setMsg(isAr
-      ? `${n} منتج مستورد بنجاح (${inserted} جديد، ${updated} محدّث)`
-      : `${n} produits importés avec succès (${inserted} nouveaux, ${updated} màj)`);
+      ? `${n} منتج مستورد بنجاح (${inserted} جديد، ${updated} محدّث${skippedDup ? `، ${skippedDup} مكرر متجاوَز` : ''})`
+      : `${n} produits importés avec succès (${inserted} nouveaux, ${updated} màj${skippedDup ? `, ${skippedDup} doublons ignorés` : ''})`);
     setRows(null);
   };
 
@@ -224,17 +221,48 @@ export const LossModal: React.FC<{
   const [notes, setNotes] = useState('');
   const [msg, setMsg] = useState('');
 
-  const submit = () => {
+  const submit = async () => {
     const q = Number(qty);
     if (!productId || !(q > 0)) { setMsg(isAr ? 'كمية غير صالحة' : 'Quantité invalide'); return; }
+    const prod = products.find(p => p.id === productId);
+    if (!prod) { setMsg(isAr ? 'منتج غير موجود' : 'Produit introuvable'); return; }
+    if (q > prod.stock_qty) { setMsg(isAr ? `الكمية تتجاوز المخزون (${prod.stock_qty})` : `Quantité > stock (${prod.stock_qty})`); return; }
+    // S2-fix (institutional stock audit): the fiscal loss lane is authoritative
+    // wherever it is reachable (installed app / loopback up). The UI decrement
+    // + local journal stay as the offline/web fallback — never double-counted
+    // (server and UI own separate stores).
+    const token = await getLoopbackToken().catch(() => null);
+    if (token) {
+      try {
+        const r = await fetch(`${LOOPBACK}/api/losses`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-baraka-loopback': token },
+          body: JSON.stringify({
+            product_id: productId,
+            qty_milli: Math.round(q * 1000),
+            reason,
+            unit_cost_ct: Math.round((prod.buy_price ?? 0) * 100),
+            notes: notes || null,
+          }),
+        });
+        if (!r.ok) {
+          const detail = await r.text().catch(() => '');
+          setMsg(`${isAr ? 'رفض الخسارة الجبائية: ' : 'Perte fiscale refusée: '}${detail.slice(0, 160)}`);
+          return;
+        }
+      } catch {
+        setMsg(isAr ? 'تعذر الوصول للمسار الجبائي — لم يُسجل' : 'Lane fiscale injoignable — non enregistré');
+        return;
+      }
+    }
     onLossRecorded(productId, q);
     try {
       const raw = localStorage.getItem(LOSS_JOURNAL_KEY);
       const journal = raw ? JSON.parse(raw) as unknown[] : [];
-      journal.push({ product_id: productId, qty_units: q, reason, notes: notes || null, at: new Date().toISOString() });
+      journal.push({ product_id: productId, qty_units: q, reason, notes: notes || null, at: new Date().toISOString(), fiscal: token ? true : false });
       localStorage.setItem(LOSS_JOURNAL_KEY, JSON.stringify(journal.slice(-500)));
     } catch { /* private mode — state already updated */ }
-    setMsg(isAr ? 'تم تسجيل الخسارة محلياً' : 'Perte enregistrée (local)');
+    setMsg(isAr ? (token ? 'تم تسجيل الخسارة جبائياً ومحلياً' : 'تم تسجيل الخسارة محلياً') : (token ? 'Perte enregistrée (fiscale + locale)' : 'Perte enregistrée (local)'));
   };
 
   return (

@@ -91,7 +91,7 @@ export type AuditAction =
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
   | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'
-  | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
+  | 'supplier.pay' | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
 
 export interface AuditEvent {
   actor: string;

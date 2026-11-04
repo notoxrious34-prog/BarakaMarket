@@ -24,6 +24,8 @@ import { initialCategories } from '../../data/seedData';
 import rawCatalog from '../../data/algerian-catalog.json';
 import { searchCatalog, REF_TO_PRODUCT_CATEGORY, ProductTemplate } from '../../core/reference-search.js';
 import { CsvImportModal, ShelfLabelsDialog, LossModal } from './ProductToolModals';
+import { upsertProductsNative, deleteProductNative } from '../../core/product-authority';
+import { ean13CheckDigit } from '../../core/barcode-svg';
 
 // Compact on-disk catalog → shared ProductTemplate kernel rows (cached, browser-safe).
 interface CompactTemplate { b: string; bar?: string; m?: string; c: string; fr: string; ar?: string; a?: string; w?: number; u?: string }
@@ -69,6 +71,9 @@ export const ProductsStockView: React.FC = () => {
   const [scaleItemCode, setScaleItemCode] = useState('00040');
   const [hasExpiry, setHasExpiry] = useState(false);
   const [expiryDate, setExpiryDate] = useState('');
+  // S4/S6/S7/S15 (institutional stock audit): local guard message (the form
+  // also carries native `required` — this covers logic duplicates/ranges).
+  const [formMsg, setFormMsg] = useState('');
 
   // TASK-BRK-016-MKT: reference catalog autofill (type "elio"/"ايليو" → pick).
   // TASK-BRK-019-MKT: loopback first, local bundled catalog fallback (offline-safe).
@@ -170,7 +175,11 @@ export const ProductsStockView: React.FC = () => {
 
   const handleOpenAddModal = () => {
     setEditingProduct(null);
-    setBarcode(`613${Math.floor(1000000000 + Math.random() * 9000000000)}`);
+    // S5 (institutional stock audit): generated barcode carries a valid GS1
+    // check digit (the old Math.random tail was EAN-invalid and got skipped
+    // by the label lane).
+    const base12 = `613${String(Math.floor(100000000 + Math.random() * 900000000))}`;
+    setBarcode(base12 + String(ean13CheckDigit(base12)));
     setNameFr('');
     setNameAr('');
     setCategoryId('epicerie');
@@ -184,6 +193,7 @@ export const ProductsStockView: React.FC = () => {
     setScaleItemCode('00045');
     setHasExpiry(false);
     setExpiryDate('');
+    setFormMsg('');
     setTplHits([]); setTplOpen(false);
     setShowProductModal(true);
   };
@@ -204,12 +214,26 @@ export const ProductsStockView: React.FC = () => {
     setScaleItemCode(p.scale_item_code || '00040');
     setHasExpiry(p.has_expiry_date);
     setExpiryDate(p.expiry_date || '');
+    setFormMsg('');
     setShowProductModal(true);
   };
 
   const handleSaveProduct = (e: React.FormEvent) => {
     e.preventDefault();
     if (!nameFr.trim() || !barcode.trim()) return;
+    const fail = (mAr: string, mFr: string) => { setFormMsg(isAr ? mAr : mFr); };
+    // S4: barcode is UNIQUE natively — a UI duplicate breaks the whole native
+    // sync (upsert errors mid-loop) and makes POS lookup ambiguous.
+    const dup = products.find(p => p.barcode === barcode.trim() && (!editingProduct || p.id !== editingProduct.id));
+    if (dup) { fail(`الباركود موجود مسبقاً (${dup.name_fr})`, `Code-barres déjà utilisé (${dup.name_fr})`); return; }
+    // S7: money and stock never go negative (native CHECKs + fiscal math).
+    if (!(buyPrice >= 0) || !(sellPrice >= 0)) { fail('الأسعار لا تكون سالبة', 'Les prix ne peuvent pas être négatifs'); return; }
+    if (!(stockQty >= 0) || !(minAlert >= 0)) { fail('المخزون والتنبيه لا يكونان سالبين', 'Stock et alerte ≥ 0'); return; }
+    // S6: a tracked expiry needs a real date.
+    if (hasExpiry && !expiryDate) { fail('حدد تاريخ انتهاء الصلاحية أو ألغِ التتبع', 'Indiquez la date ou décochez le suivi'); return; }
+    // S15: scale PLU codes are numeric (the scale lane matches digits).
+    if (isScaleProduct && !/^\d{1,5}$/.test(scaleItemCode.trim())) { fail('رمز الميزان أرقام فقط (حتى 5)', 'Code balance: chiffres uniquement (max 5)'); return; }
+    setFormMsg('');
 
     if (editingProduct) {
       updateProduct(editingProduct.id, {
@@ -228,8 +252,10 @@ export const ProductsStockView: React.FC = () => {
         has_expiry_date: hasExpiry,
         expiry_date: hasExpiry ? expiryDate : undefined,
       });
+      // S8: mirror the mutation mid-session (the session sync ran at mount).
+      void upsertProductsNative([{ ...editingProduct, barcode, name_fr: nameFr, name_ar: nameAr || nameFr, category_id: categoryId, buy_price: buyPrice, sell_price: sellPrice, tva_rate: tvaRate, stock_qty: stockQty, min_stock_alert: minAlert, unit, is_scale_product: isScaleProduct, scale_item_code: isScaleProduct ? scaleItemCode : undefined, has_expiry_date: hasExpiry, expiry_date: hasExpiry ? expiryDate : undefined }]);
     } else {
-      addProduct({
+      const created = addProduct({
         barcode,
         name_fr: nameFr,
         name_ar: nameAr || nameFr,
@@ -245,9 +271,29 @@ export const ProductsStockView: React.FC = () => {
         has_expiry_date: hasExpiry,
         expiry_date: hasExpiry ? expiryDate : undefined,
       });
+      // S8: mirror the new row mid-session so the native sale lane sees it.
+      void upsertProductsNative([created]);
     }
 
     setShowProductModal(false);
+  };
+
+  // S3 (institutional stock audit): deletion is confirmed AND propagates to
+  // the native mirror. A native RESTRICT refusal (loss/sale history) aborts
+  // the UI delete too — no ghost fiscal rows.
+  const handleDeleteProduct = async (p: Product) => {
+    const ok = window.confirm(isAr
+      ? `حذف «${p.name_fr}» نهائياً من المخزون؟`
+      : `Supprimer définitivement «${p.name_fr}» du stock ?`);
+    if (!ok) return;
+    const nativeGone = await deleteProductNative(p.id);
+    if (!nativeGone) {
+      window.alert(isAr
+        ? 'تعذر الحذف: للمنتج سجل مرتبط (خسارة/بيع) — محمي جبائياً'
+        : 'Suppression refusée : historique lié (perte/vente) — protégé');
+      return;
+    }
+    deleteProduct(p.id);
   };
 
   return (
@@ -486,7 +532,8 @@ export const ProductsStockView: React.FC = () => {
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
                         <button
-                          onClick={() => deleteProduct(p.id)}
+                          onClick={() => void handleDeleteProduct(p)}
+                          title={isAr ? 'حذف المنتج (بتأكيد)' : 'Supprimer (avec confirmation)'}
                           className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 rounded-lg cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -753,6 +800,7 @@ export const ProductsStockView: React.FC = () => {
               </div>
 
               {/* Footer Buttons */}
+              {formMsg && <div className="text-[11px] text-rose-300 font-semibold">{formMsg}</div>}
               <div className="pt-2 flex justify-end gap-2">
                 <button
                   type="button"

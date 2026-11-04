@@ -125,6 +125,22 @@ pub fn product_list(conn: &Connection) -> Result<Value, String> {
     Ok(Value::Array(out))
 }
 
+/// T4c-fix (institutional stock audit S3/S8): delete the native mirror row.
+/// RESTRICT guards (loss ledger, sale FKs) surface as errors — the caller
+/// must then abort the UI delete too (no ghost fiscal rows, no orphans).
+pub fn product_delete(conn: &Connection, id: i64) -> Result<Value, String> {
+    if id <= 0 {
+        return Err("[product] id must be > 0".to_string());
+    }
+    let n = conn
+        .execute("DELETE FROM products WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("[product] not found: {id}"));
+    }
+    Ok(json!({ "deleted": id }))
+}
+
 /// POS lookup: barcode exact-first, then name prefix (limit 50).
 pub fn product_search(conn: &Connection, q: &str) -> Result<Value, String> {
     let like = format!("%{q}%");
@@ -190,6 +206,17 @@ mod tests {
         let mut neg = prod(9, "y");
         neg["buy_price_ct"] = json!(-1);
         assert!(product_upsert(&db, &neg).is_err());
+    }
+
+    #[test]
+    fn delete_removes_row_and_reports_missing() {
+        let db = memdb();
+        product_upsert(&db, &prod(11, "613000000031")).unwrap();
+        let out = product_delete(&db, 11).unwrap();
+        assert_eq!(out["deleted"], json!(11));
+        assert!(product_list(&db).unwrap().as_array().unwrap().is_empty());
+        assert!(product_delete(&db, 11).is_err());
+        assert!(product_delete(&db, 0).is_err());
     }
 
     #[test]

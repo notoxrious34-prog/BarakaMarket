@@ -43,10 +43,12 @@ import { restoreLocalSnapshotKeys } from '../core/local-snapshot.js';
 import { can, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, OUTBOX_KEY, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
 import { parseQtyPrefix } from '../core/barcode-qty';
-import { reverseReceiptLines, editReceiptLines } from '../core/purchase-lane';
+import { reverseReceiptLines, editReceiptLines, applyReceiptLines } from '../core/purchase-lane';
+import { nextBRNumber, validateReceptionPayment, validateSupplierPayment, isValidNIF } from '../core/supplier-finance';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
-import { syncCatalogToNative } from '../core/product-authority';
+import { syncCatalogToNative, upsertProductsNative } from '../core/product-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
+import { ean13CheckDigit } from '../core/barcode-svg';
 
 /** localStorage-backed StorageLike for the sale outbox (never throws). */
 const lsStore: StorageLike = {
@@ -158,7 +160,7 @@ interface AppContextType {
     paymentMethod: 'ESPECES' | 'VIREMENT' | 'CHEQUE',
     reference?: string,
     note?: string
-  ) => SupplierPayment;
+  ) => Promise<SupplierPayment>;
   recordExpense: (input: {
     date: string;
     category: ExpenseCategory;
@@ -188,6 +190,7 @@ interface AppContextType {
 
   // Product & Store management
   addProduct: (product: Omit<Product, 'id'>) => Product;
+  upsertProductsBatch: (rows: Omit<Product, 'id'>[]) => { inserted: number; updated: number; skippedDup: number; affected: Product[] };
   updateProduct: (id: number, product: Partial<Product>) => void;
   deleteProduct: (id: number) => void;
   addClient: (client: Omit<Client, 'id' | 'credit_balance'>) => Client;
@@ -1418,6 +1421,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Supplier & Goods Inbound Reception Actions
   const addSupplier = (supplierData: Omit<Supplier, 'id' | 'balance_due'>): Supplier => {
+    // M7-fix: NIF is 15 digits when provided (the N1 audit note, now enforced).
+    if (!isValidNIF(supplierData.nif ?? '')) throw new Error('[supplier] NIF must be exactly 15 digits');
     const newId = suppliers.length > 0 ? Math.max(...suppliers.map(s => s.id)) + 1 : 1;
     const newSupplier: Supplier = {
       ...supplierData,
@@ -1429,6 +1434,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateSupplier = (id: number, supplierData: Partial<Supplier>) => {
+    if (supplierData.nif !== undefined && !isValidNIF(supplierData.nif ?? '')) {
+      throw new Error('[supplier] NIF must be exactly 15 digits');
+    }
     setSuppliers(prev => prev.map(s => (s.id === id ? { ...s, ...supplierData } : s)));
   };
 
@@ -1459,11 +1467,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     totalHT = Math.round(totalHT * 100) / 100;
     totalTTC = Math.round(totalTTC * 100) / 100;
 
+    // M4-fix: overpayment is refused (the remainder flows via supplier payment).
+    validateReceptionPayment(totalTTC, amountPaid);
     const amountDue = Math.max(0, Math.round((totalTTC - amountPaid) * 100) / 100);
 
+    // M1-fix: persistent per-year counter seeded from existing BRs — never
+    // purchases.length-based (deletes must not recycle fiscal numbers).
     const year = new Date().getFullYear();
-    const count = purchases.length + 1;
-    const invoiceNum = `BR-${year}-${String(count).padStart(4, '0')}`;
+    const invoiceNum = nextBRNumber(lsStore, year, purchases.map(p => p.invoice_number));
 
     const newInvoice: PurchaseInvoice = {
       id: `PURCHASE-${Date.now()}`,
@@ -1481,52 +1492,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       note,
     };
 
-    // 1. DIRECT STOCK & PMP RECALCULATION UPDATE IN PRODUCTS
-    setProducts(prevProducts => {
-      const updated = [...prevProducts];
-
-      for (const item of items) {
-        const prodIndex = updated.findIndex(p => p.id === item.product_id);
-        if (prodIndex >= 0) {
-          const currentProd = updated[prodIndex];
-          const newQty = Math.round((currentProd.stock_qty + item.quantity) * 100) / 100;
-
-          // Compute new PMP
-          const newPMP = calculateNewPMP(
-            currentProd.stock_qty,
-            currentProd.buy_price,
-            item.quantity,
-            item.unit_buy_price_ht
-          );
-
-          updated[prodIndex] = {
-            ...currentProd,
-            stock_qty: newQty,
-            buy_price: newPMP,
-            sell_price: item.unit_sell_price_ttc || currentProd.sell_price,
-          };
-        } else {
-          // New product received from supplier
-          const newId = updated.length > 0 ? Math.max(...updated.map(p => p.id)) + 1 : 1;
-          updated.push({
-            id: newId,
-            barcode: item.barcode || `613${Math.floor(1000000000 + Math.random() * 9000000000)}`,
-            name_fr: item.name_fr,
-            name_ar: item.name_ar || item.name_fr,
-            category_id: 'epicerie',
-            buy_price: item.unit_buy_price_ht,
-            sell_price: item.unit_sell_price_ttc,
-            tva_rate: item.tva_rate,
-            stock_qty: item.quantity,
-            min_stock_alert: 10,
-            unit: item.unit,
-            has_expiry_date: false,
-          });
-        }
+    // 1. DIRECT STOCK & PMP RECALCULATION UPDATE IN PRODUCTS.
+    // M5/M6-fix: new rows are precomputed (sequential ids, GS1 barcode) so the
+    // native mirror can be synced mid-session with the exact same rows.
+    const knownIds = new Set(products.map(p => p.id));
+    let nextNewId = products.length > 0 ? Math.max(...products.map(p => p.id)) + 1 : 1;
+    const created: Product[] = [];
+    for (const item of items) {
+      if (!knownIds.has(item.product_id)) {
+        const base12 = `613${String(Math.floor(100000000 + Math.random() * 900000000))}`;
+        created.push({
+          id: nextNewId,
+          barcode: item.barcode || (base12 + String(ean13CheckDigit(base12))),
+          name_fr: item.name_fr,
+          name_ar: item.name_ar || item.name_fr,
+          category_id: 'epicerie',
+          buy_price: item.unit_buy_price_ht,
+          sell_price: item.unit_sell_price_ttc,
+          tva_rate: item.tva_rate,
+          stock_qty: item.quantity,
+          min_stock_alert: 10,
+          unit: item.unit,
+          has_expiry_date: false,
+        });
+        knownIds.add(item.product_id);
+        // Re-point the line at the real row id (unknown ids come from drafts).
+        // `items` objects are shared with the invoice lines above (same refs),
+        // so the stored voucher stays consistent with the created rows.
+        item.product_id = nextNewId;
+        nextNewId += 1;
       }
-
-      return updated;
+    }
+    const afterApply = applyReceiptLines([...products, ...created], items).map(p => {
+      const it = items.find(i => i.product_id === p.id);
+      // Reception carries the selling price forward (same as before).
+      return it && it.unit_sell_price_ttc ? { ...p, sell_price: it.unit_sell_price_ttc } : p;
     });
+    setProducts(afterApply);
+    // M5-fix: mirror the reception mid-session (native sale lane must see it).
+    void upsertProductsNative([
+      ...created,
+      ...afterApply.filter(p => items.some(it => it.product_id === p.id) && !created.some(c => c.id === p.id)),
+    ]);
 
     // 2. UPDATE SUPPLIER DEBT IF CREDIT OR PARTIAL PAYMENT
     if (amountDue > 0) {
@@ -1565,6 +1572,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const next = rev.products!.find(x => x.id === p.id);
       return next ? { ...p, stock_qty: next.stock_qty, buy_price: next.buy_price } : p;
     }));
+    // M5-fix: mirror the reversal mid-session (no stale native stock).
+    void upsertProductsNative(rev.products!.filter(p => receipt.items.some(it => it.product_id === p.id)));
     setSuppliers(prev => prev.map(x => x.id === receipt.supplier_id
       ? { ...x, balance_due: Math.round(Math.max(0, x.balance_due - receipt.amount_due) * 100) / 100 }
       : x));
@@ -1592,11 +1601,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     totalHT = Math.round(totalHT * 100) / 100;
     totalTTC = Math.round(totalTTC * 100) / 100;
+    // M4-fix: the edited receipt cannot be overpaid either.
+    validateReceptionPayment(totalTTC, patch.amountPaid);
     const amountDue = Math.max(0, Math.round((totalTTC - patch.amountPaid) * 100) / 100);
+    const changedIds = new Set([...receipt.items.map(i => i.product_id), ...patch.items.map(i => i.product_id)]);
     setProducts(prev => prev.map(p => {
       const next = out.products!.find(x => x.id === p.id);
       return next ? { ...p, stock_qty: next.stock_qty, buy_price: next.buy_price } : p;
     }));
+    // M5-fix: mirror the edited rows mid-session.
+    void upsertProductsNative(out.products!.filter(p => changedIds.has(p.id)));
     // Debt delta: remove the old unpaid remainder, add the new one.
     const debtDelta = Math.round((amountDue - receipt.amount_due) * 100) / 100;
     setSuppliers(prev => prev.map(x => x.id === receipt.supplier_id
@@ -1712,21 +1726,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return res.warnings.length > 0 ? [...res.keys, ...res.warnings.map(w => `warning: ${w}`)] : res.keys;
   };
 
-  const settleSupplierDebt = (
+  /**
+   * M2/M3/M4-fix (institutional audit): settling a supplier is a guarded,
+   * audited money movement. Login + expense.record required; overpayment
+   * refused; ESPECES posts a till EXPENSE movement (best-effort, same policy
+   * as recordExpense — recorded as tillPosted/hors-caisse, never silent).
+   */
+  const settleSupplierDebt = async (
     supplierId: number,
     amount: number,
     paymentMethod: 'ESPECES' | 'VIREMENT' | 'CHEQUE',
     reference?: string,
     note?: string
-  ): SupplierPayment => {
-    const supplier = suppliers.find(s => s.id === supplierId);
-    const supplierName = supplier ? supplier.name : `Fournisseur #${supplierId}`;
+  ): Promise<SupplierPayment> => {
+    const s = requirePerm('expense.record');
+    const supplier = suppliers.find(x => x.id === supplierId);
+    if (!supplier) throw new Error('[supplier-pay] supplier not found');
+    // M4-fix: never pay more than the balance due.
+    validateSupplierPayment(supplier.balance_due, amount);
+    const rounded = Math.round(amount * 100) / 100;
+    // M2-fix: cash leaves the drawer through the till lane (or honestly not).
+    const tillPosted = paymentMethod === 'ESPECES'
+      ? await postTillExpense(dzdToCentimes(rounded), `supplier-pay ${supplier.name}`)
+      : false;
+    const supplierName = supplier.name;
 
     const payment: SupplierPayment = {
       id: `SUP-PAY-${Date.now()}`,
       supplier_id: supplierId,
       supplier_name: supplierName,
-      amount: Math.round(amount * 100) / 100,
+      amount: rounded,
       payment_method: paymentMethod,
       reference,
       date: new Date().toISOString(),
@@ -1734,16 +1763,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setSuppliers(prev =>
-      prev.map(s => {
-        if (s.id === supplierId) {
-          const newBalance = Math.max(0, Math.round((s.balance_due - amount) * 100) / 100);
-          return { ...s, balance_due: newBalance };
+      prev.map(x => {
+        if (x.id === supplierId) {
+          const newBalance = Math.max(0, Math.round((x.balance_due - rounded) * 100) / 100);
+          return { ...x, balance_due: newBalance };
         }
-        return s;
+        return x;
       })
     );
 
     setSupplierPayments(prev => [payment, ...prev]);
+    await auditSessionEvent(s.username, 'supplier.pay',
+      `${supplierName} ${rounded} DZD ${paymentMethod} till:${tillPosted ? 'posted' : paymentMethod === 'ESPECES' ? 'hors-caisse' : 'n/a'}`);
     return payment;
   };
 
@@ -1752,6 +1783,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const newProd: Product = { ...productData, id: newId };
     setProducts(prev => [newProd, ...prev]);
     return newProd;
+  };
+
+  /**
+   * S1-fix (institutional stock audit): atomic batch UPSERT with sequential
+   * ids in ONE functional update. The old per-row addProduct loop computed
+   * every id from the same stale closure (duplicate ids, React key
+   * collisions, wrong-row edits). In-batch barcode duplicates: last wins,
+   * counted as skippedDup.
+   */
+  const upsertProductsBatch = (rows: Omit<Product, 'id'>[]): { inserted: number; updated: number; skippedDup: number; affected: Product[] } => {
+    const seen = new Map<string, Omit<Product, 'id'>>();
+    let skippedDup = 0;
+    for (const r of rows) {
+      if (seen.has(r.barcode)) skippedDup += 1;
+      seen.set(r.barcode, r);
+    }
+    const uniq = [...seen.values()];
+    const byBarcode = new Map(products.map(p => [p.barcode, p.id]));
+    let nextId = products.length > 0 ? Math.max(...products.map(p => p.id)) + 1 : 1;
+    const fresh: Product[] = [];
+    const patches = new Map<number, Omit<Product, 'id'>>();
+    let inserted = 0, updated = 0;
+    for (const r of uniq) {
+      const id = byBarcode.get(r.barcode);
+      if (id !== undefined) { patches.set(id, r); updated += 1; }
+      else { fresh.push({ ...r, id: nextId }); byBarcode.set(r.barcode, nextId); nextId += 1; inserted += 1; }
+    }
+    if (fresh.length > 0 || patches.size > 0) {
+      setProducts(prev => {
+        const patched = prev.map(p => { const u = patches.get(p.id); return u ? { ...p, ...u } : p; });
+        return [...fresh, ...patched];
+      });
+    }
+    const affected: Product[] = [...fresh];
+    for (const [id, u] of patches.entries()) {
+      const base = products.find(p => p.id === id);
+      affected.push(base ? { ...base, ...u } : ({ ...u, id } as Product));
+    }
+    return { inserted, updated, skippedDup, affected };
   };
 
   const updateProduct = (id: number, productData: Partial<Product>) => {
@@ -2141,6 +2211,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         factoryResetSafe,
         restoreReferenceScope,
         addProduct,
+        upsertProductsBatch,
         updateProduct,
         deleteProduct,
         addClient,

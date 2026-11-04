@@ -54,6 +54,11 @@ export const SuppliersPurchasesView: React.FC = () => {
   const [settleAmount, setSettleAmount] = useState(0);
   const [settleMethod, setSettleMethod] = useState<'ESPECES' | 'VIREMENT' | 'CHEQUE'>('CHEQUE');
   const [settleRef, setSettleRef] = useState('');
+  // M9 (institutional audit): settlement failures surface in-modal (the
+  // context now guards: login, overpayment, till lane).
+  const [paymentError, setPaymentError] = useState('');
+  // M7: supplier-create NIF failures surface in-modal.
+  const [addSupMsg, setAddSupMsg] = useState('');
 
   // Reception lines form state
   const [receptionItems, setReceptionItems] = useState<PurchaseItem[]>([]);
@@ -284,36 +289,48 @@ export const SuppliersPurchasesView: React.FC = () => {
   const handleCreateSupplier = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSupName.trim()) return;
+    setAddSupMsg('');
 
-    const created = addSupplier({
-      name: newSupName,
-      contact_person: newSupContact || 'Responsable Commercial',
-      phone: newSupPhone || '-',
-      address: newSupAddress || 'Algérie',
-      nif: newSupNif,
-      rc: newSupRc,
-      category: newSupCategory || 'Alimentation Générale',
-    });
+    try {
+      const created = addSupplier({
+        name: newSupName,
+        contact_person: newSupContact || 'Responsable Commercial',
+        phone: newSupPhone || '-',
+        address: newSupAddress || 'Algérie',
+        nif: newSupNif,
+        rc: newSupRc,
+        category: newSupCategory || 'Alimentation Générale',
+      });
+      setSelectedSupplier(created);
+      setShowAddSupplierModal(false);
+    } catch (err) {
+      setAddSupMsg((err as Error).message);
+      return;
+    }
 
-    setSelectedSupplier(created);
-    setShowAddSupplierModal(false);
     setNewSupName('');
     setNewSupContact('');
     setNewSupPhone('');
     setNewSupAddress('');
   };
 
-  const handleExecuteSupplierPayment = (e: React.FormEvent) => {
+  const handleExecuteSupplierPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedSupplier || settleAmount <= 0) return;
+    setPaymentError('');
 
-    settleSupplierDebt(
-      selectedSupplier.id,
-      settleAmount,
-      settleMethod,
-      settleRef,
-      isAr ? 'تسديد مستحقات فاتورة توريد' : 'Paiement facture approvisionnement'
-    );
+    try {
+      await settleSupplierDebt(
+        selectedSupplier.id,
+        settleAmount,
+        settleMethod,
+        settleRef,
+        isAr ? 'تسديد مستحقات فاتورة توريد' : 'Paiement facture approvisionnement'
+      );
+    } catch (err) {
+      setPaymentError((err as Error).message);
+      return;
+    }
 
     setShowPaymentModal(false);
   };
@@ -355,7 +372,7 @@ export const SuppliersPurchasesView: React.FC = () => {
           </div>
 
           <button
-            onClick={() => setShowAddSupplierModal(true)}
+            onClick={() => { setShowAddSupplierModal(true); setAddSupMsg(''); }}
             className="p-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl shadow cursor-pointer shrink-0"
             title={isAr ? 'إضافة مورد جديد' : 'Nouveau Fournisseur'}
           >
@@ -467,6 +484,7 @@ export const SuppliersPurchasesView: React.FC = () => {
                   <button
                     onClick={() => {
                       setSettleAmount(selectedSupplier.balance_due);
+                      setPaymentError('');
                       setShowPaymentModal(true);
                     }}
                     disabled={selectedSupplier.balance_due <= 0}
@@ -1002,15 +1020,20 @@ export const SuppliersPurchasesView: React.FC = () => {
               onSubmit={e => {
                 e.preventDefault();
                 if (!editingSupplier.name.trim()) return;
-                updateSupplier(editingSupplier.id, {
-                  name: editingSupplier.name,
-                  contact_person: editingSupplier.contact_person,
-                  phone: editingSupplier.phone,
-                  address: editingSupplier.address,
-                  nif: editingSupplier.nif,
-                  rc: editingSupplier.rc,
-                  category: editingSupplier.category,
-                });
+                try {
+                  updateSupplier(editingSupplier.id, {
+                    name: editingSupplier.name,
+                    contact_person: editingSupplier.contact_person,
+                    phone: editingSupplier.phone,
+                    address: editingSupplier.address,
+                    nif: editingSupplier.nif,
+                    rc: editingSupplier.rc,
+                    category: editingSupplier.category,
+                  });
+                } catch (err) {
+                  setCrudMsg((err as Error).message);
+                  return;
+                }
                 setSelectedSupplier({ ...editingSupplier });
                 setEditingSupplier(null);
               }}
@@ -1169,6 +1192,7 @@ export const SuppliersPurchasesView: React.FC = () => {
               </div>
 
               <div className="pt-2 flex justify-end gap-2">
+                {addSupMsg && <span className="text-[11px] text-rose-300 self-center me-auto">{addSupMsg}</span>}
                 <button
                   type="button"
                   onClick={() => setShowAddSupplierModal(false)}
@@ -1285,6 +1309,7 @@ export const SuppliersPurchasesView: React.FC = () => {
               </div>
 
               <div className="pt-2 flex justify-end gap-2">
+                {paymentError && <span className="text-[11px] text-rose-300 self-center me-auto">{paymentError}</span>}
                 <button
                   type="button"
                   onClick={() => setShowPaymentModal(false)}

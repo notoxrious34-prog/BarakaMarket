@@ -66,6 +66,39 @@ export async function syncCatalogToNative(products: Product[]): Promise<{ synced
   return { synced };
 }
 
+/**
+ * T4c-fix (institutional stock audit S1/S8): push the GIVEN products to the
+ * native mirror immediately (mid-session mutations). Same upsert semantics
+ * as the session sync; UI stays master. Returns synced/failed counts.
+ * Outside Tauri everything is a deliberate no-op (synced 0).
+ */
+export async function upsertProductsNative(products: Product[]): Promise<{ synced: number; failed: number }> {
+  if (!isTauriRuntime() || products.length === 0) return { synced: 0, failed: 0 };
+  let synced = 0, failed = 0;
+  for (const p of products) {
+    if (!Number.isInteger(p.id) || p.id <= 0) { failed += 1; continue; }
+    const r = await invokeNative<{ id?: number }>('product_upsert', { product: toNativeProduct(p) });
+    if (r && r.id === p.id) synced += 1;
+    else failed += 1;
+  }
+  return { synced, failed };
+}
+
+/**
+ * T4c-fix (institutional stock audit S3): remove the native mirror row.
+ * Returns true when the row is gone; false outside Tauri (no mirror) or on
+ * refusal (RESTRICT history — the caller must abort the UI delete too).
+ */
+export async function deleteProductNative(id: number): Promise<boolean> {
+  if (!isTauriRuntime()) return true;
+  try {
+    const r = await invokeNative<{ deleted?: number }>('product_delete', { id });
+    return !!r && r.deleted === id;
+  } catch {
+    return false;
+  }
+}
+
 /** Read the native stock mirror (null outside Tauri / on refusal). */
 export async function listNativeProducts(): Promise<NativeProductPayload[] | null> {
   const r = await invokeNative<NativeProductPayload[]>('product_list');
