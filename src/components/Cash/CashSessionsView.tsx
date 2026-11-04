@@ -53,11 +53,19 @@ export const CashSessionsView: React.FC = () => {
     try {
       const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json();
-      if (!r.ok) throw new Error(j.error ?? 'error');
+      if (!r.ok) throw new Error(r.status === 401 ? 'LOOPBACK_401' : (j.error ?? 'error'));
       setMsg(okMsg);
       setLastZ(j.zNumber ? j as ZResult : null);
       await refresh();
     } catch (e) {
+      // QA-P1: the loopback write token exists only in the native shell — web
+      // preview is honestly read-only for cash writes. Say so, plainly.
+      if ((e as Error).message === 'LOOPBACK_401') {
+        setMsg(isAr
+          ? 'تعذّرت الكتابة: تتطلب هذه العملية التطبيق المثبت (المسار الأصلي). المعروض قراءة حيّة فقط.'
+          : 'Écriture impossible : opération réservée à l’application installée (canal natif). Affichage en lecture seule.');
+        return;
+      }
       setMsg(`${isAr ? 'خطأ: ' : 'Erreur: '}${(e as Error).message}`);
     }
   };
