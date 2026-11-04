@@ -158,7 +158,7 @@ const MainLayout: React.FC = () => {
             </>
           )}
           <span className="text-slate-300 dark:text-slate-600">|</span>
-          <span className="uppercase tracking-widest text-amber-400/80">v{APP_VERSION}</span>
+          <span className="uppercase tracking-widest text-amber-400/80">V{APP_VERSION}</span>
         </span>
       </footer>
 

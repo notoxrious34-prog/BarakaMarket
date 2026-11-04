@@ -30,6 +30,8 @@ import {
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
 import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { APP_VERSION } from '../core/version';
+import { detectVersionShift } from '../core/version-change';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
 import { can, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, OUTBOX_KEY, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
@@ -221,6 +223,8 @@ const STORAGE_KEYS = {
   SEQ_TICKET_PREFIX: 'baraka_seq_T_',
   SEQ_QUITTANCE_PREFIX: 'baraka_seq_Q_',
   BARCODES: 'baraka_product_barcodes_v1',
+  /** Boot-audit: last running build, to audit silent updater installs. */
+  LAST_SEEN_VERSION: 'baraka_last_seen_version_v1',
 };
 
 /**
@@ -534,6 +538,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     probeFiscalAuthority().then(s => {
       if (alive) setAuthority(s);
     }).catch(() => {});
+    // Boot version-shift audit: the updater can replace the binary without
+    // the app's update flow running (silent auto-install) — then no
+    // `update.install` row would ever exist. Any shift gets traced once.
+    try {
+      const last = localStorage.getItem(STORAGE_KEYS.LAST_SEEN_VERSION);
+      const shift = detectVersionShift(last, APP_VERSION);
+      if (shift === 'upgraded' || shift === 'downgraded') {
+        void auditSessionEvent('system', 'update.install', `${last ?? '?'} → ${APP_VERSION} (${shift}, silent/boot-detected)`);
+      }
+      localStorage.setItem(STORAGE_KEYS.LAST_SEEN_VERSION, APP_VERSION);
+    } catch { /* private mode */ }
     return () => { alive = false; };
   }, []);
 
