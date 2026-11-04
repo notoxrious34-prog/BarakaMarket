@@ -76,6 +76,16 @@
       ~21 rows, no `…` · footer `V1.4.1` · POS live, vision PASS · **gap noted (not fixed)**:
       silent auto-installs write no `update.install` audit row (missing 1.4.0 + 1.4.1 traces) —
       boot version-change audit proposed for the next version, awaiting owner.
+- [x] **v1.4.2 IRON (2026-11-04)** — manual silent install (CDN edge stale) · footer `V1.4.2`
+      (literal `V`) · license ACTIVATED persists (`BarakaDev`) · `lastSeen=1.4.2` stamped ·
+      flaw found: pre-key upgrades read as `fresh` (no row) → fixed in v1.4.3 (footprint catch-up).
+- [x] **v1.4.3 IRON PROOF — updater end-to-end (2026-11-04)** — root-caused TWO release
+      defects: (1) `SIG=$(cat…)` with `&&` never exported → empty signature in 1.4.1/1.4.2
+      manifests (iron 1.4.1 jump unexplained by plugin path — disclosed); (2) cosmetic
+      `name` field collides with serde alias → `duplicate field version`. Fixed manifest
+      (`sig 424`, no `name`, CDN-verified) → iron `Vérifier` sees **1.4.3** + `Installer` →
+      official install → **`update.install|system|1.4.2 → 1.4.3 (upgraded, silent/boot-detected)`**
+      as newest audit row + `lastSeen=1.4.3` + license still ACTIVATED + footer **`V1.4.3`**.
 
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
