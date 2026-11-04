@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useMemo } from 'react';
-import { computeHwid, collectBrowserFingerprint } from '../core/licensing';
-import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed } from '../core/license-store';
+import { computeHwid, collectBrowserFingerprint, validateLicense } from '../core/licensing';
+import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed, loadStoredLicense } from '../core/license-store';
+import { assessStoredLicense } from '../core/license-verify';
 import {
   AccountingSummary,
   Advance,
@@ -206,6 +207,10 @@ interface AppContextType {
   trialRemaining: { sales: number; days: number };
   /** ADR-002-MKT: hard trial expiry — POS checkout blocked while true. */
   isTrialExpired: boolean;
+  /** L1-fix: stored ACTIVATED re-verified (forged key => treated as expired). */
+  licenseBroken: boolean;
+  /** L-drift: activation HWID differs from this machine (warning only). */
+  licenseDrift: boolean;
   openPrintModal: (sale: Sale, type: 'ticket' | 'facture') => void;
   closePrintModal: () => void;
   closeSettlementQuittance: () => void;
@@ -2083,9 +2088,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [sales, licenseRev]);
 
   /** ADR-002-MKT: trial checkout lockout — BOTH budgets exhausted, no license. */
-  const isTrialExpired = !licenseSnapshot.activated
+  // L1-fix: a forged ACTIVATED record is treated as expired the moment the
+  // re-verification fails (trust-on-read is over). Legacy records without an
+  // activation HWID stay grandfathered (warning only) — see licenseDrift.
+  const [licenseBroken, setLicenseBroken] = useState(false);
+  const [licenseDrift, setLicenseDrift] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const rec = loadStoredLicense();
+        if (!rec || rec.status !== 'ACTIVATED') return;
+        const currentHwid = computeHwid(collectBrowserFingerprint(getOrCreateMachineSeed()));
+        const a = await assessStoredLicense(rec, currentHwid, validateLicense);
+        if (cancelled) return;
+        setLicenseDrift(a.drift);
+        // Enforce only when the activation HWID is known: a signature that
+        // fails against its OWN hwid is forged or corrupted — never genuine.
+        if (rec.hwid?.trim() && !a.cryptoOk) setLicenseBroken(true);
+      } catch { /* offline lane: keep the trusted snapshot */ }
+    })();
+    return () => { cancelled = true; };
+  }, [licenseRev]);
+  const isTrialExpired = licenseBroken || (!licenseSnapshot.activated
     && licenseSnapshot.sales <= 0
-    && licenseSnapshot.days <= 0;
+    && licenseSnapshot.days <= 0);
 
   const openPrintModal = (sale: Sale, type: 'ticket' | 'facture') => {
     setCurrentPrintSale(sale);
@@ -2254,7 +2281,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         completeStoreSetup,
         licenseActivated: licenseSnapshot.activated,
         trialRemaining: { sales: licenseSnapshot.sales, days: licenseSnapshot.days },
-        isTrialExpired,
+        isTrialExpired, licenseBroken, licenseDrift,
         openPrintModal,
         closePrintModal,
         closeSettlementQuittance,

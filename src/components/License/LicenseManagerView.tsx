@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   computeHwid, collectBrowserFingerprint,
@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 export const LicenseManagerView: React.FC = () => {
-  const { language, sales, storeProfile } = useApp();
+  const { language, sales, storeProfile, licenseBroken, licenseDrift } = useApp();
   const isAr = language === 'ar';
 
   // Gate-03 TASK 3: real deterministic HWID (stable seed + platform fingerprint).
@@ -25,6 +25,18 @@ export const LicenseManagerView: React.FC = () => {
   const [activationError, setActivationError] = useState('');
   const [copiedKey, setCopiedKey] = useState(false);
 
+  // L8-fix: the stored record can change behind our back (SQLite-mirror
+  // restore, another tab) — re-read on focus and on storage events.
+  useEffect(() => {
+    const reread = () => setStored(loadStoredLicense());
+    window.addEventListener('focus', reread);
+    window.addEventListener('storage', reread);
+    return () => {
+      window.removeEventListener('focus', reread);
+      window.removeEventListener('storage', reread);
+    };
+  }, []);
+
   // Key generation lives EXCLUSIVELY in scripts/keygen.ts (BarakaDEV staff CLI).
   // Nothing vendor-side is imported, rendered, or bundled in this client view.
 
@@ -35,6 +47,8 @@ export const LicenseManagerView: React.FC = () => {
     Date.now(),
   );
   const isActivated = stored?.status === 'ACTIVATED';
+  // L1-fix: a cryptographically rejected key is never displayed as active.
+  const showActive = isActivated && !licenseBroken;
 
   const handleCopy = (text: string) => {
     try { navigator.clipboard.writeText(text); } catch { /* headless/test lane */ }
@@ -99,16 +113,16 @@ export const LicenseManagerView: React.FC = () => {
           </p>
         </div>
 
-        <div className={`flex items-center gap-3 border rounded-xl px-4 py-3 justify-self-center md:justify-self-end whitespace-nowrap ${isActivated ? 'bg-emerald-950/60 border-emerald-800/60' : 'bg-amber-950/60 border-amber-800/60'}`}>
-          <ShieldCheck className={`w-8 h-8 ${isActivated ? 'text-emerald-400' : 'text-amber-400'}`} />
+        <div className={`flex items-center gap-3 border rounded-xl px-4 py-3 justify-self-center md:justify-self-end whitespace-nowrap ${showActive ? 'bg-emerald-950/60 border-emerald-800/60' : 'bg-amber-950/60 border-amber-800/60'}`}>
+          <ShieldCheck className={`w-8 h-8 ${showActive ? 'text-emerald-400' : 'text-amber-400'}`} />
           <div>
             <div className="text-xs font-bold text-white">
-              {isActivated
+              {showActive
                 ? (isAr ? 'الترخيص نشط ومفعل مدى الحياة' : 'Licence Activée (À Vie)')
                 : (isAr ? `نسخة تجريبية — ${trial.salesRemaining} عملية / ${trial.daysRemaining} يوم` : `Essai — ${trial.salesRemaining} ventes / ${trial.daysRemaining} j`)}
             </div>
             <div className="text-[11px] text-slate-400 font-mono">
-              {isActivated ? stored?.storeName : 'TRIAL 50 ventes / 14 j'} • {hardwareId}
+              {showActive ? stored?.storeName : 'TRIAL 50 ventes / 14 j'} • {hardwareId}
             </div>
           </div>
         </div>
@@ -127,15 +141,43 @@ export const LicenseManagerView: React.FC = () => {
           </div>
 
           <div className="p-6 space-y-5">
+            {/* L1-fix: a forged ACTIVATED never looks active anymore. */}
+            {licenseBroken && (
+              <div className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-rose-950/60 border-rose-800/60">
+                <ShieldCheck className="w-7 h-7 shrink-0 text-rose-400" />
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-rose-300">
+                    {isAr ? 'مفتاح مرفوض' : 'Clé rejetée'}
+                  </div>
+                  <div className="text-sm font-black text-white">
+                    {isAr ? '● هذا المفتاح غير صالح — أعد إدخال مفتاح BarakaDEV الصحيح' : '● Clé invalide — ressaisissez la clé BarakaDEV authentique'}
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Drift: genuine key, different machine — warning only, never a lock. */}
+            {licenseDrift && !licenseBroken && isActivated && (
+              <div className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-amber-950/40 border-amber-800/50">
+                <ShieldCheck className="w-7 h-7 shrink-0 text-amber-400" />
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-amber-300">
+                    {isAr ? 'تنبيه جهاز' : 'Appareil différent'}
+                  </div>
+                  <div className="text-sm font-black text-white">
+                    {isAr ? '● بصمة هذا الجهاز تختلف عن بصمة التفعيل — المفتاح سليم، أعد التفعيل عند تغيير الصندوق' : '● HWID différent de l’activation — clé valide, réactivez en cas de changement de caisse'}
+                  </div>
+                </div>
+              </div>
+            )}
             {/* System status */}
-            <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${isActivated ? 'bg-emerald-950/60 border-emerald-800/60' : 'bg-amber-950/40 border-amber-800/50'}`}>
-              <ShieldCheck className={`w-7 h-7 shrink-0 ${isActivated ? 'text-emerald-400' : 'text-amber-400'}`} />
+            <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${showActive ? 'bg-emerald-950/60 border-emerald-800/60' : 'bg-amber-950/40 border-amber-800/50'}`}>
+              <ShieldCheck className={`w-7 h-7 shrink-0 ${showActive ? 'text-emerald-400' : 'text-amber-400'}`} />
               <div>
                 <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
                   {isAr ? 'حالة النظام' : 'État du système'}
                 </div>
                 <div className="text-sm font-black text-white">
-                  {isActivated
+                  {showActive
                     ? (isAr ? '● رخصة دائمة مدى الحياة' : '● LICENCE PERPÉTUELLE À VIE')
                     : (isAr
                       ? `● نسخة تجريبية — متبقي ${trial.salesRemaining} عملية بيع / ${trial.daysRemaining} يوم`
@@ -207,7 +249,7 @@ export const LicenseManagerView: React.FC = () => {
                 />
               </div>
               {activationError && <p className="text-[11px] text-rose-400">{activationError}</p>}
-              {isActivated && (
+              {showActive && (
                 <p className="text-[11px] text-emerald-400 font-mono">{stored?.key}</p>
               )}
               <button
@@ -221,7 +263,7 @@ export const LicenseManagerView: React.FC = () => {
           </div>
 
           <div className="px-6 py-3 border-t border-[#1e293b] text-center text-[10px] text-slate-500">
-            {isAr ? 'الأمان: تشفير محلي SHA-256 | لا يتطلب اتصالاً بالإنترنت' : 'Sécurité: Chiffrement Local SHA-256 | Aucune connexion Internet requise'}
+            {isAr ? 'الأمان: توقيع Ed25519 دون اتصال | لا يتطلب اتصالاً بالإنترنت' : 'Sécurité: signature Ed25519 hors-ligne | Aucune connexion Internet requise'}
           </div>
         </div>
       </div>
