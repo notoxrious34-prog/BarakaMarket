@@ -189,11 +189,11 @@ export const BACKUP_RETENTION_KEEP = 30;
 
 /**
  * Windows locks fresh files briefly (AV/indexer) — a single unlinkSync can
- * throw EPERM/EBUSY on a file that is really ours to delete. Retry a few
- * times before treating it as gone; swallowing the first EPERM silently
- * breaks the retention guarantee (proven by a load-induced flake).
+ * throw EPERM/EBUSY on a file that is really ours to delete. Retry with a
+ * generous budget; swallowing the first EPERM silently breaks the retention
+ * guarantee (proven by a load-induced flake that survived a 250 ms budget).
  */
-function unlinkWithRetry(p: string, tries = 5): void {
+function unlinkWithRetry(p: string, tries = 8): void {
   for (let i = 0; i < tries; i++) {
     try {
       fs.unlinkSync(p);
@@ -202,8 +202,9 @@ function unlinkWithRetry(p: string, tries = 5): void {
       const code = (e as NodeJS.ErrnoException).code;
       if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'ENOENT') return; // truly gone or foreign error
       if (i === tries - 1) return;
-      // Brief backoff — then final attempt; still locked means truly busy.
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (i + 1));
+      // Up to ~2.8 s total on a contended box — then the caller keeps the
+      // log row so the NEXT backup retries instead of orphaning the file.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100 * (i + 1));
     }
   }
 }
@@ -1351,6 +1352,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           for (const old of prunePlan(rows, BACKUP_RETENTION_KEEP)) {
             if (old.filePath) unlinkWithRetry(old.filePath);
             if (old.filePath) unlinkWithRetry(manifestPathFor(old.filePath));
+            // Honest retention: only drop the log row when the bytes are
+            // really gone. A surviving file keeps its row so the next backup
+            // retries the sweep instead of orphaning it forever.
+            if (old.filePath && fs.existsSync(old.filePath)) continue;
             db.prepare('DELETE FROM backups_log WHERE id = ?').run(old.id);
           }
         } catch (e) {
