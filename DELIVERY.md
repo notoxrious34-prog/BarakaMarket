@@ -87,14 +87,15 @@
       official install → **`update.install|system|1.4.2 → 1.4.3 (upgraded, silent/boot-detected)`**
       as newest audit row + `lastSeen=1.4.3` + license still ACTIVATED + footer **`V1.4.3`**.
 - [x] **v1.4.4 IRON PROOF (2026-11-04)** — P1/P2/P3 cumulative bundle (`5.15 MiB`, `SIG-OK [ED]`,
-      CDN `1.4.4:424 has_name=false` first-try) · iron `Vérifier` sees **1.4.4** + `Installer`
-      (no error) but the in-app NSIS upgrade did NOT replace the running binary (fresh PID,
-      exe timestamp unchanged — disclosed, under study; the running exe locks its own dir).
-      Manual silent install of the same signed bundle worked:
-      footer **`V1.4.4`** + POS alive + license **`LICENCE PERPÉTUELLE`** persists +
-      audit **`update.install|1.4.3 → 1.4.4 (upgraded, silent/boot-detected)`** + `update.check|1.4.4`.
-      P3 dev-lane chain proven separately: exempt SNAP 201 → RESET 200 (14 tables cleared,
-      `audit=[factory_reset]` genesis) → RESTORE 200 + server healthy.
+      CDN `1.4.4:424 has_name=false` first-try) · **user-reported 404 ROOT-CAUSED**: GitHub stored
+      the asset as `Baraka.Market_…` (dot) while `latest.json` pointed at `Baraka%20Market_…`
+      (space) → `download request failed 404` on every client. Fixed with a space-free alias
+      asset (`BarakaMarket-1.4.4-x64-setup.exe`, same bytes → same `.sig`) + manifest URL
+      repoint + `scripts/verify-release.mjs` gate (manifest↔assets match, no whitespace,
+      HEAD-resolves 200 — `RELEASE-GATE PASS`). **End-to-end proven by downgrade-upgrade**:
+      iron rolled to 1.4.3 (DB backed up), in-app updater saw 1.4.4, installed, CDP dropped
+      mid-install (genuine relaunch), footer **`V1.4.4`**, fresh DB climbed to **schema v8**,
+      then real DB restored: POS alive + **`PERPÉTUELLE À VIE`** + `À jour` path clean.
 
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
