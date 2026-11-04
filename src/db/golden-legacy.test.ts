@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { openBarakaDb } from './sqlite.ts';
+import { openBarakaDb, LATEST_SCHEMA_VERSION } from './sqlite.js';
 
 function craftLegacyShape(p: string): void {
   if (fs.existsSync(p)) fs.unlinkSync(p);
@@ -24,18 +24,20 @@ function craftLegacyShape(p: string): void {
 }
 
 describe('A2 golden-legacy boot', () => {
-  it('opens the oldest shop shape: climbs to v7, indexes restored, owner seeded', () => {
+  it('opens the oldest shop shape: climbs to v8, indexes restored, owner seeded', () => {
     const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'baraka-legacy-')), 'legacy.db');
     craftLegacyShape(p);
     const { db, close } = openBarakaDb(p); // must NOT throw
     try {
       const v = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-      assert.equal(v, 7);
+      assert.equal(v, LATEST_SCHEMA_VERSION);
       const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_z_day'").get();
       assert.ok(idx, 'idx_z_day restored post-migration');
       const owner = db.prepare("SELECT username, must_change_pin FROM users WHERE username='owner'").get() as { username: string; must_change_pin: number } | undefined;
       assert.ok(owner, 'first owner seeded on legacy climb');
       assert.equal(owner!.must_change_pin, 1);
+      const exemptCol = db.prepare("SELECT name FROM pragma_table_info('backups_log') WHERE name='exempt'").get();
+      assert.ok(exemptCol, 'v8 exempt flag climbed on legacy files');
     } finally {
       close();
     }

@@ -159,6 +159,30 @@ fn backup_db(dest: String) -> Result<serde_json::Value, String> {
     fiscal::backup_db(&conn, &dest)
 }
 
+/// P3 (v1.4.4): audited clean-start — refuses without a VERIFIED exempt
+/// pre-reset archive; clears trial books, restarts numbering, genesis audit.
+#[tauri::command]
+fn factory_reset(archiveRef: String, actor: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::factory_reset(&conn, &archiveRef, &actor)
+}
+
+/// P3 (v1.4.4): log a just-taken hot snapshot in `backups_log`
+/// (retention-exempt when it is a pre-reset safety archive).
+#[tauri::command]
+fn register_backup(
+    id: String,
+    dest: String,
+    label: String,
+    appVersion: String,
+    exempt: bool,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::register_backup(&conn, &id, &dest, &label, &appVersion, exempt)
+}
+
 /// T12 fix: native PIN change. The exe never had this command — forced-change
 /// died with "check the connection" because no loopback runs in the shell.
 #[tauri::command]
@@ -242,6 +266,8 @@ fn main() {
             daily_z,
             z_close,
             backup_db,
+            factory_reset,
+            register_backup,
             product_upsert,
             product_list,
             product_search,

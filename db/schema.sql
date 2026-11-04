@@ -335,7 +335,9 @@ CREATE TABLE IF NOT EXISTS backups_log (
   sales_count      INTEGER NOT NULL DEFAULT 0,
   products_count   INTEGER NOT NULL DEFAULT 0,
   status           TEXT NOT NULL CHECK (status IN ('VERIFIED', 'CORRUPT', 'RESTORED')) DEFAULT 'VERIFIED',
-  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+  -- P3 (v1.4.4): pre-reset safety archives are retention-exempt (never pruned).
+  exempt           INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_backups_created ON backups_log (created_at);
 

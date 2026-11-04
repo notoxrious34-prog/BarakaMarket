@@ -192,7 +192,7 @@ export function mintRowId(): string {
 }
 
 async function invokeLane<T>(
-  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db',
+  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db' | 'factory_reset',
   args: Record<string, unknown>,
 ): Promise<T | null> {
   if (!isTauriRuntime()) return null;
@@ -283,9 +283,61 @@ export async function commitVoid(
 }
 
 /**
- * #003 (Phase A): native-first hot snapshot. exe lane VACUUMs INTO the
- * sibling file; browser lane uses the loopback backup endpoint.
+ * P3 (v1.4.4): mandatory pre-reset safety snapshot. Goes through the
+ * loopback `POST /api/backups/create` with `exempt: true` — the archive the
+ * reset gate demands (VERIFIED + retention-exempt + checksum). Throws when
+ * the lane is unavailable so the reset can never proceed without proof.
  */
+export async function createSafetySnapshot(
+): Promise<{ filePath: string; filename: string; sha256Checksum: string }> {
+  const token = await getLoopbackToken();
+  if (!token) {
+    throw new Error('[snapshot] hot lane unavailable — install the app or start the loopback server');
+  }
+  const label = `pre-reset-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const r = await fetch(`${LOOPBACK_BASE}/api/backups/create`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...authHeaders(token) },
+    body: JSON.stringify({ label, exempt: true }),
+  });
+  const j = await r.json() as { success?: boolean; error?: string; filePath?: string; filename?: string; sha256Checksum?: string };
+  if (!r.ok || !j.filePath || !j.filename) {
+    throw new Error(`[snapshot] safety snapshot failed: ${j.error ?? `http ${r.status}`}`);
+  }
+  return { filePath: j.filePath, filename: j.filename, sha256Checksum: j.sha256Checksum ?? '' };
+}
+
+/**
+ * P3 (v1.4.4): audited clean-start — native `factory_reset` first
+ * (Tauri), loopback `POST /api/admin/factory-reset` in the browser lane.
+ * Refuses without a VERIFIED exempt pre-reset archive; clears the trial
+ * books, restarts numbering at 000001, writes a genesis audit row.
+ */
+export async function factoryResetNative(
+  archiveRef: string, actor: string,
+): Promise<{ cleared: Record<string, number>; archive: string } | null> {
+  const native = await invokeLane<{ cleared?: Record<string, number>; archive?: string }>(
+    'factory_reset', { archiveRef, actor },
+  );
+  if (native && native.archive && native.cleared) {
+    return { cleared: native.cleared, archive: native.archive };
+  }
+  if (isTauriRuntime()) return null;
+  try {
+    const token = await getLoopbackToken();
+    const r = await fetch(`${LOOPBACK_BASE}/api/admin/factory-reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders(token) },
+      body: JSON.stringify({ archiveRef, actor }),
+    });
+    if (!r.ok) return null;
+    const j = await r.json() as { cleared?: Record<string, number>; archive?: string };
+    if (!j.archive || !j.cleared) return null;
+    return { cleared: j.cleared, archive: j.archive };
+  } catch {
+    return null;
+  }
+}
 export async function backupDatabase(
   dest: string,
 ): Promise<{ path: string; bytes: number | null } | null> {

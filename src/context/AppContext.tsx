@@ -35,10 +35,11 @@ import {
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
 import { advancesForMonth, settleSalaryMath, applyAdvanceToBalance, applyPaydayToBalance } from '../core/payroll';
-import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, getLoopbackToken, LOOPBACK_BASE, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, getLoopbackToken, LOOPBACK_BASE, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { APP_VERSION } from '../core/version';
 import { detectVersionShift } from '../core/version-change';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
+import { restoreLocalSnapshotKeys } from '../core/local-snapshot.js';
 import { can, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, OUTBOX_KEY, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
 import { parseQtyPrefix } from '../core/barcode-qty';
@@ -177,6 +178,13 @@ interface AppContextType {
   }) => Promise<{ advance: Advance; expense: Expense }>;
   settleSalary: (input: { workerId: number; month: string }) => Promise<SalarySettlement>;
   factoryResetDemo: (ownerPin: string) => Promise<void>;
+  /**
+   * P3 (v1.4.4): guarded clean-start — mandatory exempt safety snapshot,
+   * audited native wipe (numbering restarts 000001), then local wipe.
+   */
+  factoryResetSafe: (ownerPin: string) => Promise<{ archive: string; cleared: Record<string, number> }>;
+  /** P3: restore reference master-data only (products/suppliers/clients/workers) from a local snapshot. */
+  restoreReferenceScope: (snapshotJson: string, scopes: { products: boolean; suppliers: boolean; clients: boolean; workers: boolean }) => Promise<string[]>;
 
   // Product & Store management
   addProduct: (product: Omit<Product, 'id'>) => Product;
@@ -1606,20 +1614,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /**
-   * Owner order 2026-11-03: «بداية نظيفة» — wipe all demo/operational data
-   * (products, clients, suppliers, sales, purchases, settlements, payments,
-   * held carts, drafts, outbox residue, seq counters, barcode aliases) and
-   * keep identity: users (SQLite), store profile, license, language/theme,
-   * session. Owner PIN required; refused while the outbox has residue.
+   * P3 (v1.4.4): the local half of any clean-start — wipes operational
+   * localStorage (catalog, movements, seq counters, carts, drafts, P2
+   * expenses/workers) and arms CLEAN_START so initializers reseed empty.
+   * Identity (users/SQLite, store profile, license, language) is untouched.
    */
-  const factoryResetDemo = async (ownerPin: string): Promise<void> => {
-    const s = sessionRef.current;
-    if (!s || s.role !== 'owner') throw new Error('[reset] owner required');
-    const v = await loginUser(s.username, ownerPin);
-    if (!v.ok) throw new Error('[reset] PIN incorrect');
-    if (pendingOutboxCount(lsStore) > 0) {
-      throw new Error('[reset] outbox has pending operations — drain first');
-    }
+  const wipeLocalOperational = (): void => {
     const wipeExact = [
       STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.CLIENTS, STORAGE_KEYS.SUPPLIERS,
       STORAGE_KEYS.SALES, STORAGE_KEYS.PURCHASES, STORAGE_KEYS.SETTLEMENTS,
@@ -1641,8 +1641,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Marker: initializers start empty instead of reseeding demo data.
       localStorage.setItem(STORAGE_KEYS.CLEAN_START, '1');
     } catch { /* private mode */ }
+  };
+
+  /**
+   * Owner order 2026-11-03: «بداية نظيفة» — wipe all demo/operational data
+   * (products, clients, suppliers, sales, purchases, settlements, payments,
+   * held carts, drafts, outbox residue, seq counters, barcode aliases) and
+   * keep identity: users (SQLite), store profile, license, language/theme,
+   * session. Owner PIN required; refused while the outbox has residue.
+   */
+  const factoryResetDemo = async (ownerPin: string): Promise<void> => {
+    const s = sessionRef.current;
+    if (!s || s.role !== 'owner') throw new Error('[reset] owner required');
+    const v = await loginUser(s.username, ownerPin);
+    if (!v.ok) throw new Error('[reset] PIN incorrect');
+    if (pendingOutboxCount(lsStore) > 0) {
+      throw new Error('[reset] outbox has pending operations — drain first');
+    }
+    wipeLocalOperational();
     await auditSessionEvent(s.username, 'profile.change', 'danger: factory clean-start by owner (demo data wiped, identity kept)');
     window.location.reload();
+  };
+
+  /**
+   * P3 (v1.4.4): guarded clean-start. Step 1 (mandatory): take a fresh
+   * retention-exempt safety snapshot. Step 2: audited native wipe — refuses
+   * without the snapshot's proof, clears the trial books, restarts numbering
+   * at 000001 with a genesis audit row. Step 3: local operational wipe.
+   * Nothing is touched until the snapshot lands; the native lane refuses
+   * unless the archive verifies, so a half-reset cannot strand the shop.
+   */
+  const factoryResetSafe = async (ownerPin: string): Promise<{ archive: string; cleared: Record<string, number> }> => {
+    const s = sessionRef.current;
+    if (!s || s.role !== 'owner') throw new Error('[reset] owner required');
+    const v = await loginUser(s.username, ownerPin);
+    if (!v.ok) throw new Error('[reset] PIN incorrect');
+    if (pendingOutboxCount(lsStore) > 0) {
+      throw new Error('[reset] outbox has pending operations — drain first');
+    }
+    const snap = await createSafetySnapshot();
+    const reset = await factoryResetNative(snap.filePath, s.username);
+    if (!reset) throw new Error('[reset] native wipe refused — archive unverifiable on this lane');
+    wipeLocalOperational();
+    await auditSessionEvent(s.username, 'profile.change', `danger: guarded clean-start by owner — archive ${snap.filename}, numbering restarts 000001`);
+    window.location.reload();
+    return reset;
+  };
+
+  /**
+   * P3 (v1.4.4): scope-limited restore — reference master-data only
+   * (products incl. barcodes, suppliers, client debts, workers). Movements,
+   * seq counters, carts and drafts are NEVER restored: the fiscal chain and
+   * numbering stay exactly as they are. Same fail-closed envelope as a full
+   * restore (checksum + drift warnings).
+   */
+  const restoreReferenceScope = async (
+    snapshotJson: string,
+    scopes: { products: boolean; suppliers: boolean; clients: boolean; workers: boolean },
+  ): Promise<string[]> => {
+    const s = sessionRef.current;
+    if (!s || (s.role !== 'owner' && s.role !== 'manager')) throw new Error('[restore] manager required');
+    const allow: string[] = [];
+    if (scopes.products) allow.push(STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.BARCODES);
+    if (scopes.suppliers) allow.push(STORAGE_KEYS.SUPPLIERS);
+    if (scopes.clients) allow.push(STORAGE_KEYS.CLIENTS);
+    if (scopes.workers) allow.push(STORAGE_KEYS.WORKERS);
+    if (allow.length === 0) throw new Error('[restore] select at least one reference scope');
+    const res = await restoreLocalSnapshotKeys(snapshotJson, localStorage, allow);
+    await auditSessionEvent(s.username, 'profile.change', `restore: reference scopes [${res.keys.join(', ')}] by ${s.username}`);
+    return res.warnings.length > 0 ? [...res.keys, ...res.warnings.map(w => `warning: ${w}`)] : res.keys;
   };
 
   const settleSupplierDebt = (
@@ -2071,6 +2138,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updatePurchaseReceipt,
         settleSupplierDebt,
         factoryResetDemo,
+        factoryResetSafe,
+        restoreReferenceScope,
         addProduct,
         updateProduct,
         deleteProduct,

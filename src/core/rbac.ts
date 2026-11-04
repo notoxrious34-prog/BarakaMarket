@@ -90,7 +90,7 @@ export type AuditAction =
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
-  | 'expense.add' | 'advance.add' | 'salary.settle'
+  | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'
   | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
 
 export interface AuditEvent {

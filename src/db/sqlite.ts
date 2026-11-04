@@ -182,7 +182,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 7;
+export const LATEST_SCHEMA_VERSION = 8;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -357,6 +357,16 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 7');
     v = 7;
   }
+  // v7 → v8 P3 (v1.4.4): retention-exempt flag for pre-reset safety archives.
+  // Fresh files get it from schema.sql; legacy files climb here.
+  if (v < 8) {
+    const cols = db.prepare('PRAGMA table_info(backups_log)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'exempt')) {
+      db.exec('ALTER TABLE backups_log ADD COLUMN exempt INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec('PRAGMA user_version = 8');
+    v = 8;
+  }
   // Always-ensured: partial unique index lives here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -405,10 +415,12 @@ export interface BarakaDb {
   setManagerPin(newPin: string): void;
   verifyManagerPinDb(inputPin: string): boolean;
   /** ADR-015-MKT: online backup + disaster recovery. */
-  createDatabaseBackup(options?: { destinationDir?: string; label?: string }): BackupMetadata;
+  createDatabaseBackup(options?: { destinationDir?: string; label?: string; exempt?: boolean }): BackupMetadata;
   listDatabaseBackups(): BackupMetadata[];
   validateBackupForRestore(backupPath: string): BackupValidationReport;
   restoreBackupSafely(backupPath: string): RestoreResult;
+  /** P3 (v1.4.4): audited clean-start — refuses without a VERIFIED exempt archive. */
+  factoryReset(archiveRef: string, actor: string): { cleared: Record<string, number>; archive: string };
   /** TASK-BRK-016-MKT: Algerian reference catalog autofill search. */
   searchProductTemplates(query: string, limit?: number): ProductTemplate[];
   nextInvoiceNumber(year: number): string;
@@ -1300,7 +1312,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       return verifyPin(inputPin, row?.value);
     },
 
-    createDatabaseBackup(options?: { destinationDir?: string; label?: string }): BackupMetadata {
+    createDatabaseBackup(options?: { destinationDir?: string; label?: string; exempt?: boolean }): BackupMetadata {
       const dir = path.resolve(options?.destinationDir ?? 'data/backups');
       fs.mkdirSync(dir, { recursive: true });
       const now = new Date();
@@ -1326,11 +1338,12 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         const size = fs.statSync(filePath).size;
         const createdAt = new Date().toISOString();
         const id = randomUUID();
+        const exempt = options?.exempt === true ? 1 : 0;
         db.prepare(
           `INSERT INTO backups_log (id, filename, file_path, file_size_bytes, sha256_checksum,
-            sales_count, products_count, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?)`,
-        ).run(id, filename, filePath, size, sha256, sales, products, createdAt);
+            sales_count, products_count, status, created_at, exempt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?, ?)`,
+        ).run(id, filename, filePath, size, sha256, sales, products, createdAt, exempt);
         // Backup-Pro: manifest sidecar — the catalog survives even if the live
         // DB (and its backups_log) is lost. Verify + list read it back.
         const manifest: BackupManifest = buildManifest({
@@ -1342,14 +1355,16 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         const meta: BackupMetadata = {
           id, filename, filePath, fileSizeBytes: size, sha256Checksum: sha256,
           salesCount: sales, productsCount: products, status: 'VERIFIED', createdAt,
-          label, appVersion: APP_VERSION, schemaVersion,
+          label, appVersion: APP_VERSION, schemaVersion, exempt: exempt === 1,
         };
-        // Backup-Pro: retention — keep the newest 30, delete files + sidecars + rows.
+        // Backup-Pro: retention — keep the newest 30 NON-EXEMPT snapshots.
+        // Pre-reset safety archives (exempt=1) never enter the prune plan.
         try {
           const rows = db.prepare(
-            'SELECT id, filename, file_path AS filePath, created_at AS created_at FROM backups_log ORDER BY created_at DESC, rowid DESC',
-          ).all() as { id: string; filename: string; filePath: string; created_at: string }[];
-          for (const old of prunePlan(rows, BACKUP_RETENTION_KEEP)) {
+            'SELECT id, filename, file_path AS filePath, created_at AS created_at, exempt FROM backups_log ORDER BY created_at DESC, rowid DESC',
+          ).all() as { id: string; filename: string; filePath: string; created_at: string; exempt: number }[];
+          const candidates = rows.filter(r => r.exempt !== 1);
+          for (const old of prunePlan(candidates, BACKUP_RETENTION_KEEP)) {
             if (old.filePath) unlinkWithRetry(old.filePath);
             if (old.filePath) unlinkWithRetry(manifestPathFor(old.filePath));
             // Honest retention: only drop the log row when the bytes are
@@ -1371,7 +1386,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const rows = db.prepare('SELECT * FROM backups_log ORDER BY created_at DESC, rowid DESC').all() as unknown as {
         id: string; filename: string; file_path: string; file_size_bytes: number;
         sha256_checksum: string; sales_count: number; products_count: number;
-        status: string; created_at: string;
+        status: string; created_at: string; exempt?: number;
       }[];
       const out: BackupMetadata[] = [];
       for (const r of rows) {
@@ -1397,7 +1412,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           id: r.id, filename: r.filename, filePath: r.file_path, fileSizeBytes: r.file_size_bytes,
           sha256Checksum: r.sha256_checksum, salesCount: r.sales_count, productsCount: r.products_count,
           status: r.status as BackupMetadata['status'], createdAt: r.created_at,
-          label, appVersion, schemaVersion,
+          label, appVersion, schemaVersion, exempt: r.exempt === 1,
         });
       }
       return out;
@@ -1514,6 +1529,61 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         success: true, quarantineBackupPath: qfile,
         restoredBackupPath: path.resolve(dbPath), restoredAt: new Date().toISOString(),
       };
+    },
+
+    factoryReset(archiveRef: string, actor: string): { cleared: Record<string, number>; archive: string } {
+      // P3 (v1.4.4): legal clean-start. The VERIFIED exempt pre-reset archive
+      // must exist and match its bytes — the reset never runs without proof
+      // the old chain is preserved. Append-only triggers are dropped and
+      // rebuilt inside the same Immediate transaction (never left dropped).
+      const row = db.prepare(
+        `SELECT file_path AS fp, sha256_checksum AS sha, status, exempt FROM backups_log
+         WHERE file_path = ? OR filename = ? ORDER BY created_at DESC LIMIT 1`,
+      ).get(archiveRef, archiveRef) as
+        | { fp: string; sha: string; status: string; exempt: number }
+        | undefined;
+      if (!row || row.exempt !== 1 || row.status !== 'VERIFIED') {
+        throw new Error('[db] factory-reset refused: no VERIFIED exempt pre-reset archive');
+      }
+      if (!fs.existsSync(row.fp)) throw new Error('[db] factory-reset refused: archive file missing');
+      const actual = createHash('sha256').update(fs.readFileSync(row.fp)).digest('hex');
+      if (actual.toLowerCase() !== row.sha.toLowerCase()) {
+        throw new Error('[db] factory-reset refused: archive checksum mismatch');
+      }
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const saved = db.prepare(
+          `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN
+           ('trg_sales_no_delete', 'trg_sale_items_no_delete', 'trg_settlements_no_delete', 'trg_audit_no_delete')`,
+        ).all() as { name: string; sql: string }[];
+        for (const t of saved) db.exec(`DROP TRIGGER IF EXISTS "${t.name.replace(/"/g, '""')}"`);
+        const cleared: Record<string, number> = {};
+        const tables = [
+          // Children before parents (foreign_keys=ON aborts parent-first deletes).
+          'sale_items', 'client_settlements', 'purchase_items', 'purchases',
+          'supplier_payments', 'void_log', 'cash_movements', 'cash_sessions',
+          'z_reports', 'inventory_losses', 'sales',
+          'seq', 'active_cart_draft', 'audit_log',
+        ];
+        for (const table of tables) {
+          const exists = db.prepare(
+            `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+          ).get(table) as { name: string } | undefined;
+          if (!exists) continue;
+          const r = db.prepare(`DELETE FROM "${table.replace(/"/g, '""')}"`).run();
+          cleared[table] = Number(r.changes ?? 0);
+        }
+        for (const t of saved) db.exec(t.sql);
+        logAuditRow(db, {
+          actor, action: 'factory_reset',
+          detail: `clean start by ${actor}; pre-reset archive ${row.fp} sha ${row.sha.slice(0, 16)}…`,
+        });
+        db.exec('COMMIT');
+        return { cleared, archive: row.fp };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already failed */ }
+        throw e;
+      }
     },
 
     nextInvoiceNumber(year: number): string {

@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 7;
+pub const LATEST_SCHEMA_VERSION: i64 = 8;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -152,6 +152,18 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         conn.execute_batch("PRAGMA user_version = 7;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v7 → v8 P3 (v1.4.4): retention-exempt flag for pre-reset safety archives.
+    // Fresh files get it from schema.sql; legacy files climb here.
+    if v < 8 {
+        if !has_col("backups_log", "exempt")? {
+            conn.execute_batch(
+                "ALTER TABLE backups_log ADD COLUMN exempt INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 8;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -815,6 +827,174 @@ pub fn backup_db(conn: &Connection, dest: &str) -> Result<Value, String> {
     Ok(serde_json::json!({ "path": dest, "bytes": bytes }))
 }
 
+/// P3 (v1.4.4): register a hot snapshot (usually just taken by `backup_db`)
+/// in `backups_log` with the retention-exempt flag when it is a pre-reset
+/// safety archive. Computes size + SHA-256 over the file bytes itself.
+pub fn register_backup(
+    conn: &Connection,
+    id: &str,
+    dest: &str,
+    label: &str,
+    app_version: &str,
+    exempt: bool,
+) -> Result<Value, String> {
+    let bytes = std::fs::read(dest).map_err(|e| format!("[fiscal] snapshot unreadable: {e}"))?;
+    let sha: String = crate::auth::sha256_bytes(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let size = bytes.len() as i64;
+    let sales: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let products: i64 = conn
+        .query_row("SELECT COUNT(*) FROM products", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let schema: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let filename = dest.rsplit(['/', '\\']).next().unwrap_or(dest);
+    conn.execute(
+        "INSERT INTO backups_log (id, filename, file_path, file_size_bytes, sha256_checksum,
+          sales_count, products_count, status, created_at, exempt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'VERIFIED', datetime('now'), ?8)",
+        rusqlite::params![
+            id,
+            filename,
+            dest,
+            size,
+            sha,
+            sales,
+            products,
+            if exempt { 1 } else { 0 }
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "id": id, "filename": filename, "filePath": dest,
+        "fileSizeBytes": size, "sha256Checksum": sha,
+        "salesCount": sales, "productsCount": products,
+        "status": "VERIFIED", "label": label,
+        "appVersion": app_version, "schemaVersion": schema,
+        "exempt": exempt,
+    }))
+}
+
+/// P3 (v1.4.4): audited clean-start — the mirror of the TS `factoryReset`.
+/// Refuses unless a VERIFIED exempt pre-reset archive exists and matches its
+/// bytes. Append-only triggers are dropped and rebuilt inside the same
+/// Immediate transaction (never left dropped); the audit log restarts with a
+/// single genesis row citing the archive.
+pub fn factory_reset(conn: &Connection, archive_ref: &str, actor: &str) -> Result<Value, String> {
+    let (fp, sha): (String, String) = conn
+        .query_row(
+            "SELECT file_path, sha256_checksum FROM backups_log
+             WHERE (file_path = ?1 OR filename = ?1) AND exempt = 1 AND status = 'VERIFIED'
+             ORDER BY created_at DESC LIMIT 1",
+            [archive_ref],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            "[fiscal] factory-reset refused: no VERIFIED exempt pre-reset archive".to_string()
+        })?;
+    let bytes = std::fs::read(&fp)
+        .map_err(|_| "[fiscal] factory-reset refused: archive file missing".to_string())?;
+    let actual: String = crate::auth::sha256_bytes(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual.to_lowercase() != sha.to_lowercase() {
+        return Err("[fiscal] factory-reset refused: archive checksum mismatch".to_string());
+    }
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| e.to_string())?;
+    let run = || -> Result<serde_json::Map<String, Value>, String> {
+        let mut triggers: Vec<(String, String)> = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN
+                     ('trg_sales_no_delete', 'trg_sale_items_no_delete',
+                      'trg_settlements_no_delete', 'trg_audit_no_delete')",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                triggers.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+        for (name, _) in &triggers {
+            conn.execute_batch(&format!(
+                "DROP TRIGGER IF EXISTS \"{}\";",
+                name.replace('"', "\"\"")
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        // Children before parents (foreign_keys=ON aborts parent-first deletes).
+        let tables = [
+            "sale_items",
+            "client_settlements",
+            "purchase_items",
+            "purchases",
+            "supplier_payments",
+            "void_log",
+            "cash_movements",
+            "cash_sessions",
+            "z_reports",
+            "inventory_losses",
+            "sales",
+            "seq",
+            "active_cart_draft",
+            "audit_log",
+        ];
+        let mut cleared = serde_json::Map::new();
+        for table in tables {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if exists == 0 {
+                continue;
+            }
+            let n = conn
+                .execute(
+                    &format!("DELETE FROM \"{}\";", table.replace('"', "\"\"")),
+                    [],
+                )
+                .map_err(|e| e.to_string())?;
+            cleared.insert(table.to_string(), serde_json::json!(n as i64));
+        }
+        for (_, sql) in &triggers {
+            conn.execute_batch(sql).map_err(|e| e.to_string())?;
+        }
+        conn.execute(
+            "INSERT INTO audit_log (ts, actor, action, entity, entity_id, detail)
+             VALUES (datetime('now'), ?1, 'factory_reset', '', '', ?2)",
+            rusqlite::params![
+                actor,
+                format!("clean start by {actor}; pre-reset archive {fp}")
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(cleared)
+    };
+    match run() {
+        Ok(cleared) => {
+            conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "cleared": cleared, "archive": fp }))
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,7 +1130,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, LATEST_SCHEMA_VERSION);
         // Regime v7: the climb also adds per-sale tva/timbre flags on legacy files.
         let has_regime: i64 = conn
             .query_row(
@@ -960,6 +1140,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(has_regime, 2);
+        // Reset-safety v8: the climb adds the retention-exempt flag on legacy files.
+        let has_exempt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('backups_log') WHERE name = 'exempt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_exempt, 1);
         // #004: the climb also adds close_kind (DAY lock marker) on legacy files.
         let has_kind: i64 = conn
             .query_row(
@@ -1201,5 +1390,80 @@ mod tests {
         assert_eq!(n, 1);
         let _ = std::fs::remove_file(&dest);
         assert!(backup_db(&db, "snap.txt").is_err()); // .db suffix contract
+    }
+
+    #[test]
+    fn factory_reset_refuses_then_wipes_with_genesis() {
+        // P3 (v1.4.4): no exempt archive → refused; with one → trial books
+        // cleared, triggers rebuilt, single genesis audit row.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("R-1")), &sale_items()).unwrap();
+        assert!(factory_reset(&db, "missing.db", "owner").is_err());
+        let dir = std::env::temp_dir().join("baraka-reset-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let arc = dir.join("pre-reset.db");
+        std::fs::write(&arc, b"archive-bytes").unwrap();
+        let sha: String = crate::auth::sha256_bytes(b"archive-bytes")
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect();
+        db.execute(
+            "INSERT INTO backups_log (id, filename, file_path, file_size_bytes, sha256_checksum, sales_count, products_count, status, created_at, exempt)
+             VALUES ('a1','pre-reset.db',?1,13,?2,1,0,'VERIFIED',datetime('now'),1)",
+            rusqlite::params![arc.to_str().unwrap(), sha],
+        )
+        .unwrap();
+        let out = factory_reset(&db, arc.to_str().unwrap(), "owner").unwrap();
+        assert_eq!(out["cleared"]["sales"], 1);
+        let n: i64 = db
+            .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        let (action, detail): (String, String) = db
+            .query_row(
+                "SELECT action, detail FROM audit_log ORDER BY rowid",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(action, "factory_reset");
+        assert!(detail.contains("clean start"));
+        // Guards rebuilt: new inserts protected again.
+        record_sale(&mut db, &sale_header(Some("R-2")), &sale_items()).unwrap();
+        assert!(db.execute("DELETE FROM sales", []).is_err());
+        let _ = std::fs::remove_file(&arc);
+    }
+
+    #[test]
+    fn register_backup_logs_exempt_row() {
+        // P3 (v1.4.4): a hot snapshot file gets a VERIFIED exempt log row
+        // with its true size + sha — the reset gate's proof.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("G-1")), &sale_items()).unwrap();
+        let dir = std::env::temp_dir().join("baraka-register-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join("snap.db");
+        let _ = std::fs::remove_file(&dest);
+        backup_db(&db, dest.to_str().unwrap()).unwrap();
+        let out = register_backup(
+            &db,
+            "g1",
+            dest.to_str().unwrap(),
+            "pre-reset",
+            "1.4.4",
+            true,
+        )
+        .unwrap();
+        assert_eq!(out["exempt"], true);
+        assert_eq!(out["salesCount"], 1);
+        let (status, exempt): (String, i64) = db
+            .query_row(
+                "SELECT status, exempt FROM backups_log WHERE id = 'g1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((status.as_str(), exempt), ("VERIFIED", 1));
+        let _ = std::fs::remove_file(&dest);
     }
 }

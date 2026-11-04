@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  collectLocalSnapshotData, buildLocalSnapshot, restoreLocalSnapshot,
+  collectLocalSnapshotData, buildLocalSnapshot, restoreLocalSnapshot, restoreLocalSnapshotKeys,
   type SnapshotStore,
 } from './local-snapshot.js';
 import { APP_VERSION } from './version.js';
@@ -64,4 +64,25 @@ test('local-snapshot: version drift warns but restores', async () => {
   const res = await restoreLocalSnapshot(JSON.stringify(env), memStore());
   assert.equal(res.warnings.length, 1);
   assert.match(res.warnings[0], /version drift/);
+});
+
+test('local-snapshot P3: selective restore writes only the allowed scope (suppliers), tamper still fails', async () => {
+  const src = memStore({
+    baraka_suppliers_v2: '[{"id":1}]',
+    baraka_products_v2: '[{"id":9}]',
+    baraka_clients_v2: '[{"id":3}]',
+  });
+  const text = await buildLocalSnapshot(src);
+  const dst = memStore();
+  const res = await restoreLocalSnapshotKeys(text, dst, ['baraka_suppliers_v2']);
+  assert.deepEqual(res.keys, ['baraka_suppliers_v2']);
+  assert.equal(dst.dump()['baraka_suppliers_v2'], '[{"id":1}]');
+  assert.equal(dst.dump()['baraka_products_v2'], undefined);
+  assert.equal(dst.dump()['baraka_clients_v2'], undefined);
+  // Same tamper gate as full restore.
+  const env = JSON.parse(text) as Record<string, any>;
+  env['data']['baraka_suppliers_v2'] = [{ id: 666 }];
+  await assert.rejects(() => restoreLocalSnapshotKeys(JSON.stringify(env), memStore(), ['baraka_suppliers_v2']), /checksum mismatch/);
+  // Empty scope selection fails closed.
+  await assert.rejects(() => restoreLocalSnapshotKeys(text, memStore(), []), /none of the selected keys/);
 });

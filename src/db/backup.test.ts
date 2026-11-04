@@ -234,3 +234,23 @@ test('backup-pro: retention keeps newest 30, prunes files + sidecars + rows', as
   b.close();
   for (const p of new Set(made)) { fs.rmSync(p, { force: true }); fs.rmSync(`${p}.manifest.json`, { force: true }); }
 });
+
+test('backup-pro P3: exempt pre-reset archive survives retention flood', () => {
+  const dbPath = tmpDb('exempt.db');
+  const b = openBarakaDb(dbPath);
+  const safe = b.createDatabaseBackup({ destinationDir: TMP, label: 'pre-reset', exempt: true });
+  assert.equal(safe.exempt, true);
+  const made: string[] = [safe.filePath];
+  for (let i = 0; i < 31; i++) {
+    made.push(b.createDatabaseBackup({ destinationDir: TMP, label: 'flood' }).filePath);
+  }
+  const listed = b.listDatabaseBackups();
+  const kept = listed.find(l => l.filePath === safe.filePath);
+  assert.ok(kept, 'exempt archive still listed after 31 newer backups');
+  assert.equal(kept!.exempt, true);
+  assert.equal(fs.existsSync(safe.filePath), true);
+  // 30 newest non-exempt + 1 exempt = 31 rows total.
+  assert.equal(listed.length, 31);
+  b.close();
+  for (const p of new Set(made)) { fs.rmSync(p, { force: true }); fs.rmSync(`${p}.manifest.json`, { force: true }); }
+});

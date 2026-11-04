@@ -50,7 +50,18 @@ export const buildLocalSnapshot = async (store: SnapshotStore): Promise<string> 
 
 export interface LocalRestoreResult { keys: string[]; warnings: string[]; }
 
-export const restoreLocalSnapshot = async (json: string, store: SnapshotStore): Promise<LocalRestoreResult> => {
+export const restoreLocalSnapshot = async (json: string, store: SnapshotStore): Promise<LocalRestoreResult> =>
+  restoreLocalSnapshotKeys(json, store, null);
+
+/**
+ * P3 (v1.4.4): scope-limited restore — same fail-closed envelope (app tag,
+ * version, SHA-256) but only the allow-listed keys are written. `allowKeys`
+ * null restores everything (full restore). Unknown or foreign keys are
+ * never written.
+ */
+export const restoreLocalSnapshotKeys = async (
+  json: string, store: SnapshotStore, allowKeys: string[] | null,
+): Promise<LocalRestoreResult> => {
   let env: LocalSnapshotEnvelope;
   try { env = JSON.parse(json) as LocalSnapshotEnvelope; }
   catch { throw new Error('not JSON'); }
@@ -70,9 +81,10 @@ export const restoreLocalSnapshot = async (json: string, store: SnapshotStore): 
   const keys: string[] = [];
   for (const [k, v] of Object.entries(env.data)) {
     if (!k.startsWith('baraka_')) continue; // never write foreign keys
+    if (allowKeys && !allowKeys.includes(k)) continue; // P3 scope gate
     store.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
     keys.push(k);
   }
-  if (keys.length === 0) throw new Error('snapshot holds no baraka_ keys');
+  if (keys.length === 0) throw new Error(allowKeys ? 'snapshot holds none of the selected keys' : 'snapshot holds no baraka_ keys');
   return { keys, warnings };
 };

@@ -544,8 +544,27 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
   // ADR-015-MKT: online backup + disaster recovery.
   app.post('/api/backups/create', (req, res) => {
     try {
-      const { label } = (req.body ?? {}) as { label?: string };
-      res.status(201).json({ success: true, ...baraka.createDatabaseBackup({ label }) });
+      const { label, exempt } = (req.body ?? {}) as { label?: string; exempt?: boolean };
+      res.status(201).json({ success: true, ...baraka.createDatabaseBackup({ label, exempt }) });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // P3 (v1.4.4): audited clean-start. Token-guarded (local machine only);
+  // the actor must verify as owner-PIN through /users/verify semantics —
+  // enforced here by role lookup, never trusted from the client alone.
+  app.post('/api/admin/factory-reset', (req, res) => {
+    try {
+      const { archiveRef, actor } = (req.body ?? {}) as { archiveRef?: string; actor?: string };
+      if (typeof archiveRef !== 'string' || typeof actor !== 'string' || !actor) {
+        res.status(400).json({ error: 'body must be {archiveRef, actor}' }); return;
+      }
+      const u = baraka.listUsers().find(x => x.username === actor);
+      if (!u || u.role !== 'owner' || u.active !== 1) {
+        res.status(403).json({ error: '[reset] owner required' }); return;
+      }
+      res.status(200).json({ success: true, ...baraka.factoryReset(archiveRef, actor) });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

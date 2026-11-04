@@ -144,6 +144,8 @@ export interface BackupMetadata {
   label?: string;
   appVersion?: string;
   schemaVersion?: number;
+  /** P3 (v1.4.4): retention-exempt safety archive (pre-reset) — never pruned. */
+  exempt?: boolean;
 }
 
 export interface BackupValidationReport {

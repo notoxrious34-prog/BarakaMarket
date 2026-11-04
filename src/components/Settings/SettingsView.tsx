@@ -20,11 +20,17 @@ const PURGE_KEYS = [
 ];
 
 const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
-  const { session, factoryResetDemo } = useApp();
+  const { session, factoryResetSafe, restoreReferenceScope } = useApp();
   const [msg, setMsg] = useState('');
   const [resetPin, setResetPin] = useState('');
   const [resetBusy, setResetBusy] = useState(false);
+  const [scopeProducts, setScopeProducts] = useState(true);
+  const [scopeSuppliers, setScopeSuppliers] = useState(true);
+  const [scopeClients, setScopeClients] = useState(true);
+  const [scopeWorkers, setScopeWorkers] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
   const isOwner = session?.role === 'owner';
+  const isManager = isOwner || session?.role === 'manager';
 
   const purge = async () => {
     if (!isOwner || !session) return;
@@ -69,15 +75,18 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
       </button>
       {msg && <p className="text-xs text-amber-200">{msg}</p>}
 
-      {/* Owner order 2026-11-03: «بداية نظيفة» — full clean start for real
-          shop use. Wipes demo/operational data, keeps users (SQLite), store
-          identity, license, language. Owner PIN required. */}
+      {/* P3 (v1.4.4): guarded clean-start — mandatory exempt safety snapshot
+          first, audited native wipe (numbering restarts 000001), then local
+          wipe. Users/SQLite identity, store profile and license are kept. */}
       <div className="border-t border-rose-800/50 pt-3 space-y-2">
-        <p className="text-xs text-slate-400">
-          {isAr
-            ? 'بداية نظيفة للاستخدام الحقيقي: يمسح كل المنتجات/الموردين/العملاء/المشتريات/المبيعات التجريبية ويُبقي المستخدمين والهوية والرخصة.'
-            : 'Démarrage à neuf pour usage réel : efface démo (produits/fournisseurs/clients/achats/ventes), garde utilisateurs, identité, licence.'}
+        <p className="text-xs font-bold text-rose-200">
+          {isAr ? 'بداية آمنة للاستخدام الحقيقي (3 خطوات محمية)' : 'Démarrage sécurisé (3 étapes gardées)'}
         </p>
+        <ol className="text-xs text-slate-400 space-y-1 list-decimal list-inside">
+          <li>{isAr ? 'لقطة أمان إجبارية معفاة من الحذف (تُحفظ تلقائياً قبل أي مسح)' : 'Snapshot de sécurité obligatoire, exempté de purge (pris avant tout effacement)'}</li>
+          <li>{isAr ? 'تصفير أصلي مدقق: مسح دفاتر التجربة + الترقيم يعود 000001' : 'Effacement audité : livres d’essai purgés, numérotation repart à 000001'}</li>
+          <li>{isAr ? 'مسح محلي: المنتجات/الموردون/العملاء/المشتريات/المصاريف — تُحفظ الهوية والرخصة' : 'Purge locale : produits/fournisseurs/clients/achats/frais — identité et licence gardées'}</li>
+        </ol>
         <div className="flex items-center gap-2 flex-wrap">
           <input
             type="password"
@@ -92,12 +101,15 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
             onClick={() => void (async () => {
               if (!isOwner || resetBusy) return;
               const ok = window.confirm(isAr
-                ? 'تأكيد نهائي: مسح كل البيانات التجريبية والبدء من الصفر؟ (المستخدمون والهوية والرخصة محفوظة)'
-                : 'Confirmation finale : tout effacer et repartir de zéro ? (Utilisateurs, identité, licence conservés)');
+                ? 'تأكيد نهائي: لقطة أمان إجبارية ثم تصفير كامل والترقيم يعود 000001؟ (المستخدمون والهوية والرخصة محفوظة)'
+                : 'Confirmation finale : snapshot de sécurité puis effacement total, numérotation à 000001 ? (Utilisateurs, identité, licence conservés)');
               if (!ok) return;
               setResetBusy(true);
               try {
-                await factoryResetDemo(resetPin);
+                const out = await factoryResetSafe(resetPin);
+                setMsg(isAr
+                  ? `تم التصفير الآمن — الأرشيف: ${out.archive} — جارٍ إعادة التشغيل…`
+                  : `Reset sécurisé — archive : ${out.archive} — redémarrage…`);
               } catch (e) {
                 setMsg(isAr ? `مرفوض: ${(e as Error).message}` : `Refusé : ${(e as Error).message}`);
                 setResetBusy(false);
@@ -106,8 +118,59 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
             disabled={!isOwner || resetBusy || resetPin.length === 0}
             className={`px-4 py-2 rounded-xl text-xs font-bold ${isOwner && resetPin.length > 0 ? 'bg-rose-700 hover:bg-rose-600 text-white cursor-pointer' : 'bg-slate-700 text-slate-400 cursor-not-allowed'}`}
           >
-            {isAr ? 'بداية نظيفة (مسح التجريبي)' : 'Démarrage à neuf'}
+            {isAr ? 'بداية آمنة (لقطة + تصفير)' : 'Démarrage sécurisé'}
           </button>
+        </div>
+      </div>
+      {/* P3 (v1.4.4): selective restore — reference master-data only.
+          Movements, seq counters and carts are never restored. */}
+      <div className="border-t border-rose-800/50 pt-3 space-y-2">
+        <p className="text-xs font-bold text-rose-200">
+          {isAr ? 'استعادة انتقائية للمرجعية فقط' : 'Restauration sélective (référentiel)'}
+        </p>
+        <p className="text-xs text-slate-400">
+          {isAr
+            ? 'من ملف لقطة محلية: تُسترجع المنتجات/الموردون/ديون الزبائن/العمال فقط — الحركات والترقيم لا تُمسّ.'
+            : 'Depuis un snapshot local : produits/fournisseurs/dettes/workers uniquement — mouvements et numérotation intacts.'}
+        </p>
+        <div className="flex items-center gap-3 flex-wrap text-xs text-slate-300">
+          {([
+            [scopeProducts, setScopeProducts, isAr ? 'المنتجات' : 'Produits'],
+            [scopeSuppliers, setScopeSuppliers, isAr ? 'الموردون' : 'Fournisseurs'],
+            [scopeClients, setScopeClients, isAr ? 'ديون الزبائن' : 'Dettes clients'],
+            [scopeWorkers, setScopeWorkers, isAr ? 'العمال' : 'Workers'],
+          ] as [boolean, (v: boolean) => void, string][]).map(([v, set, label]) => (
+            <label key={label} className="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" checked={v} disabled={!isManager || restoreBusy} onChange={e => set(e.target.checked)} className="accent-emerald-500 w-4 h-4" />
+              <span>{label}</span>
+            </label>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            type="file"
+            accept="application/json,.json"
+            disabled={!isManager || restoreBusy}
+            onChange={e => void (async () => {
+              const f = e.target.files?.[0];
+              if (!f || !isManager) return;
+              setRestoreBusy(true);
+              try {
+                const text = await f.text();
+                const keys = await restoreReferenceScope(text, {
+                  products: scopeProducts, suppliers: scopeSuppliers, clients: scopeClients, workers: scopeWorkers,
+                });
+                setMsg(isAr
+                  ? `تمت الاستعادة الانتقائية (${keys.length}): ${keys.join('، ')} — جارٍ إعادة التحميل…`
+                  : `Restauration sélective (${keys.length}) : ${keys.join(', ')} — rechargement…`);
+                window.setTimeout(() => window.location.reload(), 1500);
+              } catch (err) {
+                setMsg(isAr ? `مرفوضة: ${(err as Error).message}` : `Refusée : ${(err as Error).message}`);
+                setRestoreBusy(false);
+              }
+            })()}
+            className="text-xs text-slate-300 file:mr-2 file:px-3 file:py-1.5 file:rounded-lg file:text-xs file:font-bold file:bg-emerald-700 file:text-white hover:file:bg-emerald-600 file:border-0 file:cursor-pointer"
+          />
         </div>
       </div>
     </div>

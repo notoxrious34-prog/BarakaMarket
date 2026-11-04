@@ -12,6 +12,8 @@ interface BackupRow {
   sha256Checksum: string; salesCount: number; productsCount: number;
   status: 'VERIFIED' | 'CORRUPT' | 'RESTORED'; createdAt: string;
   label?: string; appVersion?: string; schemaVersion?: number;
+  /** P3 (v1.4.4): pre-reset safety archive — never pruned. */
+  exempt?: boolean;
 }
 
 export const BackupManagerView: React.FC = () => {
@@ -78,6 +80,8 @@ export const BackupManagerView: React.FC = () => {
   const card = 'bg-[#101724] border border-[#1e293b] rounded-xl p-4';
   const totalBytes = rows.reduce((a, b) => a + b.fileSizeBytes, 0);
   const last = rows[0];
+  // P3: retention counts non-exempt snapshots only; exempt safety archives sit outside the 30.
+  const retainedCount = rows.filter(b => b.exempt !== true).length;
 
   return (
     <div className="space-y-4">
@@ -100,7 +104,7 @@ export const BackupManagerView: React.FC = () => {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-[11px]">
         <div className="bg-[#0b0f17] border border-[#2b3a4f] rounded-lg p-2">
           <div className="text-slate-500">{isAr ? 'النسخ' : 'Snapshots'}</div>
-          <div className="text-white font-bold font-mono" dir="ltr">{rows.length} / 30</div>
+          <div className="text-white font-bold font-mono" dir="ltr">{retainedCount} / 30</div>
         </div>
         <div className="bg-[#0b0f17] border border-[#2b3a4f] rounded-lg p-2">
           <div className="text-slate-500">{isAr ? 'الحجم الكلي' : 'Taille totale'}</div>
@@ -134,6 +138,7 @@ export const BackupManagerView: React.FC = () => {
             </div>
             <div className="text-slate-500 font-mono mt-0.5">
               {b.label && <span className="text-sky-300">[{b.label}] </span>}
+              {b.exempt === true && <span className="text-amber-300 font-bold">{isAr ? '[أمان — معفاة من الحذف] ' : '[sécurité — exemptée] '}</span>}
               {b.appVersion && <span>v{b.appVersion} </span>}
               {typeof b.schemaVersion === 'number' && b.schemaVersion > 0 && <span>schema v{b.schemaVersion} </span>}
             </div>
