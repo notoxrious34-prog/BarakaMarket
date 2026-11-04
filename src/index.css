@@ -229,6 +229,7 @@ html.light .brand-chip {
     left: 0;
     top: 0;
     width: 210mm !important;
+    max-width: none !important;
     min-height: 297mm !important;
     margin: 0 !important;
     padding: 15mm !important;

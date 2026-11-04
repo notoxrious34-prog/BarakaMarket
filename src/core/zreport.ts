@@ -126,3 +126,27 @@ export function crossCheckLedger(
   ];
   return fields.filter(f => acc[f] !== report[f]).map(f => String(f));
 }
+
+/**
+ * Z2/Z6-fix (v1.4.5): ONE rule for the hash the ticket shows.
+ * Closed  → the stored server hash (never recomputed client-side).
+ * Open    → an explicitly provisional preview over the DISPLAYED number,
+ *           so the hash always matches the number printed above it.
+ */
+export function previewChainHash(input: {
+  closureHash: string | null;
+  prevHash: string;
+  reportNumber: string;
+  date: string;
+  totalTtcCt: number;
+  totalTimbreCt: number;
+}): { hash: string; provisional: boolean } {
+  if (input.closureHash) return { hash: input.closureHash, provisional: false };
+  return {
+    hash: computeZHash(
+      input.prevHash, input.reportNumber, input.date,
+      input.totalTtcCt, input.totalTimbreCt,
+    ),
+    provisional: true,
+  };
+}

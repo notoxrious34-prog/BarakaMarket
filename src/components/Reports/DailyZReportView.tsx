@@ -4,7 +4,8 @@ import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
 import { commitZClose, fetchDailyZ } from '../../core/fiscal-authority';
-import { computeZHash, GENESIS_PREV_HASH } from '../../core/zreport';
+import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
+import { APP_VERSION } from '../../core/version';
 import {
   FileText,
   Printer,
@@ -19,12 +20,15 @@ import {
 } from 'lucide-react';
 
 export const DailyZReportView: React.FC = () => {
-  const { generateDailyZReport, sales, expenses, storeProfile, language, session, voidSale } = useApp();
+  const { generateDailyZReport, sales, settlements, expenses, storeProfile, language, session, voidSale } = useApp();
   const isAr = language === 'ar';
   const canVoid = can(session?.role ?? 'cashier', 'sale.void');
   const canClose = can(session?.role ?? 'cashier', 'z.close');
 
-  const [zReport] = useState(() => generateDailyZReport());
+  // Z3-fix: the report is LIVE — recomputed whenever today's sales or
+  // settlements change (mount-once state used to freeze the close payload).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const zReport = useMemo(() => generateDailyZReport(), [sales, settlements]);
   const [voidTargetId, setVoidTargetId] = useState<string | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [voidBusy, setVoidBusy] = useState(false);
@@ -124,7 +128,8 @@ export const DailyZReportView: React.FC = () => {
     esp: ct.esp, bank: ct.cib, cred: ct.cred, coll: ct.coll,
     first: firstInvoice, last: lastInvoice,
   };
-  const tvClosedAt = closedRow?.closing_time ?? zReport.closed_at;
+  // Z10-fix: no fake closing time on an open day — '…' until FINALISÉ.
+  const tvClosedAt = closedRow?.closing_time ?? '…';
   const tvReportNo = closure ? closure.report_number : zReport.report_number;
 
   // #003: today's rows for the legal-void surface (COMPLETED voids first,
@@ -149,7 +154,14 @@ export const DailyZReportView: React.FC = () => {
     }
   };
 
-  const chainHash = closure?.hash ?? computeZHash(prevHash, zReport.report_number, zReport.date, ct.ttc, ct.timbre);
+  // Z2/Z6-fix: ONE display rule — closed shows the stored server hash,
+  // open shows a provisional preview over the DISPLAYED number.
+  const chainMeta = previewChainHash({
+    closureHash: closure?.hash ?? null,
+    prevHash, reportNumber: tvReportNo, date: zReport.date,
+    totalTtcCt: ct.ttc, totalTimbreCt: ct.timbre,
+  });
+  const chainHash = chainMeta.hash;
   const shortHash = (h: string) => `${h.slice(0, 10)}…${h.slice(-6)}`;
 
   const handlePrintZ = () => {
@@ -215,7 +227,7 @@ export const DailyZReportView: React.FC = () => {
           </div>
           <button
             onClick={() => void handleClose()}
-            disabled={closing || !!closure || !canClose}
+            disabled={closing || !!closure || dayLocked || !canClose}
             title={!canClose ? (isAr ? 'الإغلاق للمدير فأعلى' : 'Clôture réservée au gérant+') : undefined}
             className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 cursor-pointer"
           >
@@ -270,15 +282,26 @@ export const DailyZReportView: React.FC = () => {
             <span className="text-[10px] text-slate-500 mt-0.5 block">{isAr ? 'المادة 136 قانون الطابع' : 'Art. 136 Code du Timbre'}</span>
           </div>
 
-          {/* P2 (v1.4.4): day expenses justify the till gap — display only, close payload untouched. */}
+          {/* P2 (v1.4.4): day expenses justify the till gap. Z4-fix: honest split —
+              only till-posted money left the drawer; hors-caisse never touched Z. */}
           <div className="bg-[#111722] border border-amber-600/30 rounded-xl p-3.5 shadow-sm">
             <span className="text-[11px] text-slate-400 font-semibold uppercase">{isAr ? 'مصاريف اليوم (تبرر الفرق)' : 'Dépenses du jour'}</span>
-            <div className="text-xl font-black text-amber-300 font-mono mt-1">
-              {formatDZD(expenses.filter(e => e.date === zReport.date).reduce((s, e) => s + e.amountCt, 0) / 100, false)}
-            </div>
-            <span className="text-[10px] text-slate-500 mt-0.5 block">
-              {expenses.filter(e => e.date === zReport.date).length} {isAr ? 'مصروف — تُخصم من النظري تلقائياً' : 'dépenses — déduites du théorique'}
-            </span>
+            {(() => {
+              const dayExp = expenses.filter(e => e.date === zReport.date);
+              const tillCt = dayExp.filter(e => e.tillPosted).reduce((s, e) => s + e.amountCt, 0);
+              const horsCt = dayExp.filter(e => !e.tillPosted).reduce((s, e) => s + e.amountCt, 0);
+              return (
+                <>
+                  <div className="text-xl font-black text-amber-300 font-mono mt-1">
+                    {formatDZD((tillCt + horsCt) / 100, false)}
+                  </div>
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                    {dayExp.length} {isAr ? 'مصروف' : 'dépenses'} — {isAr ? 'من الصندوق:' : 'caisse:'} <strong dir="ltr">{formatDZD(tillCt / 100, false)}</strong>
+                    {' • '}{isAr ? 'خارج الصندوق:' : 'hors-caisse:'} <strong dir="ltr">{formatDZD(horsCt / 100, false)}</strong>
+                  </span>
+                </>
+              );
+            })()}
           </div>
         </div>
 
@@ -386,6 +409,11 @@ export const DailyZReportView: React.FC = () => {
                   <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-rose-950/60 text-rose-300 border border-rose-900/60">
                     {isAr ? 'ملغاة' : 'ANNULÉE'}
                   </span>
+                ) : s.is_provisional ? (
+                  // Z5-fix: a DRAFT row is not fiscal yet — no lane can void it.
+                  <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-amber-950/60 text-amber-300 border border-amber-900/60" title={isAr ? 'مؤقت — ليس بعد في الدفتر الجبائي' : 'Provisoire — pas encore au journal fiscal'}>
+                    {isAr ? 'مؤقت' : 'PROV'}
+                  </span>
                 ) : (dayLocked || closedRow) ? (
                   <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-slate-800/60 text-slate-400 border border-slate-700/60" title={isAr ? 'اليوم مقفل قانونياً' : 'Jour verrouillé'}>
                     <Lock className="w-3 h-3 inline" />
@@ -441,7 +469,7 @@ export const DailyZReportView: React.FC = () => {
 
         {format === 'A4' ? (
         <div
-          id="printable-receipt"
+          id="printable-facture-a4"
           dir="ltr"
           className="w-full max-w-[640px] bg-white text-black p-8 font-mono text-xs leading-relaxed shadow-2xl border border-slate-300 select-text text-start"
           style={{ fontFamily: "'Courier New', Courier, monospace" }}
@@ -451,26 +479,29 @@ export const DailyZReportView: React.FC = () => {
             <div className="text-xs">{storeProfile.company_owner} — {storeProfile.address}</div>
             <div className="text-[11px]">RC: {storeProfile.rc_number} | NIF: {storeProfile.nif_number} | NIS: {storeProfile.nis_number} | AI: {storeProfile.ai_number}</div>
             <div className="font-bold mt-2">RAPPORT Z DE CLÔTURE — {tvReportNo}{closure && ' (FINALISÉ)'}</div>
+            {!closure && (
+              <div className="text-[11px] font-bold">— PROVISOIRE / غير نهائي —</div>
+            )}
             <div className="text-[11px]">Date: {zReport.date} — Clôture: {tvClosedAt} — Ventes: {tv.salesCount}</div>
             <div className="text-[11px]">Factures: {tv.first} → {tv.last}</div>
             </div>
             <table className="w-full my-3 text-[11px]">
               <tbody>
-                <tr className="border-b border-black"><td>Total HT</td><td className="text-end">{tv.ht / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>TVA 0% — base</td><td className="text-end">{tv.b0 / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>TVA 9% — base / montant</td><td className="text-end">{tv.b9 / 100} / {tv.a9 / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>TVA 19% — base / montant</td><td className="text-end">{tv.b19 / 100} / {tv.a19 / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>Total TVA</td><td className="text-end">{tv.tva / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>Timbre fiscal (Art. 136)</td><td className="text-end">{tv.timbre / 100} DZD</td></tr>
-                <tr className="font-bold"><td>TOTAL TTC</td><td className="text-end">{tv.ttc / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>Total HT</td><td className="text-end">{(tv.ht / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>TVA 0% — base</td><td className="text-end">{(tv.b0 / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>TVA 9% — base / montant</td><td className="text-end">{(tv.b9 / 100).toFixed(2)} / {(tv.a9 / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>TVA 19% — base / montant</td><td className="text-end">{(tv.b19 / 100).toFixed(2)} / {(tv.a19 / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>Total TVA</td><td className="text-end">{(tv.tva / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>Timbre fiscal (Art. 136)</td><td className="text-end">{(tv.timbre / 100).toFixed(2)} DZD</td></tr>
+                <tr className="font-bold"><td>TOTAL TTC</td><td className="text-end">{(tv.ttc / 100).toFixed(2)} DZD</td></tr>
               </tbody>
             </table>
             <table className="w-full my-3 text-[11px]">
               <tbody>
-                <tr className="border-b border-black"><td>Espèces (timbre inclus)</td><td className="text-end">{tv.esp / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>CIB / Dahabiya</td><td className="text-end">{tv.bank / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>Crédit accordé</td><td className="text-end">{tv.cred / 100} DZD</td></tr>
-                <tr className="border-b border-black"><td>Crédit recouvré</td><td className="text-end">{tv.coll / 100} DZD</td></tr>
+                <tr className="border-b border-black"><td>Espèces (timbre inclus)</td><td className="text-end">{(tv.esp / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>CIB / Dahabiya</td><td className="text-end">{(tv.bank / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>Crédit accordé</td><td className="text-end">{(tv.cred / 100).toFixed(2)} DZD</td></tr>
+                <tr className="border-b border-black"><td>Crédit recouvré</td><td className="text-end">{(tv.coll / 100).toFixed(2)} DZD</td></tr>
               </tbody>
             </table>
           <div className="text-[10px] break-all border-t border-black pt-2">
@@ -501,6 +532,9 @@ export const DailyZReportView: React.FC = () => {
           <div className="py-2 border-b border-black text-center">
             <div className="font-bold text-sm uppercase">*** RAPPORT Z DE CAISSE ***</div>
             <div className="text-[10px]">CLÔTURE JOURNALIÈRE FISCALE</div>
+            {!closure && (
+              <div className="text-[10px] font-bold">— PROVISOIRE / غير نهائي —</div>
+            )}
             <div className="text-[10px] pt-1">
               {tvReportNo}{closure && ' — FINALISÉ'}
             </div>
@@ -568,7 +602,7 @@ export const DailyZReportView: React.FC = () => {
 
           <div className="text-center pt-2 space-y-0.5 text-[9px] text-slate-700">
             <div>Signé par le Caissier & Gérant</div>
-            <div className="font-semibold text-slate-500 pt-1">Baraka Market v1.0 by BarakaDEV</div>
+            <div className="font-semibold text-slate-500 pt-1">Baraka Market v{APP_VERSION} by BarakaDEV</div>
           </div>
         </div>
         )}
