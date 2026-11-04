@@ -145,7 +145,14 @@ export const CashSessionsView: React.FC = () => {
             </div>
             <button
               className={`${btn} mt-3 bg-[#1e293b] hover:bg-[#2b3a4f] text-white`}
-              onClick={() => void post(`${API}/api/cash/movement`, { sessionId: live.session.id, movementType: movType, amountCt: Math.round(Number(movAmount) * 100), reason: movReason || '-' }, isAr ? 'تم تسجيل الحركة' : 'Mouvement enregistré')}
+              onClick={() => {
+                // F3 (institutional audit): '-' is not a reason — require real text.
+                if (!movReason.trim() || !movAmount.trim() || !(Number(movAmount) > 0)) {
+                  setMsg(isAr ? 'اكتب المبلغ (> 0) وسبباً حقيقياً للحركة أولاً' : 'Saisissez un montant (> 0) et un motif réel d’abord');
+                  return;
+                }
+                void post(`${API}/api/cash/movement`, { sessionId: live.session.id, movementType: movType, amountCt: Math.round(Number(movAmount) * 100), reason: movReason.trim() }, isAr ? 'تم تسجيل الحركة' : 'Mouvement enregistré');
+              }}
             >
               {isAr ? 'تسجيل' : 'Enregistrer'}
             </button>
@@ -182,7 +189,9 @@ export const CashSessionsView: React.FC = () => {
                 disabled={closeBlocked}
                 title={closeBlocked ? (isAr ? 'اكتب سبب الفرق أولاً' : 'Motif requis d’abord') : undefined}
                 onClick={() => {
+                  // F4 (institutional audit): negative counts never reach the server.
                   if (!live || countedCt === null) { setMsg(isAr ? 'أدخل المبلغ المحسوب أولاً' : 'Saisissez le compté d’abord'); return; }
+                  if (countedCt < 0) { setMsg(isAr ? 'المبلغ المحسوب لا يكون سالباً' : 'Le compté ne peut pas être négatif'); return; }
                   void post(`${API}/api/cash/close-and-z`, { sessionId: live.session.id, countedCashCt: countedCt, notes: closeReason.trim() || undefined, printReceipt: true, actor: session?.username ?? cashier }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé');
                 }}
               >
