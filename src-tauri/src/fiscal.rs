@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 6;
+pub const LATEST_SCHEMA_VERSION: i64 = 7;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -1001,6 +1001,28 @@ mod tests {
             .map(|c| c.unwrap())
             .collect();
         assert!(cols2.contains(&"client_settlement_key".to_string()));
+    }
+
+    #[test]
+    fn migrate_reopen_after_climb_stays_ok() {
+        // Cumulative-update contract: migrate() must accept the file it just
+        // stamped. A step that writes user_version = N while LATEST stays N-1
+        // bricks EVERY native command on second launch (v1.4.0 iron outage:
+        // db_status/audit_list/login all refused with "newer than this build").
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch("PRAGMA user_version = 6;").unwrap();
+        migrate(&conn).unwrap(); // first open climbs 6 → 7
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, LATEST_SCHEMA_VERSION);
+        // Second open (app relaunch, updater restart…) must also succeed.
+        migrate(&conn).unwrap();
+        let v2: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v2, LATEST_SCHEMA_VERSION);
     }
 
     #[test]
