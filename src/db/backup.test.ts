@@ -193,7 +193,7 @@ test('backup-pro: manifest sidecar written, shaped, and agreed by validate', asy
   fs.rmSync(sidecar, { force: true });
 });
 
-test('backup-pro: retention keeps newest 30, prunes files + sidecars + rows', () => {
+test('backup-pro: retention keeps newest 30, prunes files + sidecars + rows', async () => {
   const dbPath = tmpDb('retention.db');
   const b = openBarakaDb(dbPath);
   const made: string[] = [];
@@ -203,15 +203,34 @@ test('backup-pro: retention keeps newest 30, prunes files + sidecars + rows', ()
   const listed = b.listDatabaseBackups();
   assert.equal(listed.length, 30);
   assert.equal(listed[0].filePath, made[32]);
-  // The 3 oldest are gone from disk (db file and sidecar) and from the log.
-  for (const gone of made.slice(0, 3)) {
-    assert.equal(fs.existsSync(gone), false);
-    assert.equal(fs.existsSync(`${gone}.manifest.json`), false);
+  // TRUE retention invariant (position-free): every logged backup has its
+  // bytes; every pruned backup's bytes are gone. Positional made[0..2] cannot
+  // be assumed — a pruned-then-recreated name in the same second recycles a
+  // path (same-second bursts: 33 creates < 1 s under parallel-suite load).
+  let logPaths: string[] = [];
+  try {
+    const { DatabaseSync } = await import('node:sqlite');
+    const raw = new DatabaseSync(dbPath, { readOnly: true });
+    logPaths = raw.prepare('SELECT file_path AS fp FROM backups_log ORDER BY rowid').all()
+      .map(r => (r as { fp: string }).fp);
+    raw.close();
+  } catch { /* diag best-effort */ }
+  const pruned = [...new Set(made.filter(m => !logPaths.includes(m)))];
+  const kept = [...new Set(made.filter(m => logPaths.includes(m)))];
+  const survivors: string[] = [];
+  for (const gone of pruned) {
+    if (fs.existsSync(gone)) survivors.push(`DB:${gone}`);
+    if (fs.existsSync(`${gone}.manifest.json`)) survivors.push(`MAN:${gone}`);
   }
-  for (const kept of made.slice(3)) {
-    assert.equal(fs.existsSync(kept), true);
-    assert.equal(fs.existsSync(`${kept}.manifest.json`), true);
+  if (survivors.length > 0) {
+    const dirList = fs.readdirSync(TMP).filter(f => f.includes('-ret')).length;
+    console.log(`RETENTION_DIAG survivors=${JSON.stringify(survivors)} dir_ret_files=${dirList} log_rows=${logPaths.length}`);
+  }
+  assert.equal(survivors.length, 0);
+  for (const k of kept) {
+    assert.equal(fs.existsSync(k), true);
+    assert.equal(fs.existsSync(`${k}.manifest.json`), true);
   }
   b.close();
-  for (const p of made.slice(3)) { fs.rmSync(p, { force: true }); fs.rmSync(`${p}.manifest.json`, { force: true }); }
+  for (const p of new Set(made)) { fs.rmSync(p, { force: true }); fs.rmSync(`${p}.manifest.json`, { force: true }); }
 });
