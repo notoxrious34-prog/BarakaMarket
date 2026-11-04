@@ -541,11 +541,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Boot version-shift audit: the updater can replace the binary without
     // the app's update flow running (silent auto-install) — then no
     // `update.install` row would ever exist. Any shift gets traced once.
+    // Footprint check (any other baraka_ key) distinguishes a true fresh
+    // install from an upgrade whose build predates this key (one-time
+    // catch-up: lastSeen unknown, audited as `pre-1.4.2 → current`).
     try {
       const last = localStorage.getItem(STORAGE_KEYS.LAST_SEEN_VERSION);
-      const shift = detectVersionShift(last, APP_VERSION);
+      let knownInstall = false;
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i) || '';
+          if (k.startsWith('baraka_') && k !== STORAGE_KEYS.LAST_SEEN_VERSION) { knownInstall = true; break; }
+        }
+      } catch { /* treat as fresh */ }
+      const shift = detectVersionShift(last, APP_VERSION, knownInstall);
       if (shift === 'upgraded' || shift === 'downgraded') {
-        void auditSessionEvent('system', 'update.install', `${last ?? '?'} → ${APP_VERSION} (${shift}, silent/boot-detected)`);
+        const origin = last ?? (knownInstall ? 'pre-1.4.2' : '?');
+        void auditSessionEvent('system', 'update.install', `${origin} → ${APP_VERSION} (${shift}, silent/boot-detected)`);
       }
       localStorage.setItem(STORAGE_KEYS.LAST_SEEN_VERSION, APP_VERSION);
     } catch { /* private mode */ }

@@ -15,8 +15,13 @@ function parts(v: string): number[] | null {
 export function detectVersionShift(
   lastSeen: string | null | undefined,
   current: string,
+  knownInstall = false,
 ): VersionShift {
-  if (!lastSeen) return 'fresh';
+  // One-time catch-up: the key was introduced in v1.4.2, so an upgrade from
+  // an older build arrives with NO key but a clear install footprint
+  // (license/session/products…). That must audit as an upgrade with unknown
+  // origin — otherwise the very gap this closes would swallow its own proof.
+  if (!lastSeen) return knownInstall ? 'upgraded' : 'fresh';
   if (lastSeen === current) return 'same';
   const a = parts(lastSeen);
   const b = parts(current);

@@ -5,6 +5,12 @@ import { detectVersionShift } from './version-change.js';
 test('version-change: fresh install is silent', () => {
   assert.equal(detectVersionShift(null, '1.4.2'), 'fresh');
   assert.equal(detectVersionShift('', '1.4.2'), 'fresh');
+  assert.equal(detectVersionShift(null, '1.4.2', false), 'fresh');
+});
+
+test('version-change: pre-key upgrade audits as catch-up (the 1.4.1 -> 1.4.2 iron case)', () => {
+  assert.equal(detectVersionShift(null, '1.4.2', true), 'upgraded');
+  assert.equal(detectVersionShift('', '1.4.3', true), 'upgraded');
 });
 
 test('version-change: same version, no audit', () => {
