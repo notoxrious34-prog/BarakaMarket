@@ -57,9 +57,19 @@
       NSIS `BarakaMarket-1.3.5-setup.exe` (5.13 MiB, `SIG-OK [ED]`, 3 assets, CDN live) ·
       iron saw `Installer 1.3.5 + redémarrer`, installed (`update.install 1.3.5`, footer
       `V1.3.5`, totals verified, vision PASS) · **332/332** · tsc/lint/build clean.
-- [x] Owner tasks (2026-11-02) — auto-update dry-run PASS on iron (`À jour — 1.3.3`, nothing installed) ·
+- [x] **Owner tasks (2026-11-02)** — auto-update dry-run PASS on iron (`À jour — 1.3.3`, nothing installed) ·
       reception inline new-product (manual barcode/TVA 9%/epicerie, lane-proven) ·
       products DB read-only audit clean (14 exe / 14 loopback / 14 UI, zero defects, no fixes applied).
+- [x] **v1.4.0 navbar + v1.4.1 hotfix (2026-11-04)** — Navbar redesign Phases 1-4 (DAILY 4 +
+      More menu, live clock, unified hold, scale split, `aria-current`, 1100px stop, lanes 7/8/9
+      vision PASS) · **v1.4.0 SHIPPED WITH A NATIVE-LANE OUTAGE** (disclosed): `LATEST=6`
+      vs migrate stamping v7 bricked every native command on second launch (login fails,
+      audit `…`, no update rows) · fixed in **v1.4.1** (`LATEST=7` + reopen-idempotency Rust
+      test proven to fail on 6) · retention hardened (2.8 s unlink budget + honest row,
+      test now asserts the log-anchored invariant after catching same-second filename
+      recycling) · NSIS full-bundle = cumulative by construction (any jump lands everything;
+      migrate `if v < N` climbs any old DB in one open) · **332/332** · cargo **21/21** ·
+      tsc/lint clean.
 
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
