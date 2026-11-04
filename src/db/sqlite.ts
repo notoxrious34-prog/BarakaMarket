@@ -408,6 +408,8 @@ export interface BarakaDb {
   getCashSessionStatus(sessionId: string): CashSessionLiveStatus;
   getActiveCashSession(): CashSessionLiveStatus | null;
   closeCashSessionAndGenerateZ(sessionId: string, countedCashCt: number, notes?: string): ZClosureResult;
+  /** Clôture rebuild (v1.4.5): the page needs history, not just the live row. */
+  listCashSessions(limit?: number): CashSessionRecord[];
   /** ADR-014-MKT: manager override PIN + append-only void audit. */
   recordVoidLog(entry: VoidLogEntry): VoidLogRecord;
   getVoidLogs(filters?: { fromDate?: string; toDate?: string; reason?: string; limit?: number }): VoidLogRecord[];
@@ -1142,6 +1144,31 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         | undefined;
       // eslint-disable-next-line @typescript-eslint/no-use-before-define
       return open ? (this as unknown as BarakaDb).getCashSessionStatus(open.id) : null;
+    },
+
+    // Clôture rebuild (v1.4.5): newest-first session history for the page.
+    listCashSessions(limit?: number): CashSessionRecord[] {
+      const n = Math.min(Math.max(Math.floor(limit ?? 20) || 20, 1), 100);
+      const rows = db.prepare(
+        `SELECT id, cashier_name, opened_at, closed_at, opening_float_ct,
+           closing_counted_ct, theoretical_cash_ct, cash_diff_ct, status,
+           z_report_id, notes
+         FROM cash_sessions ORDER BY opened_at DESC LIMIT ?`,
+      ).all(n) as {
+        id: string; cashier_name: string; opened_at: string; closed_at: string | null;
+        opening_float_ct: number; closing_counted_ct: number | null;
+        theoretical_cash_ct: number | null; cash_diff_ct: number | null;
+        status: string; z_report_id: string | null; notes: string | null;
+      }[];
+      return rows.map(r => ({
+        id: r.id, cashierName: r.cashier_name, openedAt: r.opened_at,
+        closedAt: r.closed_at ?? undefined, openingFloatCt: r.opening_float_ct,
+        closingCountedCt: r.closing_counted_ct ?? undefined,
+        theoreticalCashCt: r.theoretical_cash_ct ?? undefined,
+        cashDiffCt: r.cash_diff_ct ?? undefined,
+        status: r.status as 'OPEN' | 'CLOSED', zReportId: r.z_report_id ?? undefined,
+        notes: r.notes ?? undefined,
+      }));
     },
 
     closeCashSessionAndGenerateZ(sessionId: string, countedCashCt: number, notes?: string): ZClosureResult {

@@ -252,6 +252,31 @@ test('api: POST /cash/close-and-z finalizes with spooled ticket', async () => {
   assert.equal(await (await fetch(`${base}/api/cash/active`)).json(), null);
 });
 
+test('api: K9 sessions history lists the closed shift with diff + Z number', async () => {
+  const list = await (await fetch(`${base}/api/cash/sessions?limit=5`)).json() as {
+    id: string; cashierName: string; status: string; cashDiffCt: number; zReportId: string;
+  }[];
+  assert.ok(Array.isArray(list) && list.length >= 1);
+  const closed = list.find(s => s.status === 'CLOSED');
+  assert.ok(closed, 'a CLOSED session is listed');
+  assert.equal(closed.cashDiffCt, -10000);
+  assert.match(closed.zReportId, /^Z-\d{4}-\d{6}$/);
+  const o = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'K9', openingFloatCt: 50000 }),
+  });
+  assert.equal(o.status, 201);
+  const sess = await o.json() as { id: string };
+  const list2 = await (await fetch(`${base}/api/cash/sessions?limit=5`)).json() as { id: string; status: string }[];
+  assert.equal(list2[0].id, sess.id);
+  assert.equal(list2[0].status, 'OPEN');
+  const c = await fetch(`${base}/api/cash/close-and-z`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: sess.id, countedCashCt: 50000 }),
+  });
+  assert.equal(c.status, 201);
+});
+
 test('api: POST /security/verify-pin checks the manager gate', async () => {
   const ok = await fetch(`${base}/api/security/verify-pin`, {
     method: 'POST', headers: { 'content-type': 'application/json' },

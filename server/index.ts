@@ -430,6 +430,12 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     res.json(baraka.getActiveCashSession());
   });
 
+  // Clôture rebuild (v1.4.5): session history for the page (read stays open).
+  app.get('/api/cash/sessions', (req, res) => {
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '20')), 1) || 20, 100);
+    res.json(baraka.listCashSessions(limit));
+  });
+
   app.post('/api/cash/close-and-z', (req, res) => {
     try {
       const { sessionId, countedCashCt, notes, storeName, printReceipt, actor } = req.body as {
