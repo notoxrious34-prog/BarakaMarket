@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { formatDZD } from '../../core/display';
+import { getLoopbackToken } from '../../core/fiscal-authority';
 
 const API = 'http://127.0.0.1:3100';
 
@@ -49,9 +50,17 @@ export const CashSessionsView: React.FC = () => {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
+  // P0 (institutional audit): the loopback write token MUST ride every cash POST —
+  // without it the installed app 401s on open/movement/close (dead Caisse page).
+  // Same relay pattern as BackupManagerView/print-lane (web lane: '' → unchanged).
   const post = async (url: string, body: unknown, okMsg: string) => {
     try {
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const token = await getLoopbackToken();
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...(token ? { 'x-baraka-loopback': token } : {}) },
+        body: JSON.stringify(body),
+      });
       const j = await r.json();
       if (!r.ok) throw new Error(r.status === 401 ? 'LOOPBACK_401' : (j.error ?? 'error'));
       setMsg(okMsg);
