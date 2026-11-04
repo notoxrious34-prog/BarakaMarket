@@ -472,3 +472,54 @@ export interface AccountingSummary {
   bank_treasury: number;             // CIB / Dahabiya
 }
 
+
+/** P2 (v1.4.4): shop expenses — cash outflows that justify the Z gap. */
+export type ExpenseCategory =
+  | 'LOYER' | 'ELEC_EAU' | 'TRANSPORT' | 'MAINTENANCE' | 'TELECOM' | 'SALAIRES' | 'AVANCES' | 'AUTRE';
+
+export interface Expense {
+  id: string;
+  date: string; // ISO day YYYY-MM-DD
+  category: ExpenseCategory;
+  amountCt: number; // integer centimes, > 0
+  method: 'ESPECES' | 'VIREMENT' | 'CHEQUE';
+  note?: string;
+  byUser: string;
+  workerId?: number;   // set for SALAIRES / AVANCES
+  tillPosted: boolean; // false when no cash session was open (hors-caisse)
+  createdAt: string;
+}
+
+/** P2: workers with advance-against-salary accounts (like client ledgers). */
+export interface Worker {
+  id: number;
+  name: string;
+  phone: string;
+  post: string;
+  baseSalaryCt: number;
+  balanceCt: number; // >0 = advances owed BY worker (receivable)
+  active: boolean;
+  createdAt: string;
+}
+
+export interface Advance {
+  id: string;
+  workerId: number;
+  date: string;
+  amountCt: number;
+  note?: string;
+  byUser: string;
+  createdAt: string;
+}
+
+export interface SalarySettlement {
+  id: string;
+  workerId: number;
+  month: string; // YYYY-MM
+  baseSalaryCt: number;
+  advancesCt: number;
+  netPaidCt: number;
+  carryCt: number; // advances exceeding salary, carried as worker debt
+  byUser: string;
+  createdAt: string;
+}

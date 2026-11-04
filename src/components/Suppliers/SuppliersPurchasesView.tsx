@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, PurchaseInvoice, PurchaseItem, Supplier, TVARate } from '../../types';
 import { can } from '../../core/rbac';
@@ -63,6 +63,21 @@ export const SuppliersPurchasesView: React.FC = () => {
 
   // Active item row builder inside reception modal
   const [selectedProductId, setSelectedProductId] = useState<number>(products[0]?.id || 1);
+  // P1 (v1.4.4): instant product search in reception — same match pattern as
+  // the POS catalog (FR/AR/barcode, live from the first keystroke).
+  const [productSearch, setProductSearch] = useState('');
+  const [productListOpen, setProductListOpen] = useState(false);
+  const [productHighlight, setProductHighlight] = useState(0);
+  const filteredReceptionProducts = useMemo(() => {
+    const q = productSearch.trim().toLowerCase();
+    const list = !q
+      ? products
+      : products.filter(p =>
+          p.name_fr.toLowerCase().includes(q) ||
+          p.name_ar.includes(productSearch.trim()) ||
+          p.barcode.includes(productSearch.trim()));
+    return list.slice(0, 60);
+  }, [products, productSearch]);
   const [incomingQty, setIncomingQty] = useState(20);
   const [incomingBuyPriceHT, setIncomingBuyPriceHT] = useState(100);
   const [incomingTVA, setIncomingTVA] = useState<TVARate>(9);
@@ -185,6 +200,15 @@ export const SuppliersPurchasesView: React.FC = () => {
       setIncomingTVA(prod.tva_rate);
       setIncomingSellPriceTTC(prod.sell_price);
     }
+  };
+
+  // P1: pick from the instant-search listbox (closes + mirrors selection).
+  const pickReceptionProduct = (prodId: number) => {
+    handleSelectProductChange(prodId);
+    const prod = products.find(p => p.id === prodId);
+    setProductSearch(prod ? (isAr ? prod.name_ar : prod.name_fr) : '');
+    setProductListOpen(false);
+    setProductHighlight(0);
   };
 
   const handleAddItemToReception = () => {
@@ -633,17 +657,52 @@ export const SuppliersPurchasesView: React.FC = () => {
                           : (isAr ? '+ منتج جديد' : '+ Nouveau produit')}
                       </button>
                     </div>
-                    <select
-                      value={selectedProductId}
-                      onChange={e => handleSelectProductChange(parseInt(e.target.value, 10))}
-                      className="w-full bg-[#111722] border border-[#2b3a4f] rounded-lg px-2.5 py-1.5 text-xs text-white"
-                    >
-                      {products.map(p => (
-                        <option key={p.id} value={p.id}>
-                          {p.name_fr} (Stock: {p.stock_qty})
-                        </option>
-                      ))}
-                    </select>
+                    <div className="relative">
+                      <Search className="absolute start-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500 pointer-events-none" />
+                      <input
+                        value={productSearch}
+                        onChange={e => { setProductSearch(e.target.value); setProductListOpen(true); setProductHighlight(0); }}
+                        onFocus={() => setProductListOpen(true)}
+                        onBlur={() => setTimeout(() => setProductListOpen(false), 120)}
+                        onKeyDown={e => {
+                          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            setProductListOpen(true);
+                            setProductHighlight(h => {
+                              const n = filteredReceptionProducts.length;
+                              if (n === 0) return 0;
+                              return e.key === 'ArrowDown' ? (h + 1) % n : (h - 1 + n) % n;
+                            });
+                          } else if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const p = filteredReceptionProducts[productHighlight];
+                            if (p) pickReceptionProduct(p.id);
+                          } else if (e.key === 'Escape') {
+                            setProductListOpen(false);
+                          }
+                        }}
+                        placeholder={products.find(p => p.id === selectedProductId)?.name_fr ?? (isAr ? 'ابحث باسم المنتج أو الباركود…' : 'Chercher produit / code-barres…')}
+                        aria-label={isAr ? 'بحث فوري عن منتج' : 'Recherche instantanée produit'}
+                        className="w-full bg-[#111722] border border-[#2b3a4f] rounded-lg ps-8 pe-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
+                      />
+                      {productListOpen && filteredReceptionProducts.length > 0 && (
+                        <ul role="listbox" aria-label={isAr ? 'نتائج المنتجات' : 'Résultats produits'} className="absolute z-30 mt-1 w-full max-h-56 overflow-y-auto bg-[#0d1420] border border-[#2b3a4f] rounded-lg shadow-2xl py-1">
+                          {filteredReceptionProducts.map((p, i) => (
+                            <li key={p.id} role="option" aria-selected={p.id === selectedProductId}>
+                              <button
+                                type="button"
+                                onMouseDown={ev => { ev.preventDefault(); pickReceptionProduct(p.id); }}
+                                onMouseEnter={() => setProductHighlight(i)}
+                                className={`w-full text-start px-2.5 py-1.5 text-xs flex items-center justify-between gap-2 cursor-pointer ${i === productHighlight ? 'bg-emerald-600/25 text-white' : 'text-slate-200'}`}
+                              >
+                                <span className="truncate">{isAr ? p.name_ar : p.name_fr} <span className="text-slate-500 font-mono" dir="ltr">{p.barcode}</span></span>
+                                <span className="shrink-0 text-slate-400 font-mono" dir="ltr">St:{p.stock_qty} · {p.buy_price}</span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   </div>
 
                   <div>

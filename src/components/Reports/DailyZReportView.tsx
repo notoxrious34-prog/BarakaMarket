@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 
 export const DailyZReportView: React.FC = () => {
-  const { generateDailyZReport, sales, storeProfile, language, session, voidSale } = useApp();
+  const { generateDailyZReport, sales, expenses, storeProfile, language, session, voidSale } = useApp();
   const isAr = language === 'ar';
   const canVoid = can(session?.role ?? 'cashier', 'sale.void');
   const canClose = can(session?.role ?? 'cashier', 'z.close');
@@ -268,6 +268,17 @@ export const DailyZReportView: React.FC = () => {
               {formatDZD(zReport.total_timbre, false)}
             </div>
             <span className="text-[10px] text-slate-500 mt-0.5 block">{isAr ? 'المادة 136 قانون الطابع' : 'Art. 136 Code du Timbre'}</span>
+          </div>
+
+          {/* P2 (v1.4.4): day expenses justify the till gap — display only, close payload untouched. */}
+          <div className="bg-[#111722] border border-amber-600/30 rounded-xl p-3.5 shadow-sm">
+            <span className="text-[11px] text-slate-400 font-semibold uppercase">{isAr ? 'مصاريف اليوم (تبرر الفرق)' : 'Dépenses du jour'}</span>
+            <div className="text-xl font-black text-amber-300 font-mono mt-1">
+              {formatDZD(expenses.filter(e => e.date === zReport.date).reduce((s, e) => s + e.amountCt, 0) / 100, false)}
+            </div>
+            <span className="text-[10px] text-slate-500 mt-0.5 block">
+              {expenses.filter(e => e.date === zReport.date).length} {isAr ? 'مصروف — تُخصم من النظري تلقائياً' : 'dépenses — déduites du théorique'}
+            </span>
           </div>
         </div>
 

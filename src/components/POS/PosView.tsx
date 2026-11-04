@@ -28,6 +28,7 @@ import { ScaleSimulationModal } from './ScaleSimulationModal';
 import { QuantityModal } from './QuantityModal';
 import { DiscountModal } from './DiscountModal';
 import { CatalogSearchModal } from './CatalogSearchModal';
+import { QuickExpenseModal } from './QuickExpenseModal';
 import { useAutoFocusBarcode } from './useAutoFocusBarcode';
 import { attachScannerTrap } from '../../hardware/scanner';
 import { scanBeep, errorBuzz } from '../../hardware/sound';
@@ -63,6 +64,7 @@ export const PosView: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [barcodeInput, setBarcodeInput] = useState('');
+  const [expenseOpen, setExpenseOpen] = useState(false);
   const [scanFeedback, setScanFeedback] = useState<{ message: string; isError: boolean } | null>(null);
 
   // Modals state
@@ -590,6 +592,14 @@ export const PosView: React.FC = () => {
 
         {/* ADR-007-MKT: parked-sales controls live in the top navbar + F4/F5.
             The inline Attente/Rappeler pair was the 3rd duplicate — removed. */}
+        {/* P2: till expense — cashier speed lane, posts EXPENSE movement. */}
+        <button
+          onClick={() => setExpenseOpen(true)}
+          className="mt-2 py-2 px-4 rounded-xl font-bold text-sm flex items-center justify-center gap-2 bg-[#1e293b] hover:bg-[#2b3a4f] text-amber-300 border border-amber-600/30 cursor-pointer transition-all"
+        >
+          <span className="font-mono" dir="ltr">−</span>
+          <span>{isAr ? 'مصروف صندوق' : 'Dépense caisse'}</span>
+        </button>
         {/* PRIMARY CHECKOUT BUTTON — hard guard on empty cart.
             ADR-008-MKT: disabled state is theme-aware (dark: follows .dark). */}
         <button
@@ -605,6 +615,8 @@ export const PosView: React.FC = () => {
           <span>{isAr ? 'إتمام الدفع والطباعة (Space)' : 'ENCAISSER & IMPRIMER (Space)'}</span>
         </button>
       </div>
+
+      {expenseOpen && <QuickExpenseModal onClose={() => setExpenseOpen(false)} />}
 
       {/* Payment Modal */}
       {showPaymentModal && (

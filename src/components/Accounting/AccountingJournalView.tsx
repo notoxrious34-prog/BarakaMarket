@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
+import { ExpensesWorkersView } from './ExpensesWorkersView';
 import { formatDZD } from '../../core/display';
 import {
   PieChart,
@@ -18,7 +19,7 @@ import {
 } from 'lucide-react';
 
 export const AccountingJournalView: React.FC = () => {
-  const { accountingSummary, sales, purchases, settlements, supplierPayments, language } = useApp();
+  const { accountingSummary, sales, purchases, settlements, supplierPayments, expenses, language } = useApp();
   const isAr = language === 'ar';
 
   const [filterPeriod, setFilterPeriod] = useState<'all' | 'today' | 'month'>('all');
@@ -92,6 +93,30 @@ export const AccountingJournalView: React.FC = () => {
       debitAccount: '401000 Fournisseurs',
       creditAccount: sp.payment_method === 'ESPECES' ? '530000 Caisse' : '512000 Banque Chèque',
       amount: sp.amount,
+    });
+  }
+
+  // 5. P2 (v1.4.4): shop expenses — SCF charges (61/62/63) against till/bank.
+  const EXPENSE_DEBIT: Record<string, string> = {
+    LOYER: '613000 Locations',
+    ELEC_EAU: '607000 Énergie / Eau',
+    TRANSPORT: '625000 Transports',
+    MAINTENANCE: '615000 Entretien',
+    TELECOM: '626000 Télécom',
+    SALAIRES: '631000 Salaires',
+    AVANCES: '425000 Avances employés',
+    AUTRE: '658000 Charges diverses',
+  };
+  for (const ex of expenses) {
+    journalEntries.push({
+      id: ex.id,
+      date: ex.date,
+      type: 'DECAISSEMENT',
+      ref: ex.id,
+      label: `Dépense boutique - ${ex.note ?? ex.category}`,
+      debitAccount: EXPENSE_DEBIT[ex.category] ?? '658000 Charges diverses',
+      creditAccount: ex.method === 'ESPECES' ? '530000 Caisse' : '512000 Banque',
+      amount: ex.amountCt / 100,
     });
   }
 
@@ -324,6 +349,9 @@ export const AccountingJournalView: React.FC = () => {
           </table>
         </div>
       </div>
+
+      {/* P2 (v1.4.4): shop expenses + worker accounts */}
+      <ExpensesWorkersView />
     </div>
   );
 };

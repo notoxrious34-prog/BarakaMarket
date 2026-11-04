@@ -17,6 +17,7 @@ export type Permission =
   | 'sell' | 'settle' | 'print' | 'sale.void'
   | 'products.edit' | 'clients.edit' | 'cash.manage'
   | 'z.close' | 'accounting.view'
+  | 'expense.record' | 'worker.manage' | 'payroll.settle'
   | 'settings.edit' | 'users.manage' | 'audit.view';
 
 const RANK: Record<Role, number> = { cashier: 0, manager: 1, owner: 2 };
@@ -26,6 +27,7 @@ const MIN_RANK: Record<Permission, number> = {
   sell: 0, settle: 0, print: 0, 'sale.void': 1,
   'products.edit': 1, 'clients.edit': 1, 'cash.manage': 1,
   'z.close': 1, 'accounting.view': 1,
+  'expense.record': 0, 'worker.manage': 1, 'payroll.settle': 1,
   'settings.edit': 2, 'users.manage': 2, 'audit.view': 1,
 };
 
@@ -88,6 +90,7 @@ export type AuditAction =
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
+  | 'expense.add' | 'advance.add' | 'salary.settle'
   | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
 
 export interface AuditEvent {

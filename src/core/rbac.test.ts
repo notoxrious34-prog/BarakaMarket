@@ -54,4 +54,13 @@ describe('rbac core (T8)', () => {
     assert.equal(isRole('owner'), true);
     assert.equal(isRole('root'), false);
   });
+
+  it('P2 expenses: cashier records, manager+ manages workers and settles payroll', () => {
+    assert.equal(can('cashier', 'expense.record'), true);
+    assert.equal(can('cashier', 'worker.manage'), false);
+    assert.equal(can('cashier', 'payroll.settle'), false);
+    assert.equal(can('manager', 'worker.manage'), true);
+    assert.equal(can('manager', 'payroll.settle'), true);
+    assert.equal(can('owner', 'payroll.settle'), true);
+  });
 });

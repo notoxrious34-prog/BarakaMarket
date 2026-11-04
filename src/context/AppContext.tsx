@@ -3,21 +3,26 @@ import { computeHwid, collectBrowserFingerprint } from '../core/licensing';
 import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed } from '../core/license-store';
 import {
   AccountingSummary,
+  Advance,
   Client,
   DailyZReport,
   DebtSettlement,
+  Expense,
+  ExpenseCategory,
   HeldCart,
   PaymentMethod,
   Product,
   ProductBarcodeAlias,
   PurchaseInvoice,
   PurchaseItem,
+  SalarySettlement,
   Sale,
   SaleItem,
   StoreProfile,
   Supplier,
   SupplierPayment,
   TVARate,
+  Worker,
 } from '../types';
 import {
   initialCategories,
@@ -29,7 +34,8 @@ import {
 } from '../data/seedData';
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
-import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { advancesForMonth, settleSalaryMath, applyAdvanceToBalance, applyPaydayToBalance } from '../core/payroll';
+import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, getLoopbackToken, LOOPBACK_BASE, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { APP_VERSION } from '../core/version';
 import { detectVersionShift } from '../core/version-change';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
@@ -57,6 +63,10 @@ interface AppContextType {
   purchases: PurchaseInvoice[];
   settlements: DebtSettlement[];
   supplierPayments: SupplierPayment[];
+  expenses: Expense[];
+  workers: Worker[];
+  advances: Advance[];
+  salarySettlements: SalarySettlement[];
   heldCarts: HeldCart[];
   storeProfile: StoreProfile;
   currentCart: SaleItem[];
@@ -148,6 +158,24 @@ interface AppContextType {
     reference?: string,
     note?: string
   ) => SupplierPayment;
+  recordExpense: (input: {
+    date: string;
+    category: ExpenseCategory;
+    amountDzd: number;
+    method: 'ESPECES' | 'VIREMENT' | 'CHEQUE';
+    note?: string;
+    workerId?: number;
+  }) => Promise<Expense>;
+  addWorker: (worker: Omit<Worker, 'id' | 'balanceCt' | 'active' | 'createdAt'>) => Worker;
+  updateWorker: (id: number, worker: Partial<Worker>) => void;
+  deactivateWorker: (id: number) => void;
+  recordAdvance: (input: {
+    workerId: number;
+    date: string;
+    amountDzd: number;
+    note?: string;
+  }) => Promise<{ advance: Advance; expense: Expense }>;
+  settleSalary: (input: { workerId: number; month: string }) => Promise<SalarySettlement>;
   factoryResetDemo: (ownerPin: string) => Promise<void>;
 
   // Product & Store management
@@ -212,6 +240,10 @@ const STORAGE_KEYS = {
   PURCHASES: 'baraka_purchases_v2',
   SETTLEMENTS: 'baraka_settlements_v2',
   SUPPLIER_PAYMENTS: 'baraka_supplier_payments_v2',
+  EXPENSES: 'baraka_expenses_v2',
+  WORKERS: 'baraka_workers_v2',
+  ADVANCES: 'baraka_advances_v2',
+  SALARIES: 'baraka_salary_settlements_v2',
   HELD_CARTS: 'baraka_held_carts_v2',
   STORE: 'baraka_store_v2',
   ACTIVE_DRAFT: 'baraka_active_draft_cart_v2',
@@ -338,6 +370,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [supplierPayments, setSupplierPayments] = useState<SupplierPayment[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.SUPPLIER_PAYMENTS);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [expenses, setExpenses] = useState<Expense[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.EXPENSES);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [workers, setWorkers] = useState<Worker[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.WORKERS);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [advances, setAdvances] = useState<Advance[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.ADVANCES);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const [salarySettlements, setSalarySettlements] = useState<SalarySettlement[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.SALARIES);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -629,6 +697,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.SUPPLIER_PAYMENTS, JSON.stringify(supplierPayments));
   }, [supplierPayments]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
+  }, [expenses]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.WORKERS, JSON.stringify(workers));
+  }, [workers]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.ADVANCES, JSON.stringify(advances));
+  }, [advances]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.SALARIES, JSON.stringify(salarySettlements));
+  }, [salarySettlements]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.HELD_CARTS, JSON.stringify(heldCarts));
@@ -1539,7 +1623,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const wipeExact = [
       STORAGE_KEYS.PRODUCTS, STORAGE_KEYS.CLIENTS, STORAGE_KEYS.SUPPLIERS,
       STORAGE_KEYS.SALES, STORAGE_KEYS.PURCHASES, STORAGE_KEYS.SETTLEMENTS,
-      STORAGE_KEYS.SUPPLIER_PAYMENTS, STORAGE_KEYS.HELD_CARTS,
+      STORAGE_KEYS.SUPPLIER_PAYMENTS, STORAGE_KEYS.EXPENSES, STORAGE_KEYS.WORKERS,
+      STORAGE_KEYS.ADVANCES, STORAGE_KEYS.SALARIES, STORAGE_KEYS.HELD_CARTS,
       STORAGE_KEYS.ACTIVE_DRAFT, STORAGE_KEYS.BARCODES, OUTBOX_KEY,
     ];
     for (const k of wipeExact) {
@@ -1627,6 +1712,152 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const deleteClient = (id: number) => {
     setClients(prev => prev.filter(c => c.id !== id));
+  };
+
+  // P2 (v1.4.4): shop expenses leave the till and justify the Z gap.
+  const EXPENSE_CATS: ExpenseCategory[] = ['LOYER', 'ELEC_EAU', 'TRANSPORT', 'MAINTENANCE', 'TELECOM', 'SALAIRES', 'AVANCES', 'AUTRE'];
+
+  const requirePerm = (perm: 'expense.record' | 'worker.manage' | 'payroll.settle') => {
+    const s = sessionRef.current;
+    if (!s) throw new Error('[expense] login required');
+    if (!can(s.role, perm)) throw new Error(`[${perm}] role ${s.role} not allowed`);
+    touchSession();
+    return s;
+  };
+
+  const postTillExpense = async (amountCt: number, reason: string): Promise<boolean> => {
+    try {
+      const a = await fetch(`${LOOPBACK_BASE}/api/cash/active`);
+      if (!a.ok) return false;
+      const live = await a.json();
+      const sid = live?.session?.id as string | undefined;
+      if (!sid) return false;
+      // Production (Tauri) attaches the relayed loopback token; dev web has
+      // none, so the movement is honestly refused and the expense stays hors-caisse.
+      const token = await getLoopbackToken();
+      const r = await fetch(`${LOOPBACK_BASE}/api/cash/movement`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(token ? { 'x-baraka-loopback': token } : {}),
+        },
+        body: JSON.stringify({ sessionId: sid, movementType: 'EXPENSE', amountCt, reason }),
+      });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const recordExpense = async (input: {
+    date: string; category: ExpenseCategory; amountDzd: number;
+    method: 'ESPECES' | 'VIREMENT' | 'CHEQUE'; note?: string; workerId?: number;
+  }): Promise<Expense> => {
+    const s = requirePerm('expense.record');
+    if (!EXPENSE_CATS.includes(input.category)) throw new Error('[expense] bad category');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error('[expense] bad date');
+    if (!Number.isFinite(input.amountDzd) || input.amountDzd <= 0) throw new Error('[expense] bad amount');
+    // Payroll categories flow ONLY through the advance/payday lanes (ledger integrity).
+    if (input.category === 'AVANCES' || input.category === 'SALAIRES') {
+      throw new Error('[expense] payroll categories require recordAdvance/settleSalary');
+    }
+    const amountCt = dzdToCentimes(input.amountDzd);
+    const id = `EXP-${Date.now().toString(36).toUpperCase()}${expenses.length.toString(36).toUpperCase()}`;
+    const tillPosted = input.method === 'ESPECES'
+      ? await postTillExpense(amountCt, `expense ${id} ${input.category}`)
+      : false;
+    const exp: Expense = {
+      id, date: input.date, category: input.category, amountCt,
+      method: input.method, note: input.note?.trim() || undefined,
+      workerId: input.workerId, byUser: s.username, tillPosted,
+      createdAt: new Date().toISOString(),
+    };
+    setExpenses(prev => [...prev, exp]);
+    await auditSessionEvent(s.username, 'expense.add',
+      `expense ${id} ${input.category} ${amountCt}ct ${input.method} till:${tillPosted ? 'posted' : 'hors-caisse'}`);
+    return exp;
+  };
+
+  const addWorker = (workerData: Omit<Worker, 'id' | 'balanceCt' | 'active' | 'createdAt'>): Worker => {
+    requirePerm('worker.manage');
+    if (!workerData.name.trim()) throw new Error('[worker] name required');
+    if (!Number.isInteger(workerData.baseSalaryCt) || workerData.baseSalaryCt < 0) throw new Error('[worker] bad salary');
+    const newId = workers.length > 0 ? Math.max(...workers.map(w => w.id)) + 1 : 1;
+    const w: Worker = { ...workerData, name: workerData.name.trim(), id: newId, balanceCt: 0, active: true, createdAt: new Date().toISOString() };
+    setWorkers(prev => [...prev, w]);
+    return w;
+  };
+
+  const updateWorker = (id: number, patch: Partial<Worker>) => {
+    requirePerm('worker.manage');
+    setWorkers(prev => prev.map(w => (w.id === id ? { ...w, ...patch, id: w.id, balanceCt: w.balanceCt } : w)));
+  };
+
+  const deactivateWorker = (id: number) => {
+    requirePerm('worker.manage');
+    setWorkers(prev => prev.map(w => (w.id === id ? { ...w, active: false } : w)));
+  };
+
+  const recordAdvance = async (input: { workerId: number; date: string; amountDzd: number; note?: string }): Promise<{ advance: Advance; expense: Expense }> => {
+    const s = requirePerm('expense.record');
+    const w = workers.find(x => x.id === input.workerId);
+    if (!w || !w.active) throw new Error('[advance] unknown or inactive worker');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error('[advance] bad date');
+    if (!Number.isFinite(input.amountDzd) || input.amountDzd <= 0) throw new Error('[advance] bad amount');
+    const amountCt = dzdToCentimes(input.amountDzd);
+    const advance: Advance = {
+      id: `ADV-${Date.now().toString(36).toUpperCase()}${advances.length.toString(36).toUpperCase()}`,
+      workerId: w.id, date: input.date, amountCt,
+      note: input.note?.trim() || undefined, byUser: s.username, createdAt: new Date().toISOString(),
+    };
+    const tillPosted = await postTillExpense(amountCt, `advance ${advance.id} worker ${w.name}`);
+    const exp: Expense = {
+      id: `EXP-${Date.now().toString(36).toUpperCase()}A${expenses.length.toString(36).toUpperCase()}`,
+      date: input.date, category: 'AVANCES', amountCt, method: 'ESPECES',
+      note: `سلفة: ${w.name}`, workerId: w.id, byUser: s.username, tillPosted,
+      createdAt: new Date().toISOString(),
+    };
+    setAdvances(prev => [...prev, advance]);
+    setWorkers(prev => prev.map(x => (x.id === w.id ? { ...x, balanceCt: applyAdvanceToBalance(x.balanceCt, amountCt) } : x)));
+    setExpenses(prev => [...prev, exp]);
+    await auditSessionEvent(s.username, 'advance.add',
+      `advance ${advance.id} worker ${w.name} ${amountCt}ct till:${tillPosted ? 'posted' : 'hors-caisse'}`);
+    return { advance, expense: exp };
+  };
+
+  const settleSalary = async (input: { workerId: number; month: string }): Promise<SalarySettlement> => {
+    const s = requirePerm('payroll.settle');
+    const w = workers.find(x => x.id === input.workerId);
+    if (!w || !w.active) throw new Error('[salary] unknown or inactive worker');
+    if (!/^\d{4}-\d{2}$/.test(input.month)) throw new Error('[salary] bad month');
+    if (salarySettlements.some(x => x.workerId === w.id && x.month === input.month)) {
+      throw new Error('[salary] month already settled (idempotent guard)');
+    }
+    const monthAdvancesCt = advancesForMonth(advances, w.id, input.month);
+    const { netPaidCt, carryCt } = settleSalaryMath(w.baseSalaryCt, monthAdvancesCt);
+    const tillPosted = netPaidCt > 0
+      ? await postTillExpense(netPaidCt, `salary ${w.name} ${input.month}`)
+      : false;
+    const rec: SalarySettlement = {
+      id: `SAL-${input.month}-${w.id}`,
+      workerId: w.id, month: input.month, baseSalaryCt: w.baseSalaryCt,
+      advancesCt: monthAdvancesCt, netPaidCt, carryCt, byUser: s.username,
+      createdAt: new Date().toISOString(),
+    };
+    if (netPaidCt > 0) {
+      const exp: Expense = {
+        id: `EXP-${Date.now().toString(36).toUpperCase()}S${expenses.length.toString(36).toUpperCase()}`,
+        date: `${input.month}-28`, category: 'SALAIRES', amountCt: netPaidCt, method: 'ESPECES',
+        note: `راتب ${input.month}: ${w.name}`, workerId: w.id, byUser: s.username, tillPosted,
+        createdAt: new Date().toISOString(),
+      };
+      setExpenses(prev => [...prev, exp]);
+    }
+    setSalarySettlements(prev => [...prev, rec]);
+    setWorkers(prev => prev.map(x => (x.id === w.id ? { ...x, balanceCt: applyPaydayToBalance(x.balanceCt, monthAdvancesCt) } : x)));
+    await auditSessionEvent(s.username, 'salary.settle',
+      `salary ${rec.id} worker ${w.name} base ${w.baseSalaryCt}ct advances ${monthAdvancesCt}ct net ${netPaidCt}ct carry ${carryCt}ct`);
+    return rec;
   };
 
   const updateStoreProfile = (profileData: Partial<StoreProfile>) => {
@@ -1822,6 +2053,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         completeSaleFiscal,
         voidSale,
         settleClientDebt,
+        expenses,
+        workers,
+        advances,
+        salarySettlements,
+        recordExpense,
+        addWorker,
+        updateWorker,
+        deactivateWorker,
+        recordAdvance,
+        settleSalary,
         addSupplier,
         updateSupplier,
         deleteSupplier,
