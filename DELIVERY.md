@@ -70,6 +70,12 @@
       recycling) · NSIS full-bundle = cumulative by construction (any jump lands everything;
       migrate `if v < N` climbs any old DB in one open) · **332/332** · cargo **21/21** ·
       tsc/lint clean.
+- [x] **v1.4.1 IRON PROOF (2026-11-04)** — updater auto-installed 1.4.1 on iron at boot
+      (binary `12:19`, no manual click) · relaunch with CDP: login `5678` OK (native lane
+      alive) · `db_status` → `{baraka.db, wal}` · `audit_list` → 5 rows · Audit tab renders
+      ~21 rows, no `…` · footer `V1.4.1` · POS live, vision PASS · **gap noted (not fixed)**:
+      silent auto-installs write no `update.install` audit row (missing 1.4.0 + 1.4.1 traces) —
+      boot version-change audit proposed for the next version, awaiting owner.
 
 ## Explicitly deferred (with plan, not hidden)
 - [ ] Tauri single-exe installer (<60MB) → docs/TAURI-PLAN.md (Rust present: cargo 1.98.1)
