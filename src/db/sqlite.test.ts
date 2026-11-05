@@ -288,3 +288,34 @@ test('db: recordSale 2 packs x6 drains exactly 12000 milli', () => {
   assert.equal(b.getProduct(2).stock_milli, 88000);
   b.close();
 });
+
+test('db: PROD-SALE unknown client cash degrades to walk-in NULL, CREDIT refused', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct(PROD);
+  const line = { tva_rate: 9 as const, ...rename(calculateLineTotalsCt(18000, 2, 9)) };
+  const item = { product_id: 1, barcode: 'a', name_fr: 'LAIT', name_ar: '', unit_price_ct: 18000, qty_milli: 2000, unit: 'PIECE' as const, tva_rate: 9 as const, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct };
+  const tEsp = calculateSaleTotalsCt([line], 'ESPECES');
+  const sale = b.recordSale(
+    {
+      cashier_id: 'C-1', cashier_name: 'Amine', client_id: 999, client_name: 'Client Passager (Comptoir)',
+      payment_method: 'ESPECES', amount_paid_ct: tEsp.total_ttc_ct, amount_returned_ct: 0,
+      totals: tEsp, created_at: '2026-10-26T14:00:00.000Z',
+    },
+    [item],
+  );
+  assert.match(sale.invoice_number, /^FACT-\d{4}-\d{6}$/);
+  assert.equal(b.getSale(sale.id).client_id, null);
+  const tCred = calculateSaleTotalsCt([line], 'CREDIT');
+  assert.throws(
+    () => b.recordSale(
+      {
+        cashier_id: 'C-1', cashier_name: 'Amine', client_id: 999, client_name: 'X',
+        payment_method: 'CREDIT', amount_paid_ct: 0, amount_returned_ct: 0,
+        totals: tCred, created_at: '2026-10-26T14:00:00.000Z',
+      },
+      [item],
+    ),
+    /client inconnu/,
+  );
+  b.close();
+});

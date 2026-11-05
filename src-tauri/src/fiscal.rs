@@ -452,6 +452,24 @@ pub fn record_sale(
             "[fiscal] day {day} is already legally closed (Z FINALISÉ) — sale refused"
         ));
     }
+    // Walk-in safety (v1.4.8 PROD-SALE): the client registry lives in the UI;
+    // a fresh/unsynced fiscal DB has no such row. Cash sales degrade to an
+    // anonymous walk-in (NULL, name preserved) instead of dying on the FK.
+    // CREDIT needs a ledger identity — refused with a naming message.
+    let client_wanted: Option<i64> = header["client_id"].as_i64();
+    let client_fk: Option<i64> = match client_wanted {
+        None => None,
+        Some(c) => conn
+            .query_row("SELECT id FROM clients WHERE id = ?1", [c], |r| {
+                r.get::<_, i64>(0)
+            })
+            .ok(),
+    };
+    if client_wanted.is_some() && client_fk.is_none() && method == "CREDIT" {
+        return Err(
+            "[fiscal] client inconnu — recréez le client avant une vente à crédit".to_string(),
+        );
+    }
 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -476,7 +494,7 @@ pub fn record_sale(
             id, invoice, ticket,
             str_field(&header["cashier_id"], "cashier_id")?,
             str_field(&header["cashier_name"], "cashier_name")?,
-            header["client_id"].as_i64(),
+            header["client_id"].as_i64().and(client_fk),
             opt_str(&header["client_name"], "client_name")?.unwrap_or_default(),
             opt_str(&header["client_nif"], "client_nif")?.unwrap_or_default(),
             opt_str(&header["client_nis"], "client_nis")?.unwrap_or_default(),
@@ -1759,6 +1777,30 @@ mod tests {
             .query_row("SELECT timbre_ct FROM sales", [], |r| r.get(0))
             .unwrap();
         assert_eq!(timbre, 1800);
+    }
+
+    #[test]
+    fn prodsale_unknown_client_cash_walks_in_credit_refused() {
+        // v1.4.8 PROD-SALE: the registry gap that froze the user's till
+        // (walk-in id=1 on a DB whose clients table is empty).
+        let mut db = memdb();
+        db.execute("DELETE FROM clients", []).unwrap();
+        let mut h = sale_header(Some("WALKIN"));
+        h["client_id"] = serde_json::json!(1);
+        h["client_name"] = serde_json::json!("Client Passager (Comptoir)");
+        let r = record_sale(&mut db, &h, &sale_items()).unwrap();
+        assert!(r["invoice_number"].as_str().unwrap().starts_with("FACT-"));
+        let cid: Option<i64> = db
+            .query_row("SELECT client_id FROM sales", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cid, None); // anonymous walk-in, name preserved on the row
+        let mut h2 = sale_header(Some("CREDIT-GAP"));
+        h2["client_id"] = serde_json::json!(1);
+        h2["payment_method"] = serde_json::json!("CREDIT");
+        h2["totals"]["timbre_ct"] = serde_json::json!(0);
+        h2["totals"]["total_ttc_ct"] = serde_json::json!(177600);
+        let err = record_sale(&mut db, &h2, &sale_items()).unwrap_err();
+        assert!(err.contains("client inconnu"), "got: {err}");
     }
 
     #[test]

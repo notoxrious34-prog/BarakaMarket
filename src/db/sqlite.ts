@@ -1701,6 +1701,18 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const year = parseInt(createdAt.slice(0, 4), 10);
       const id = header.id ?? randomUUID();
       const clientSaleId = header.client_sale_id ?? null;
+      // Walk-in safety (v1.4.8 PROD-SALE — twin of the Rust lane): the client
+      // registry lives in the UI; a fresh/unsynced fiscal DB has no such row.
+      // Cash sales degrade to anonymous walk-in (NULL, name preserved);
+      // CREDIT needs a ledger identity and is refused with a naming message.
+      const clientWanted: number | null = header.client_id ?? null;
+      const clientKnown = clientWanted == null
+        ? null
+        : (db.prepare('SELECT id FROM clients WHERE id = ?').get(clientWanted) as { id: number } | undefined)?.id ?? null;
+      if (clientWanted != null && clientKnown == null && header.payment_method === 'CREDIT') {
+        throw new Error('[db] client inconnu — recréez le client avant une vente à crédit');
+      }
+      const clientFk = clientKnown;
       // T1 (ADR-021): idempotent commit. A retried POST (double click, replay
       // after a dropped connection) returns the ORIGINAL row — seq, stock and
       // ledger are never consumed twice.
@@ -1733,7 +1745,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             client_sale_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)`,
         ).run(
-          id, invoice, ticket, header.cashier_id, header.cashier_name, header.client_id ?? null,
+          id, invoice, ticket, header.cashier_id, header.cashier_name, clientFk,
           header.client_name ?? null, header.client_nif ?? null, header.client_nis ?? null,
           header.client_rc ?? null, header.client_ai ?? null, header.client_address ?? null,
           t.total_ht_ct, t.total_tva_ct, t.timbre_ct, t.total_ttc_ct,
