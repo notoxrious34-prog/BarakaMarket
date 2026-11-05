@@ -116,7 +116,7 @@ pub fn verify_pin_verifier(input_pin: &str, stored: &str) -> bool {
 static SALT_CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn mint_verifier(pin: &str) -> Result<String, String> {
-    if (!verify_pin_format(pin)) {
+    if !verify_pin_format(pin) {
         return Err("[auth] PIN must be 4-8 numeric digits".to_string());
     }
     let n = std::time::SystemTime::now()
@@ -132,7 +132,7 @@ pub fn mint_verifier(pin: &str) -> Result<String, String> {
 fn audit(conn: &Connection, actor: &str, action: &str, detail: &str) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.as_secs() as i64))
+        .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let _ = conn.execute(
         "INSERT INTO audit_log (ts, actor, action, detail) VALUES (datetime(?1, 'unixepoch'), ?2, ?3, ?4)",
@@ -162,7 +162,7 @@ pub fn migrate_v4(conn: &Connection) -> Result<(), String> {
     let n: i64 = conn
         .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    if (n == 0) {
+    if n == 0 {
         let v = mint_verifier("1234")?;
         conn.execute(
             "INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, created_at)
@@ -315,13 +315,13 @@ pub fn user_list(conn: &Connection) -> Result<Value, String> {
 pub fn user_create(
     conn: &Connection,
     username: &str,
-    displayName: &str,
+    display_name: &str,
     role: &str,
     pin: &str,
-    requesterRole: &str,
+    requester_role: &str,
     actor: &str,
 ) -> Result<Value, String> {
-    if requesterRole != "owner" {
+    if requester_role != "owner" {
         return Err("[auth] owner role required".to_string());
     }
     let name = username.trim().to_lowercase();
@@ -334,7 +334,7 @@ pub fn user_create(
     if !verify_pin_format(pin) {
         return Err("[auth] PIN must be 4-8 numeric digits".to_string());
     }
-    let dn_trimmed = displayName.trim();
+    let dn_trimmed = display_name.trim();
     let dn: String = if dn_trimmed.is_empty() {
         name.clone()
     } else {
@@ -385,31 +385,31 @@ fn valid_username(name: &str) -> bool {
 /// operators deactivate instead of deleting, and owners never deactivate.
 pub fn user_set_active(
     conn: &Connection,
-    userId: i64,
+    user_id: i64,
     active: bool,
-    requesterRole: &str,
+    requester_role: &str,
     actor: &str,
 ) -> Result<Value, String> {
-    if requesterRole != "owner" {
+    if requester_role != "owner" {
         return Err("[auth] owner role required".to_string());
     }
     let row: Option<(String, String)> = conn
         .query_row(
             "SELECT username, role FROM users WHERE id = ?1",
-            [userId],
+            [user_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
     let Some((uname, role)) = row else {
-        return Err(format!("[auth] unknown user: {userId}"));
+        return Err(format!("[auth] unknown user: {user_id}"));
     };
     if role == "owner" {
         return Err("[auth] the owner account cannot be deactivated".to_string());
     }
     conn.execute(
         "UPDATE users SET active = ?1 WHERE id = ?2",
-        rusqlite::params![if active { 1 } else { 0 }, userId],
+        rusqlite::params![if active { 1 } else { 0 }, user_id],
     )
     .map_err(|e| e.to_string())?;
     audit(

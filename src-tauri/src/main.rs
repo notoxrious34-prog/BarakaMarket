@@ -128,15 +128,15 @@ fn next_invoice(kind: String, year: i64) -> Result<serde_json::Value, String> {
 }
 
 /// #003 (Phase A): legal void — status flip + journal row, no DELETE.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn void_sale(
-    saleId: String,
+    sale_id: String,
     reason: String,
-    voidedBy: String,
+    voided_by: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::void_sale(&mut conn, &saleId, &reason, &voidedBy)
+    fiscal::void_sale(&mut conn, &sale_id, &reason, &voided_by)
 }
 
 /// #004 (Phase A): legal day close — recompute, lock, chain (native lane).
@@ -169,54 +169,54 @@ fn backup_db(dest: String) -> Result<serde_json::Value, String> {
 
 /// P3 (v1.4.4): audited clean-start — refuses without a VERIFIED exempt
 /// pre-reset archive; clears trial books, restarts numbering, genesis audit.
-#[tauri::command]
-fn factory_reset(archiveRef: String, actor: String) -> Result<serde_json::Value, String> {
+#[tauri::command(rename_all = "camelCase")]
+fn factory_reset(archive_ref: String, actor: String) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::factory_reset(&conn, &archiveRef, &actor)
+    fiscal::factory_reset(&conn, &archive_ref, &actor)
 }
 
 /// P3 (v1.4.4): log a just-taken hot snapshot in `backups_log`
 /// (retention-exempt when it is a pre-reset safety archive).
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn register_backup(
     id: String,
     dest: String,
     label: String,
-    appVersion: String,
+    app_version: String,
     exempt: bool,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::register_backup(&conn, &id, &dest, &label, &appVersion, exempt)
+    fiscal::register_backup(&conn, &id, &dest, &label, &app_version, exempt)
 }
 
 /// v1.4.6: native cash-session lane (production independence, #PROD-CASH).
 /// The installed app has no :3100 loopback — these replace the server calls
 /// the Cloture page and the POS till-expense path used to make.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn cash_open(
     id: String,
-    cashierName: String,
-    openingFloatCt: i64,
+    cashier_name: String,
+    opening_float_ct: i64,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::cash_open(&conn, &id, &cashierName, openingFloatCt)
+    fiscal::cash_open(&conn, &id, &cashier_name, opening_float_ct)
 }
 
 /// v1.4.6: guarded till movement (F3/F4 twins enforced natively).
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn cash_movement(
     id: String,
-    sessionId: String,
-    movementType: String,
-    amountCt: i64,
+    session_id: String,
+    movement_type: String,
+    amount_ct: i64,
     reason: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::cash_movement(&conn, &id, &sessionId, &movementType, amountCt, &reason)
+    fiscal::cash_movement(&conn, &id, &session_id, &movement_type, amount_ct, &reason)
 }
 
 /// v1.4.6: live till status (native theoretical, same equation as the server).
@@ -236,23 +236,23 @@ fn cash_sessions(limit: i64) -> Result<serde_json::Value, String> {
 }
 
 /// v1.4.6: the movement trail of one session (F8), newest first.
-#[tauri::command]
-fn cash_movements(sessionId: String, limit: i64) -> Result<serde_json::Value, String> {
+#[tauri::command(rename_all = "camelCase")]
+fn cash_movements(session_id: String, limit: i64) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::cash_movements(&conn, &sessionId, limit)
+    fiscal::cash_movements(&conn, &session_id, limit)
 }
 
 /// v1.4.6: atomic SHIFT close + hash-chained Z (day-lock enforced natively).
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn cash_close_and_z(
-    sessionId: String,
-    countedCashCt: i64,
+    session_id: String,
+    counted_cash_ct: i64,
     notes: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::cash_close_and_z(&mut conn, &sessionId, countedCashCt, notes.as_deref())
+    fiscal::cash_close_and_z(&mut conn, &session_id, counted_cash_ct, notes.as_deref())
 }
 
 /// v1.4.9 (#PROD-LOCAL): fiscal loss — ledger row + stock decrement, no :3100.
@@ -294,11 +294,11 @@ fn z_list() -> Result<serde_json::Value, String> {
 
 /// T12 fix: native PIN change. The exe never had this command — forced-change
 /// died with "check the connection" because no loopback runs in the shell.
-#[tauri::command]
-fn change_pin(userId: i64, oldPin: String, newPin: String) -> Result<serde_json::Value, String> {
+#[tauri::command(rename_all = "camelCase")]
+fn change_pin(user_id: i64, old_pin: String, new_pin: String) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    auth::user_change_pin(&conn, userId, &oldPin, &newPin)
+    auth::user_change_pin(&conn, user_id, &old_pin, &new_pin)
 }
 
 /// T8: native safe user list (secrets never leave the DAL).
@@ -311,13 +311,13 @@ fn user_list() -> Result<serde_json::Value, String> {
 
 /// T8b: native user creation (owner-gated) — closes the production gap where
 /// the exe could verify users but never create them.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn user_create(
     username: String,
-    displayName: String,
+    display_name: String,
     role: String,
     pin: String,
-    requesterRole: String,
+    requester_role: String,
     actor: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
@@ -325,25 +325,25 @@ fn user_create(
     auth::user_create(
         &conn,
         &username,
-        &displayName,
+        &display_name,
         &role,
         &pin,
-        &requesterRole,
+        &requester_role,
         &actor,
     )
 }
 
 /// T8b: native activate/deactivate (owner-gated, owners immune).
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 fn user_set_active(
-    userId: i64,
+    user_id: i64,
     active: bool,
-    requesterRole: String,
+    requester_role: String,
     actor: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    auth::user_set_active(&conn, userId, active, &requesterRole, &actor)
+    auth::user_set_active(&conn, user_id, active, &requester_role, &actor)
 }
 
 /// T8: native audit read for the manager lane.
