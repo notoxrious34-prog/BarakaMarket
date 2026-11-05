@@ -173,6 +173,84 @@ fn valid_day(day: &str) -> bool {
     day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-'
 }
 
+/// F2 (v1.4.5): the legal day is Africa/Algiers local, never UTC.
+/// Algiers is UTC+1 year-round (no DST), so a local day D is exactly the
+/// UTC window [D-1 23:00Z, D 23:00Z). No chrono dependency — civil-date
+/// arithmetic (Howard Hinnant's days_from_civil / civil_from_days).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+    let yoe = y2 - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z2 = z + 719468;
+    let era = if z2 >= 0 { z2 } else { z2 - 146096 } / 146097;
+    let doe = z2 - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn parse_day(day: &str) -> Result<(i64, i64, i64), String> {
+    let y: i64 = day
+        .get(0..4)
+        .ok_or("[fiscal] bad day")?
+        .parse()
+        .map_err(|_| "[fiscal] bad day")?;
+    let m: i64 = day
+        .get(5..7)
+        .ok_or("[fiscal] bad day")?
+        .parse()
+        .map_err(|_| "[fiscal] bad day")?;
+    let d: i64 = day
+        .get(8..10)
+        .ok_or("[fiscal] bad day")?
+        .parse()
+        .map_err(|_| "[fiscal] bad day")?;
+    Ok((y, m, d))
+}
+
+fn fmt_day(y: i64, m: i64, d: i64) -> String {
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// UTC instant bounds [start, end) covering one local Algiers day (ISO strings).
+fn day_bounds_utc(day: &str) -> Result<(String, String), String> {
+    let (y, m, d) = parse_day(day)?;
+    let prev = days_from_civil(y, m, d) - 1;
+    let (py, pm, pd) = civil_from_days(prev);
+    Ok((
+        format!("{}T23:00:00.000Z", fmt_day(py, pm, pd)),
+        format!("{day}T23:00:00.000Z"),
+    ))
+}
+
+/// Local Algiers calendar day of a stored UTC timestamp (`YYYY-MM-DDTHH:MM…Z`).
+fn algiers_day(ts: &str) -> Result<String, String> {
+    let date = ts.get(0..10).ok_or("[fiscal] bad timestamp")?;
+    let hh: i64 = ts
+        .get(11..13)
+        .ok_or("[fiscal] bad timestamp")?
+        .parse()
+        .map_err(|_| "[fiscal] bad timestamp")?;
+    let (y, m, d) = parse_day(date)?;
+    if hh + 1 >= 24 {
+        let (ny, nm, nd) = civil_from_days(days_from_civil(y, m, d) + 1);
+        Ok(fmt_day(ny, nm, nd))
+    } else {
+        Ok(date.to_string())
+    }
+}
+
 /// #004: true when a legal DAY close already freezes `day`.
 /// SHIFT snapshots never lock — several shifts may close the same day.
 fn day_locked(conn: &Connection, day: &str) -> Result<bool, String> {
@@ -362,13 +440,13 @@ pub fn record_sale(
         }
     }
 
-    // #004: a legally closed day is frozen — no new posting may land in it.
+    // #004/F2: a legally closed LOCAL day is frozen — no new posting may land in it.
     let created = str_field(&header["created_at"], "created_at")?;
-    let day = created.get(0..10).ok_or("[fiscal] bad created_at day")?;
-    if !valid_day(day) {
+    let day = algiers_day(&created)?;
+    if !valid_day(&day) {
         return Err("[fiscal] bad created_at day".to_string());
     }
-    if day_locked(conn, day)? {
+    if day_locked(conn, &day)? {
         return Err(format!(
             "[fiscal] day {day} is already legally closed (Z FINALISÉ) — sale refused"
         ));
@@ -609,9 +687,9 @@ pub fn void_sale(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let (invoice, status, day): (String, String, String) = tx
+    let (invoice, status, created_at): (String, String, String) = tx
         .query_row(
-            "SELECT invoice_number, status, substr(created_at, 1, 10) FROM sales WHERE id = ?1",
+            "SELECT invoice_number, status, created_at FROM sales WHERE id = ?1",
             [sale_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -619,8 +697,9 @@ pub fn void_sale(
     if status == "CANCELLED" {
         return Err("[fiscal] sale already voided".to_string());
     }
-    // #004: a legally closed day is frozen — voids to it are refused.
+    // #004/F2: a legally closed LOCAL day is frozen — voids to it are refused.
     // (COUNT runs on the tx: same Immediate lock, no TOCTOU.)
+    let day = algiers_day(&created_at)?;
     let locked: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM z_reports WHERE day = ?1 AND close_kind = 'DAY'",
@@ -676,6 +755,8 @@ pub fn z_close(
             "[fiscal] day {day} is already legally closed (Z FINALISÉ) — close refused"
         ));
     }
+    // F2: aggregate the LOCAL day's UTC window, never the UTC prefix.
+    let (wstart, wend) = day_bounds_utc(day)?;
     let (n, ht, b0, b9, a9, b19, a19, tva, timbre, ttc, cash, cib, dah, cred, first, last): (
         i64,
         i64,
@@ -706,8 +787,8 @@ pub fn z_close(
                COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0),
                COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0),
                MIN(invoice_number), MAX(invoice_number)
-             FROM sales WHERE status = 'COMPLETED' AND substr(created_at, 1, 10) = ?1",
-            [day],
+             FROM sales WHERE status = 'COMPLETED' AND created_at >= ?1 AND created_at < ?2",
+            [&wstart, &wend],
             |r| {
                 Ok((
                     r.get(0)?,
@@ -733,8 +814,8 @@ pub fn z_close(
     let coll: i64 = tx
         .query_row(
             "SELECT COALESCE(SUM(total_collected_ct), 0) FROM client_settlements
-             WHERE payment_method = 'ESPECES' AND substr(date, 1, 10) = ?1",
-            [day],
+             WHERE payment_method = 'ESPECES' AND date >= ?1 AND date < ?2",
+            [&wstart, &wend],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
@@ -782,18 +863,20 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
     if day.len() != 10 || day.as_bytes()[4] != b'-' || day.as_bytes()[7] != b'-' {
         return Err("[fiscal] day must be YYYY-MM-DD".to_string());
     }
+    // F2: the label is a LOCAL day — aggregate its UTC window.
+    let (wstart, wend) = day_bounds_utc(day)?;
     let (count, total): (i64, Option<i64>) = conn
         .query_row(
             "SELECT COUNT(*), SUM(total_ttc_ct) FROM sales
-             WHERE substr(created_at, 1, 10) = ?1 AND status = 'COMPLETED'",
-            [day],
+             WHERE created_at >= ?1 AND created_at < ?2 AND status = 'COMPLETED'",
+            [&wstart, &wend],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
     let voids: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sales WHERE substr(created_at, 1, 10) = ?1 AND status = 'CANCELLED'",
-            [day],
+            "SELECT COUNT(*) FROM sales WHERE created_at >= ?1 AND created_at < ?2 AND status = 'CANCELLED'",
+            [&wstart, &wend],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
@@ -1371,6 +1454,31 @@ mod tests {
         assert_eq!(z["voids_count"], 1);
         assert_eq!(z["total_ttc_ct"], 179400);
         assert!(daily_z(&db, "11-01").is_err());
+    }
+
+    #[test]
+    fn f2_edge_hour_belongs_to_the_new_local_day() {
+        // 2026-10-26T23:30:00Z == 2026-10-27T00:30:00+01:00 (Algiers).
+        let mut db = memdb();
+        let mut h = sale_header(Some("F2-1"));
+        h["id"] = serde_json::json!("f2");
+        h["created_at"] = serde_json::json!("2026-10-26T23:30:00.000Z");
+        record_sale(&mut db, &h, &sale_items()).unwrap();
+        let old = daily_z(&db, "2026-10-26").unwrap();
+        assert_eq!(old["sales_count"], 0);
+        let new = daily_z(&db, "2026-10-27").unwrap();
+        assert_eq!(new["sales_count"], 1);
+        assert_eq!(
+            algiers_day("2026-10-26T23:30:00.000Z").unwrap(),
+            "2026-10-27"
+        );
+        assert_eq!(
+            algiers_day("2026-11-04T22:30:00.000Z").unwrap(),
+            "2026-11-04"
+        );
+        let (s, e) = day_bounds_utc("2026-11-04").unwrap();
+        assert_eq!(s, "2026-11-03T23:00:00.000Z");
+        assert_eq!(e, "2026-11-04T23:00:00.000Z");
     }
 
     #[test]
