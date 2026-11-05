@@ -5,6 +5,7 @@ import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
 import { commitZClose, fetchDailyZ } from '../../core/fiscal-authority';
 import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
+import { fiscalDayISO } from '../../core/fiscal-day';
 import { APP_VERSION } from '../../core/version';
 import {
   FileText,
@@ -114,7 +115,8 @@ export const DailyZReportView: React.FC = () => {
   }), [zReport]);
 
   const todayInvoices = useMemo(() => sales
-    .filter(s => s.created_at.startsWith(zReport.date) && s.status === 'COMPLETED' && !s.is_provisional)
+    // F2: compare LOCAL fiscal days, never the UTC prefix.
+    .filter(s => fiscalDayISO(new Date(s.created_at)) === zReport.date && s.status === 'COMPLETED' && !s.is_provisional)
     .map(s => s.invoice_number)
     .sort(), [sales, zReport.date]);
   const firstInvoice = todayInvoices[0] ?? '—';
@@ -135,7 +137,7 @@ export const DailyZReportView: React.FC = () => {
   // #003: today's rows for the legal-void surface (COMPLETED voids first,
   // CANCELLED rows stay visible as the journal — never deleted).
   const todaySales = useMemo(() => sales
-    .filter(s => s.created_at.startsWith(zReport.date))
+    .filter(s => fiscalDayISO(new Date(s.created_at)) === zReport.date)
     .slice()
     .sort((a, b) => b.created_at.localeCompare(a.created_at)), [sales, zReport.date]);
 

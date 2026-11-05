@@ -17,11 +17,12 @@ import { fileURLToPath } from 'node:url';
 import { assertIntegerCentimes } from '../core/money.js';
 import { calculateTimbreFiscalCt, type SaleTotalsCt } from '../core/fiscal.centimes.js';
 import { GENESIS_PREV_HASH as GENESIS_Z_HASH, computeZHash as computeZHashDb } from '../core/zreport.js';
+import { fiscalDayISO, fiscalDayBoundsUTC } from '../core/fiscal-day.js';
 import type {
   PaymentMethod, TVARate, LossReason, InventoryLoss, ImportProductRow, BatchImportResult,
   SupplierDeliveryReceipt, DeliveryReceiptResult, SupplierStatement,
   ClientSettlementPayload, ClientSettlementResult, CreditEligibility,
-  CashMovementType, CashSessionRecord, CashSessionLiveStatus, ZClosureResult,
+  CashMovementType, CashSessionRecord, CashSessionLiveStatus, ZClosureResult, CashMovementRecord,
   ProtectedActionType, VoidLogEntry, VoidLogRecord, VoidSummary,
   BackupMetadata, BackupValidationReport, RestoreResult,
 } from '../types';
@@ -410,6 +411,8 @@ export interface BarakaDb {
   closeCashSessionAndGenerateZ(sessionId: string, countedCashCt: number, notes?: string): ZClosureResult;
   /** Clôture rebuild (v1.4.5): the page needs history, not just the live row. */
   listCashSessions(limit?: number): CashSessionRecord[];
+  /** F8 (v1.4.5): the movement trail of one session (read-only lane). */
+  listCashMovements(sessionId: string, limit?: number): CashMovementRecord[];
   /** ADR-014-MKT: manager override PIN + append-only void audit. */
   recordVoidLog(entry: VoidLogEntry): VoidLogRecord;
   getVoidLogs(filters?: { fromDate?: string; toDate?: string; reason?: string; limit?: number }): VoidLogRecord[];
@@ -504,6 +507,10 @@ export interface DayAggregatesCt {
 }
 
 export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregatesCt {
+  // F2: the legal day is Africa/Algiers local — aggregate the UTC window
+  // [D-1 23:00Z, D 23:00Z), not the UTC prefix, so the 00:00–01:00 local
+  // hour lands in the new day.
+  const { start, end } = fiscalDayBoundsUTC(day);
   const agg = db.prepare(
     `SELECT COUNT(*) AS n,
        COALESCE(SUM(total_ht_ct), 0) AS ht,
@@ -518,16 +525,16 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
        COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0) AS dah,
        COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0) AS cred,
        MIN(invoice_number) AS first, MAX(invoice_number) AS last
-     FROM sales WHERE status = 'COMPLETED' AND substr(created_at, 1, 10) = ?`,
-  ).get(day) as {
+     FROM sales WHERE status = 'COMPLETED' AND created_at >= ? AND created_at < ?`,
+  ).get(start, end) as {
     n: number; ht: number; b0: number; b9: number; a9: number; b19: number; a19: number;
     tva: number; timbre: number; ttc: number; cash: number; cib: number; dah: number; cred: number;
     first: string | null; last: string | null;
   };
   const settled = db.prepare(
     `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
-     WHERE payment_method = 'ESPECES' AND substr(date, 1, 10) = ?`,
-  ).get(day) as { t: number };
+     WHERE payment_method = 'ESPECES' AND date >= ? AND date < ?`,
+  ).get(start, end) as { t: number };
   return {
     salesCount: agg.n, totalHtCt: agg.ht, tva0BaseCt: agg.b0, tva9BaseCt: agg.b9,
     tva9AmtCt: agg.a9, tva19BaseCt: agg.b19, tva19AmtCt: agg.a19, totalTvaCt: agg.tva,
@@ -1171,6 +1178,22 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       }));
     },
 
+    /** F8 (v1.4.5): the movement trail of one session, newest first. */
+    listCashMovements(sessionId: string, limit?: number): CashMovementRecord[] {
+      const n = Math.min(Math.max(Math.floor(limit ?? 50) || 50, 1), 200);
+      const rows = db.prepare(
+        `SELECT id, session_id, movement_type, amount_ct, reason, created_at
+         FROM cash_movements WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      ).all(sessionId, n) as {
+        id: string; session_id: string; movement_type: CashMovementType;
+        amount_ct: number; reason: string | null; created_at: string;
+      }[];
+      return rows.map(r => ({
+        id: r.id, sessionId: r.session_id, type: r.movement_type,
+        amountCt: r.amount_ct, reason: r.reason ?? '', createdAt: r.created_at,
+      }));
+    },
+
     closeCashSessionAndGenerateZ(sessionId: string, countedCashCt: number, notes?: string): ZClosureResult {
       assertIntegerCentimes(countedCashCt, 'countedCashCt');
       if (countedCashCt < 0) throw new Error('[db] countedCashCt must be >= 0');
@@ -1182,9 +1205,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         if (!s) throw new Error(`[db] cash session not found: ${sessionId}`);
         if (s.status !== 'OPEN') throw new Error(`[db] cash session already ${s.status}: ${sessionId}`);
         const periodEnd = new Date().toISOString();
-        // #004: a legally closed day is frozen — no shift may post to it.
-        if (isDayLocked(db, periodEnd.slice(0, 10))) {
-          throw new Error(`[db] day ${periodEnd.slice(0, 10)} is already legally closed (Z FINALISÉ) — shift close refused`);
+        // #004/F2: a legally closed LOCAL day is frozen — no shift may post to it.
+        const periodDay = fiscalDayISO(new Date(periodEnd));
+        if (isDayLocked(db, periodDay)) {
+          throw new Error(`[db] day ${periodDay} is already legally closed (Z FINALISÉ) — shift close refused`);
         }
         const agg = db.prepare(
           `SELECT COUNT(*) AS n,
@@ -1218,7 +1242,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         const theoretical = s.opening_float_ct + agg.cash + settled.t + moves.dep - moves.wit - moves.exp;
         const diff = countedCashCt - theoretical;
         // Fiscal Z (hash-chained, gapless) — same statements as finalizeZReport, inside this txn.
-        const day = periodEnd.slice(0, 10);
+        const day = fiscalDayISO(new Date(periodEnd));
         const year = parseInt(day.slice(0, 4), 10);
         const prevRow = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as
           | { hash: string }
@@ -1687,10 +1711,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         const existing = byKey(clientSaleId);
         if (existing) return { id: existing.id, invoice_number: existing.invoice_number, ticket_number: existing.ticket_number };
       }
-      // #004: a legally closed day is frozen — no new posting may land in it.
+      // #004/F2: a legally closed LOCAL day is frozen — no new posting may land in it.
       // (Idempotent replays return above, so retries of an already-recorded
       // sale never trip this guard.)
-      const saleDay = createdAt.slice(0, 10);
+      const saleDay = fiscalDayISO(new Date(createdAt));
       if (isDayLocked(db, saleDay)) {
         throw new Error(`[db] day ${saleDay} is already legally closed (Z FINALISÉ) — sale refused`);
       }
@@ -1768,8 +1792,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           | { id: string; invoice_number: string; status: string; created_at: string } | undefined;
         if (!sale) throw new Error(`[db] sale not found: ${saleId}`);
         if (sale.status === 'CANCELLED') throw new Error('[db] sale already voided');
-        // #004: a legally closed day is frozen — voids to it are refused.
-        const day = sale.created_at.slice(0, 10);
+        // #004/F2: voids land in the LOCAL fiscal day of the sale.
+        const day = fiscalDayISO(new Date(sale.created_at));
         if (isDayLocked(db, day)) {
           throw new Error(`[db] day ${day} is already legally closed (Z FINALISÉ) — void refused`);
         }

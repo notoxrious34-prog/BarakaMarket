@@ -3,8 +3,10 @@
  * Trust-on-read is over: an ACTIVATED flag in localStorage proves nothing
  * until the key re-verifies. Two tiers:
  *   crypto — the key's Ed25519 signature over (store || ACTIVATION hwid);
- *   drift  — the activation HWID vs this machine (warning only, never a lock:
- *            a browser update changes the UA-derived HWID on legit shops).
+ *   drift  — the activation HWID vs this machine. Owner decision (v1.4.5):
+ *            drift on a KNOWN activation HWID locks the till until
+ *            re-activation; legacy records with NO hwid stay grandfathered
+ *            (warning only, never a lock).
  * The verifier is injected so every rule is unit-tested without crypto.
  *
  * @module core/license-verify

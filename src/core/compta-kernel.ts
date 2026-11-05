@@ -14,6 +14,7 @@ import type {
   Sale,
   SupplierPayment,
 } from '../types';
+import { fiscalDayISO } from './fiscal-day';
 
 export type JournalType = 'VENTE' | 'ACHAT' | 'ENCAISSEMENT' | 'DECAISSEMENT';
 
@@ -183,9 +184,11 @@ export function filterJournalByPeriod(
   now: Date = new Date(),
 ): JournalEntry[] {
   if (period === 'all') return entries;
-  const today = now.toISOString().slice(0, 10);
-  if (period === 'today') return entries.filter(e => e.date.slice(0, 10) === today);
-  const month = now.toISOString().slice(0, 7);
+  // F2 (v1.4.5): 'today' is the Africa/Algiers fiscal day, entry dates compare
+  // through the same local-day lens (UTC edge-hours land in the local day).
+  const today = fiscalDayISO(now);
+  if (period === 'today') return entries.filter(e => fiscalDayISO(new Date(e.date)) === today);
+  const month = fiscalDayISO(now).slice(0, 7);
   return entries.filter(e => e.date.slice(0, 7) === month);
 }
 

@@ -19,6 +19,7 @@ import { can, type Role } from '../src/core/rbac.js';
 import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
+import { fiscalDayISO, fiscalDayBoundsUTC } from '../src/core/fiscal-day.js';
 
 /** T4 (ADR-025): stable 256-bit loopback write token, stored beside the DB. */
 export function loopbackTokenPath(dbDir: string): string {
@@ -436,6 +437,14 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     res.json(baraka.listCashSessions(limit));
   });
 
+  // F8 (v1.4.5): movement trail of one session (read stays open).
+  app.get('/api/cash/movements', (req, res) => {
+    const sessionId = String(req.query.sessionId ?? '');
+    if (!sessionId) { res.status(400).json({ error: 'query must be ?sessionId=<id>' }); return; }
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? '50')), 1) || 50, 200);
+    res.json(baraka.listCashMovements(sessionId, limit));
+  });
+
   app.post('/api/cash/close-and-z', (req, res) => {
     try {
       const { sessionId, countedCashCt, notes, storeName, printReceipt, actor } = req.body as {
@@ -626,14 +635,18 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
   });
 
   app.get('/api/z/summary', (req, res) => {
-    const date = String(req.query.date ?? new Date().toISOString().slice(0, 10));
+    // F2 (v1.4.5): the legal day is Africa/Algiers local — same UTC window
+    // as computeDayAggregates, never the UTC prefix.
+    const raw = String(req.query.date ?? fiscalDayISO());
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : fiscalDayISO();
+    const { start, end } = fiscalDayBoundsUTC(day);
     const rows = baraka.db.prepare(
-      "SELECT * FROM sales WHERE status = 'COMPLETED' AND substr(created_at, 1, 10) = ?",
-    ).all(date) as Array<Record<string, number | string>>;
+      "SELECT * FROM sales WHERE status = 'COMPLETED' AND created_at >= ? AND created_at < ?",
+    ).all(start, end) as Array<Record<string, number | string>>;
     const sum = (k: string) => rows.reduce((a, r) => a + (r[k] as number), 0);
     const byMethod = (m: string) => rows.filter(r => r.payment_method === m).reduce((a, r) => a + (r.total_ttc_ct as number), 0);
     res.json({
-      date,
+      date: day,
       sales_count: rows.length,
       total_ht_ct: sum('total_ht_ct'),
       total_tva_ct: sum('total_tva_ct'),

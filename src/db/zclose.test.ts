@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { openBarakaDb, computeDayAggregates } from './sqlite.js';
 import type { SaleHeaderInput, SaleItemInput } from './sqlite.js';
 import { GENESIS_PREV_HASH, verifyZChain, type ZReport } from '../core/zreport.js';
+import { fiscalDayISO } from '../core/fiscal-day.js';
 import { buildZTicketText, type ZTicketData } from '../core/z-ticket.js';
 
 const TMP = path.join(process.cwd(), 'data', '.tmp-tests');
@@ -174,7 +175,8 @@ test('zclose: locked day freezes voids, late sales and shift closes', () => {
   );
   // A shift whose window lands on a locked day is refused: freeze today,
   // then the shift close (periodEnd = now) must trip the day lock.
-  const today = new Date().toISOString().slice(0, 10);
+  // F2: "today" is the LOCAL day, or the suite flakes in the 23:00–00:00Z hour.
+  const today = fiscalDayISO();
   b.recordSale(header('CIB', 1000, 0, 0, 0, `${today}T09:00:00.000Z`), [item(1000, 0, 0)]);
   b.finalizeZReport({
     day: today, openingTime: '08:00', closingTime: '20:00',
@@ -200,6 +202,30 @@ test('zclose: locked day freezes voids, late sales and shift closes', () => {
     },
   });
   assert.equal(z2.report_number, 'Z-2026-000003');
+  b.close();
+  for (const suf of ['', '-wal', '-shm', '-journal']) {
+    try { fs.unlinkSync(p + suf); } catch { /* ignore */ }
+  }
+});
+
+test('zclose: F2 — a 00:30 local sale belongs to the NEW local day, never UTC yesterday', () => {
+  const p = tmpFile();
+  const b = openBarakaDb(p);
+  b.upsertProduct(PROD);
+  // 2026-10-26T23:30:00Z == 2026-10-27T00:30:00+01:00 (Algiers).
+  const edge = b.recordSale(header('CIB', 1000, 0, 0, 0, '2026-10-26T23:30:00.000Z'), [item(1000, 0, 0)]);
+  // UTC-yesterday's book is empty; the new local day owns the sale.
+  assert.equal(computeDayAggregates(b.db, '2026-10-26').salesCount, 0);
+  const agg27 = computeDayAggregates(b.db, '2026-10-27');
+  assert.equal(agg27.salesCount, 1);
+  assert.equal(agg27.firstInvoice, edge.invoice_number);
+  // Attribution follows the local day: locking 27 freezes the edge sale…
+  closeIn(b, '2026-10-27', agg27);
+  assert.throws(
+    () => b.recordSale(header('CIB', 1000, 0, 0, 0, '2026-10-26T23:45:00.000Z'), [item(1000, 0, 0)]),
+    /legally closed/,
+  );
+  assert.throws(() => b.voidSale(edge.id, 'late regret', 'owner'), /legally closed/);
   b.close();
   for (const suf of ['', '-wal', '-shm', '-journal']) {
     try { fs.unlinkSync(p + suf); } catch { /* ignore */ }

@@ -182,6 +182,16 @@ export interface CashSessionRecord {
   notes?: string;
 }
 
+/** F8 (v1.4.5): one till movement row (read-only trail). */
+export interface CashMovementRecord {
+  id: string;
+  sessionId: string;
+  type: CashMovementType;
+  amountCt: number;
+  reason: string;
+  createdAt: string;
+}
+
 export interface CashSessionLiveStatus {
   session: CashSessionRecord;
   openingFloatCt: number;

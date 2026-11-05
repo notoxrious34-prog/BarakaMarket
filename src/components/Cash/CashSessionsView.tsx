@@ -18,6 +18,11 @@ interface SessionRow {
   cashDiffCt?: number; status: 'OPEN' | 'CLOSED'; zReportId?: string; notes?: string;
 }
 
+interface MovementRow {
+  id: string; type: 'DEPOSIT' | 'WITHDRAWAL' | 'EXPENSE';
+  amountCt: number; reason: string; createdAt: string;
+}
+
 interface ZResult {
   zNumber: string; theoreticalCashCt: number; closingCountedCt: number;
   cashDiffCt: number; hash: string;
@@ -29,7 +34,9 @@ export const CashSessionsView: React.FC = () => {
   const [live, setLive] = useState<LiveStatus | null>(null);
   const [history, setHistory] = useState<SessionRow[]>([]);
   const [offline, setOffline] = useState(false);
-  const [cashier, setCashier] = useState(session?.displayName ?? 'Amine');
+  const [movements, setMovements] = useState<MovementRow[]>([]);
+  // F6 (v1.4.5): no hardcoded fallback — the till refuses to open nameless (K5).
+  const [cashier, setCashier] = useState(session?.displayName ?? '');
   const [opening, setOpening] = useState('5000');
   const [movType, setMovType] = useState<'DEPOSIT' | 'WITHDRAWAL' | 'EXPENSE'>('DEPOSIT');
   const [movAmount, setMovAmount] = useState('');
@@ -55,7 +62,18 @@ export const CashSessionsView: React.FC = () => {
     }
     try {
       const h = await fetch(`${API}/api/cash/sessions?limit=10`);
-      if (h.ok) setHistory(await h.json());
+      if (h.ok) {
+        const rows: SessionRow[] = await h.json();
+        setHistory(rows);
+        // F8: the movement trail of the newest session (read-only, with the polls).
+        const open = rows.find(r => r.status === 'OPEN') ?? rows[0];
+        if (open) {
+          try {
+            const m = await fetch(`${API}/api/cash/movements?sessionId=${encodeURIComponent(open.id)}&limit=50`);
+            if (m.ok) setMovements(await m.json());
+          } catch { /* trail is a bonus, never blocks the till */ }
+        } else setMovements([]);
+      }
     } catch { /* history is a bonus, never blocks the till */ }
   }, []);
 
@@ -254,6 +272,44 @@ export const CashSessionsView: React.FC = () => {
           </div>
         </>
       )}
+      {/* F8 (v1.4.5): the movement trail — every dinar in/out carries its reason. */}
+      <div className={card}>
+        <h3 className="text-xs font-bold text-slate-300 mb-2">{isAr ? 'سجل الحركات' : 'Mouvements de caisse'}</h3>
+        {movements.length === 0 ? (
+          <p className="text-[11px] text-slate-500">{isAr ? 'لا حركات مسجلة بعد في هذه الجلسة.' : 'Aucun mouvement sur cette session.'}</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-slate-500 text-start border-b border-[#2b3a4f]">
+                  <th className="py-1 font-semibold">{isAr ? 'الوقت' : 'Heure'}</th>
+                  <th className="py-1 font-semibold">{isAr ? 'النوع' : 'Type'}</th>
+                  <th className="py-1 font-semibold">{isAr ? 'السبب' : 'Motif'}</th>
+                  <th className="py-1 font-semibold text-end" dir="ltr">{isAr ? 'المبلغ' : 'Montant'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {movements.map(m => (
+                  <tr key={m.id} className="border-b border-[#1a2432] text-slate-300">
+                    <td className="py-1.5 font-mono text-slate-400" dir="ltr">{m.createdAt.slice(11, 16)}</td>
+                    <td className="py-1.5">
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${m.type === 'DEPOSIT'
+                        ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                        : m.type === 'WITHDRAWAL'
+                          ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                          : 'bg-rose-500/10 text-rose-300 border-rose-500/30'}`}>
+                        {m.type}
+                      </span>
+                    </td>
+                    <td className="py-1.5">{m.reason || '—'}</td>
+                    <td className="py-1.5 font-mono text-end font-bold" dir="ltr">{dz(m.amountCt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
       {/* K9: the page no longer ends at the live row — past shifts stay visible. */}
       {history.length > 0 && (
         <div className={card}>

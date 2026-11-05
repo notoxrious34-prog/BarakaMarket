@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState, useMemo 
 import { computeHwid, collectBrowserFingerprint, validateLicense } from '../core/licensing';
 import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed, loadStoredLicense } from '../core/license-store';
 import { assessStoredLicense } from '../core/license-verify';
+import { fiscalDayISO } from '../core/fiscal-day';
 import {
   AccountingSummary,
   Advance,
@@ -209,8 +210,10 @@ interface AppContextType {
   isTrialExpired: boolean;
   /** L1-fix: stored ACTIVATED re-verified (forged key => treated as expired). */
   licenseBroken: boolean;
-  /** L-drift: activation HWID differs from this machine (warning only). */
+  /** L-drift: activation HWID differs from this machine (lock iff hwid known). */
   licenseDrift: boolean;
+  /** L1 detail: last Ed25519 re-verification passed (false => forged/corrupt). */
+  licenseCryptoOk: boolean;
   openPrintModal: (sale: Sale, type: 'ticket' | 'facture') => void;
   closePrintModal: () => void;
   closeSettlementQuittance: () => void;
@@ -2088,11 +2091,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [sales, licenseRev]);
 
   /** ADR-002-MKT: trial checkout lockout — BOTH budgets exhausted, no license. */
-  // L1-fix: a forged ACTIVATED record is treated as expired the moment the
-  // re-verification fails (trust-on-read is over). Legacy records without an
-  // activation HWID stay grandfathered (warning only) — see licenseDrift.
+  // L1 + drift-lock (owner decision, v1.4.5): a forged ACTIVATED record is
+  // treated as expired the moment re-verification fails (trust-on-read is
+  // over) — AND a genuine key on a different machine locks the till until
+  // re-activation. Only legacy records WITHOUT an activation HWID stay
+  // grandfathered (warning only) — see licenseDrift.
   const [licenseBroken, setLicenseBroken] = useState(false);
   const [licenseDrift, setLicenseDrift] = useState(false);
+  const [licenseCryptoOk, setLicenseCryptoOk] = useState(true);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -2103,9 +2109,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const a = await assessStoredLicense(rec, currentHwid, validateLicense);
         if (cancelled) return;
         setLicenseDrift(a.drift);
+        setLicenseCryptoOk(a.cryptoOk);
         // Enforce only when the activation HWID is known: a signature that
-        // fails against its OWN hwid is forged or corrupted — never genuine.
-        if (rec.hwid?.trim() && !a.cryptoOk) setLicenseBroken(true);
+        // fails against its OWN hwid is forged or corrupted — never genuine —
+        // and a genuine key on another machine must re-activate here.
+        if (rec.hwid?.trim() && (!a.cryptoOk || a.drift)) setLicenseBroken(true);
       } catch { /* offline lane: keep the trusted snapshot */ }
     })();
     return () => { cancelled = true; };
@@ -2129,11 +2137,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const generateDailyZReport = (): DailyZReport => {
-    const today = new Date().toISOString().split('T')[0];
+    // F2 (v1.4.5): the legal day is Africa/Algiers local — edge-hour rows
+    // land in the local day, same window the server aggregates.
+    const today = fiscalDayISO(new Date());
     // X1 (cross-audit): provisional DRAFT rows are not fiscal yet — the server
     // aggregates, the close verifier and the journal all exclude them.
-    const todaySales = sales.filter(s => s.created_at.startsWith(today) && s.status === 'COMPLETED' && !s.is_provisional);
-    const todaySettlements = settlements.filter(st => st.date.startsWith(today));
+    const todaySales = sales.filter(s => fiscalDayISO(new Date(s.created_at)) === today && s.status === 'COMPLETED' && !s.is_provisional);
+    const todaySettlements = settlements.filter(st => fiscalDayISO(new Date(st.date)) === today);
 
     let totalHT = 0;
     let totalTVA = 0;
@@ -2283,7 +2293,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         completeStoreSetup,
         licenseActivated: licenseSnapshot.activated,
         trialRemaining: { sales: licenseSnapshot.sales, days: licenseSnapshot.days },
-        isTrialExpired, licenseBroken, licenseDrift,
+        isTrialExpired, licenseBroken, licenseDrift, licenseCryptoOk,
         openPrintModal,
         closePrintModal,
         closeSettlementQuittance,

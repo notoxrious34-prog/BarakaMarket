@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 
 export const LicenseManagerView: React.FC = () => {
-  const { language, sales, storeProfile, licenseBroken, licenseDrift } = useApp();
+  const { language, sales, storeProfile, licenseBroken, licenseDrift, licenseCryptoOk } = useApp();
   const isAr = language === 'ar';
 
   // Gate-03 TASK 3: real deterministic HWID (stable seed + platform fingerprint).
@@ -141,21 +141,26 @@ export const LicenseManagerView: React.FC = () => {
           </div>
 
           <div className="p-6 space-y-5">
-            {/* L1-fix: a forged ACTIVATED never looks active anymore. */}
+            {/* L1 + drift-lock: forged key → invalid; genuine key on another
+                machine (crypto OK, hwid drifted) → re-activate here. Legacy
+                no-hwid drift keeps the amber warning below (never a lock). */}
             {licenseBroken && (
               <div className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-rose-950/60 border-rose-800/60">
                 <ShieldCheck className="w-7 h-7 shrink-0 text-rose-400" />
                 <div>
                   <div className="text-[10px] font-bold uppercase tracking-widest text-rose-300">
-                    {isAr ? 'مفتاح مرفوض' : 'Clé rejetée'}
+                    {isAr ? (!licenseCryptoOk ? 'مفتاح مرفوض' : 'جهاز مختلف') : (!licenseCryptoOk ? 'Clé rejetée' : 'Autre appareil')}
                   </div>
                   <div className="text-sm font-black text-white">
-                    {isAr ? '● هذا المفتاح غير صالح — أعد إدخال مفتاح BarakaDEV الصحيح' : '● Clé invalide — ressaisissez la clé BarakaDEV authentique'}
+                    {isAr
+                      ? (!licenseCryptoOk ? '● هذا المفتاح غير صالح — أعد إدخال مفتاح BarakaDEV الصحيح' : '● هذا المفتاح مفعّل على جهاز آخر — أعد التفعيل على هذا الصندوق')
+                      : (!licenseCryptoOk ? '● Clé invalide — ressaisissez la clé BarakaDEV authentique' : '● Clé activée sur un autre appareil — réactivez sur cette caisse')}
                   </div>
                 </div>
               </div>
             )}
-            {/* Drift: genuine key, different machine — warning only, never a lock. */}
+            {/* Drift without lock = legacy record with no activation HWID
+                (grandfathered, warning only). Known-hwid drift locks above. */}
             {licenseDrift && !licenseBroken && isActivated && (
               <div className="flex items-center gap-3 rounded-xl border px-4 py-3 bg-amber-950/40 border-amber-800/50">
                 <ShieldCheck className="w-7 h-7 shrink-0 text-amber-400" />
@@ -218,7 +223,7 @@ export const LicenseManagerView: React.FC = () => {
                   ? 'للحصول على مفتاح التفعيل الدائم، يرجى إرسال هذا الكود (HWID) مع اسم المحل عبر واتساب أو الهاتف إلى مصلحة الدعم الفني لشركة BarakaDEV:'
                   : 'Pour obtenir la clé définitive, envoyez ce code (HWID) avec le nom du magasin via WhatsApp ou téléphone au support BarakaDEV:'}
               </p>
-              <p className="font-mono text-white">📞 Téléphone / WhatsApp: +213 (0) XX XX XX XX</p>
+              <p className="font-mono text-white">📞 Téléphone / WhatsApp: +213 770 80 70 05</p>
               <p>💰 {isAr ? 'سعر الرخصة: 5,000 دج (دفعة واحدة مدى الحياة)' : 'Tarif de la licence: 5,000 DZD (Paiement unique à vie)'}</p>
             </div>
 

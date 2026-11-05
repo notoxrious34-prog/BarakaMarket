@@ -66,7 +66,8 @@ describe('compta-kernel (C-lane)', () => {
   });
   it('C4: period filter selects today / month / all', () => {
     const j = buildJournalEntries(base);
-    const now = new Date('2026-11-04T23:00:00.000Z');
+    // F2: pin midday — 23:00Z is already the NEXT local day in Algiers.
+    const now = new Date('2026-11-04T12:00:00.000Z');
     assert.equal(filterJournalByPeriod(j, 'today', now).length, 3); // S1, ST1, EXP1
     assert.ok(filterJournalByPeriod(j, 'month', now).length >= 5);
     assert.equal(filterJournalByPeriod(j, 'all', now).length, 5); // S2 voided out

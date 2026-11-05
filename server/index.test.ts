@@ -277,6 +277,36 @@ test('api: K9 sessions history lists the closed shift with diff + Z number', asy
   assert.equal(c.status, 201);
 });
 
+test('api: F8 movements trail lists the session deposits with reasons', async () => {
+  const o = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'F8', openingFloatCt: 10000 }),
+  });
+  assert.equal(o.status, 201);
+  const sess = await o.json() as { id: string };
+  const bad = await fetch(`${base}/api/cash/movements`);
+  assert.equal(bad.status, 400);
+  const empty = await (await fetch(`${base}/api/cash/movements?sessionId=${sess.id}`)).json() as unknown[];
+  assert.deepEqual(empty, []);
+  const dep = await fetch(`${base}/api/cash/movement`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: sess.id, movementType: 'DEPOSIT', amountCt: 25000, reason: 'appoint F8' }),
+  });
+  assert.equal(dep.status, 201);
+  const trail = await (await fetch(`${base}/api/cash/movements?sessionId=${sess.id}`)).json() as {
+    id: string; sessionId: string; type: string; amountCt: number; reason: string; createdAt: string;
+  }[];
+  assert.equal(trail.length, 1);
+  assert.equal(trail[0].type, 'DEPOSIT');
+  assert.equal(trail[0].amountCt, 25000);
+  assert.equal(trail[0].reason, 'appoint F8');
+  const c = await fetch(`${base}/api/cash/close-and-z`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: sess.id, countedCashCt: 35000 }),
+  });
+  assert.equal(c.status, 201);
+});
+
 test('api: POST /security/verify-pin checks the manager gate', async () => {
   const ok = await fetch(`${base}/api/security/verify-pin`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
