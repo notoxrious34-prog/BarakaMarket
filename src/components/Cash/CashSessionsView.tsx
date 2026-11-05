@@ -54,24 +54,32 @@ export const CashSessionsView: React.FC = () => {
 
   const refresh = useCallback(async () => {
     // v1.4.6 (#PROD-CASH): invoke-first, loopback second. The installed app
-    // has no :3100 — the native lane IS the till there. `offline` survives
-    // only when both lanes are down (dev preview without server).
-    const active = await cashActiveNative();
-    if (active) {
-      setLive(active as LiveStatus);
-      setOffline(false);
-    } else {
-      setOffline(true);
-    }
+    // has no :3100 — the native lane IS the till there.
+    // v1.4.6-fix: `cash_active` returns null when NO session is open — that is
+    // a legitimate till state, NOT an outage. The lane probe is the history
+    // call (always an array when the lane answers); `offline` survives only
+    // when both lanes are down (dev preview without server).
     const rows = await cashSessionsNative(10);
+    const laneAlive = Array.isArray(rows);
+    setOffline(!laneAlive);
     if (rows) {
       setHistory(rows as SessionRow[]);
-      // F8: the movement trail of the newest session (read-only, with the polls).
-      const open = (rows as SessionRow[]).find(r => r.status === 'OPEN') ?? rows[0];
+      const open = (rows as SessionRow[]).find(r => r.status === 'OPEN');
       if (open) {
         const m = await cashMovementsNative(open.id, 50);
         if (m) setMovements(m as MovementRow[]);
-      } else setMovements([]);
+        const active = await cashActiveNative();
+        if (active) setLive(active as LiveStatus);
+        else setLive(null);
+      } else {
+        // No session open: the till card shows the open form, not a fossil.
+        setLive(null);
+        const newest = (rows as SessionRow[])[0];
+        if (newest) {
+          const m = await cashMovementsNative(newest.id, 50);
+          if (m) setMovements(m as MovementRow[]);
+        } else setMovements([]);
+      }
     }
     // history/trail stay bonuses — the till card above never blocks on them.
   }, []);
