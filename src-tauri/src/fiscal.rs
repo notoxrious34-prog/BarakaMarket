@@ -1734,6 +1734,34 @@ mod tests {
     }
 
     #[test]
+    fn prodfail_ui_payload_shape_commits() {
+        // v1.4.7 PROD-FAIL: the EXACT header the POS checkout builds today
+        // (AppContext: fiscal_regime, tva/timbre flags, U- prefixed cashier,
+        // 0/9/19 breakdown, ESPECES + change). Must commit on a fresh v8 DB.
+        let mut db = memdb();
+        let h = serde_json::json!({
+            "id": "ui-1", "cashier_id": "U-7", "cashier_name": "Gérant",
+            "client_id": null, "client_name": "Client Passager (Comptoir)",
+            "payment_method": "ESPECES", "amount_paid_ct": 200000,
+            "amount_returned_ct": 20600, "client_sale_id": "SALE-UI-1",
+            "fiscal_regime": "TVA_ON/TIMBRE_ON", "tva_enabled": true, "timbre_enabled": true,
+            "totals": { "total_ht_ct": 165528, "total_tva_ct": 12072, "timbre_ct": 1800,
+                        "total_ttc_ct": 179400,
+                        "tva_breakdown": {
+                            "0": {"base_ht_ct": 65000, "tva_amount_ct": 0, "total_ttc_ct": 65000},
+                            "9": {"base_ht_ct": 70276, "tva_amount_ct": 6324, "total_ttc_ct": 76600},
+                            "19": {"base_ht_ct": 30252, "tva_amount_ct": 5748, "total_ttc_ct": 36000}}},
+            "is_facture": 0, "created_at": "2026-11-05T12:00:00.000Z"
+        });
+        let r = record_sale(&mut db, &h, &sale_items()).unwrap();
+        assert_eq!(r["invoice_number"], "FACT-2026-000001");
+        let timbre: i64 = db
+            .query_row("SELECT timbre_ct FROM sales", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timbre, 1800);
+    }
+
+    #[test]
     fn native_settlement_commits_and_dedupes() {
         let mut db = memdb();
         let mk = |key: Option<&str>| {

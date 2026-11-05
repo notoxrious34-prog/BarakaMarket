@@ -176,6 +176,12 @@ export const DailyZReportView: React.FC = () => {
       setCloseNote(isAr ? 'اليوم مقفل قانونياً — الإغلاق مرفوض' : 'Jour déjà verrouillé — clôture refusée');
       return;
     }
+    // DAY-LOCK is irreversible and freezes EVERY new sale for this fiscal day.
+    // A mistap here is the #1 way a till fills its outbox with refused sales.
+    const ok = window.confirm(isAr
+      ? `إغلاق Z نهائي ليوم ${zReport.date}؟\n• يُجمَّد اليوم قانونياً ولا يمكن التراجع.\n• كل بيع جديد بعده سيُرفض ويبقى في الطابور الصادر.\n• أغلق الوردية (Clôture) أولاً إذا كان الهدف نهاية الدوام فقط.`
+      : `Clôturer DÉFINITIVEMENT le Z du ${zReport.date} ?\n• Le jour est gelé légalement, sans retour.\n• Toute vente ultérieure sera refusée (file sortante).\n• Utilisez Clôture d'abord si c'est une simple fin de service.`);
+    if (!ok) return;
     setClosing(true);
     setCloseNote('');
     try {

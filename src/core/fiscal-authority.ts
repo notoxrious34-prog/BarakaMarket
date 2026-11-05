@@ -149,7 +149,12 @@ export async function postSaleToLoopback(
       signal: ctrl.signal,
     });
     clearTimeout(t);
-    if (!r.ok) return null;
+    if (!r.ok) {
+      let detail = '';
+      try { detail = (await r.json() as { error?: string }).error ?? ''; } catch { /* text body */ }
+      laneError = `[loopback] POST /api/sales → HTTP ${r.status}${detail ? `: ${detail.slice(0, 180)}` : ''}`;
+      return null;
+    }
     return (await r.json()) as { id: string; invoice_number: string; ticket_number: string };
   } catch {
     return null;
@@ -200,10 +205,19 @@ async function invokeLane<T>(
   try {
     const mod = await import('@tauri-apps/api/core');
     const r = (await mod.invoke(command, args)) as T | null;
+    if (r == null) laneError = `[fiscal] ${command}: native refused without payload`;
     return r ?? null;
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    laneError = `[fiscal] ${command}: ${msg.slice(0, 220)}`;
     return null;
   }
+}
+
+/** Last native/loopback refusal reason (set whenever a lane answers null). Never throws. */
+let laneError: string | null = null;
+export function lastLaneError(): string | null {
+  return laneError;
 }
 
 /**

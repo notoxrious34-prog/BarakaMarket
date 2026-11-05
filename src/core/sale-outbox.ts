@@ -24,6 +24,8 @@ export interface OutboxEntry {
   items: unknown[];
   enqueuedAt: string;
   attempts: number;
+  /** Last fiscal refusal reason (native/loopback), shown under the stuck row. */
+  lastError?: string;
 }
 
 export interface OutboxReceipt {
@@ -99,15 +101,19 @@ export async function replayOutbox(
   const remaining: OutboxEntry[] = [];
   for (const e of q) {
     let auth = null;
+    let reason: string | undefined;
     try {
       auth = await post(e);
-    } catch {
+      if (!auth) reason = 'fiscal lane refused without reason';
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      reason = msg.slice(0, 240);
       auth = null;
     }
     if (auth) {
       done.push({ key: e.key, kind: e.kind, provisionalId: e.provisionalId, auth });
     } else {
-      remaining.push({ ...e, attempts: e.attempts + 1 });
+      remaining.push({ ...e, attempts: e.attempts + 1, lastError: reason ?? e.lastError });
     }
   }
   saveOutbox(store, remaining);

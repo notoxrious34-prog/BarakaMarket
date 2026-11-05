@@ -37,7 +37,7 @@ import {
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
 import { advancesForMonth, settleSalaryMath, applyAdvanceToBalance, applyPaydayToBalance } from '../core/payroll';
-import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, cashActiveNative, cashMoveNative, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, cashActiveNative, cashMoveNative, lastLaneError, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { APP_VERSION } from '../core/version';
 import { detectVersionShift } from '../core/version-change';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
@@ -307,9 +307,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
       if (saved) return JSON.parse(saved);
-      return isCleanStart() ? [] : initialProducts;
+      return !demoSeedAllowed() ? [] : initialProducts;
     } catch {
-      return isCleanStart() ? [] : initialProducts;
+      return !demoSeedAllowed() ? [] : initialProducts;
     }
   });
 
@@ -321,7 +321,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch { /* fall through to seed */ }
     // Demo colisage: EAU LALLA 1.5L (id 5, 45 DZD) — Pack x6 label at 250 DZD.
     // Skipped on a clean start (no demo product 5 exists there).
-    if (isCleanStart()) return [];
+    if (!demoSeedAllowed()) return [];
     return [{ product_id: 5, barcode: '6130000001059', multiplier: 6, pack_name: 'Pack x6', price_override_ct: 25000 }];
   });
   useEffect(() => {
@@ -344,9 +344,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.CLIENTS);
       if (saved) return JSON.parse(saved);
-      return isCleanStart() ? [] : initialClients;
+      return !demoSeedAllowed() ? [] : initialClients;
     } catch {
-      return isCleanStart() ? [] : initialClients;
+      return !demoSeedAllowed() ? [] : initialClients;
     }
   });
 
@@ -354,9 +354,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.SUPPLIERS);
       if (saved) return JSON.parse(saved);
-      return isCleanStart() ? [] : initialSuppliers;
+      return !demoSeedAllowed() ? [] : initialSuppliers;
     } catch {
-      return isCleanStart() ? [] : initialSuppliers;
+      return !demoSeedAllowed() ? [] : initialSuppliers;
     }
   });
 
@@ -372,9 +372,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [purchases, setPurchases] = useState<PurchaseInvoice[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PURCHASES);
-      return saved ? JSON.parse(saved) : initialPurchases;
+      return saved ? JSON.parse(saved) : (!demoSeedAllowed() ? [] : initialPurchases);
     } catch {
-      return initialPurchases;
+      return !demoSeedAllowed() ? [] : initialPurchases;
     }
   });
 
@@ -501,8 +501,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // fiscal commits for the audit trail).
   const SESSION_KEY = 'baraka_session_v1';
   function isCleanStart(): boolean {
-  try { return localStorage.getItem(STORAGE_KEYS.CLEAN_START) === '1'; } catch { return false; }
-}
+    try { return localStorage.getItem(STORAGE_KEYS.CLEAN_START) === '1'; } catch { return false; }
+  }
+  // PROD-SEED (v1.4.7): the installed exe starts EMPTY on a fresh profile —
+  // demo catalog/debts are a browser-dev convenience only. Saved shops are
+  // untouched (their rows come from localStorage, never from these seeds).
+  function demoSeedAllowed(): boolean {
+    try { return !isTauriRuntime() && !isCleanStart(); } catch { return false; }
+  }
   const [session, setSession] = useState<Session | null>(() => {
     try {
       const saved = localStorage.getItem(SESSION_KEY);
@@ -1095,8 +1101,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (authorityRef.current !== 'FISCAL_SQLITE') return;
     try {
       const { done } = await replayOutbox(lsStore, async (e) => {
-        if (e.kind === 'settlement') return commitSettlement(e.header as Parameters<typeof commitSettlement>[0]);
-        return commitSale(e.header as AuthorityHeaderInput, e.items as AuthorityItemInput[]);
+        const auth = e.kind === 'settlement'
+          ? await commitSettlement(e.header as Parameters<typeof commitSettlement>[0])
+          : await commitSale(e.header as AuthorityHeaderInput, e.items as AuthorityItemInput[]);
+        // Surface the refusal reason on the stuck row — never fail silently.
+        if (!auth) throw new Error(lastLaneError() ?? 'fiscal lane refused without reason');
+        return auth;
       });
       if (done.length === 0) return;
       const saleDone = done.filter(d => d.kind === 'sale');
@@ -1265,6 +1275,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           key: saleKey, kind: 'sale', provisionalId: provisional.id,
           header: fiscalHeader, items: payloadItems,
           enqueuedAt: createdAt, attempts: 0,
+          lastError: lastLaneError() ?? undefined,
         });
         refreshOutbox(); // A1: badge + rows now
         return provisional;

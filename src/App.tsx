@@ -112,6 +112,11 @@ const MainLayout: React.FC = () => {
                         <span className="text-white/50">{e.kind === 'settlement' ? 'Q' : 'T'} · ×{e.attempts}</span>
                       </div>
                       <div className="text-white/40 font-mono truncate" dir="ltr" title={e.key}>{e.key.slice(0, 8)}… · {new Date(e.enqueuedAt).toLocaleString()}</div>
+                      {e.lastError && (
+                        <div className="mt-0.5 break-words text-[11px] leading-snug text-red-300/90" dir="auto" title={e.lastError}>
+                          ⚠ {e.lastError.length > 140 ? `${e.lastError.slice(0, 140)}…` : e.lastError}
+                        </div>
+                      )}
                       <div className="mt-1 flex gap-1">
                         <button
                           type="button"

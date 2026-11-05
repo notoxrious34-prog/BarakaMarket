@@ -112,3 +112,21 @@ test('A1: removeOutboxEntry drops one key and keeps the rest (audited discard)',
   assert.equal(left[0].key, 'K2');
   assert.equal(pendingOutboxCount(s), 1);
 });
+
+test('PROD-FAIL: refusal reason is captured on the stuck row (never silent)', async () => {
+  const s = fakeStore();
+  enqueueOutbox(s, { key: 'K9', kind: 'sale', provisionalId: 'S9', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
+  const { remaining } = await replayOutbox(s, async () => { throw new Error('[fiscal] day is legally closed'); });
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].attempts, 1);
+  assert.match(remaining[0].lastError ?? '', /legally closed/);
+  // Reason survives a reload (the user reads it off the screen).
+  assert.match(loadOutbox(s)[0].lastError ?? '', /legally closed/);
+});
+
+test('PROD-FAIL: silent null refusal still leaves a marker (no blank rows)', async () => {
+  const s = fakeStore();
+  enqueueOutbox(s, { key: 'K8', kind: 'sale', provisionalId: 'S8', header: {}, items: [], enqueuedAt: 'x', attempts: 0 });
+  const { remaining } = await replayOutbox(s, async () => null);
+  assert.equal(remaining[0].lastError, 'fiscal lane refused without reason');
+});
