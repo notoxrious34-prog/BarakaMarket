@@ -60,11 +60,18 @@ export const CashSessionsView: React.FC = () => {
     // call (always an array when the lane answers); `offline` survives only
     // when both lanes are down (dev preview without server).
     const rows = await cashSessionsNative(10);
-    const laneAlive = Array.isArray(rows);
+    // Cold-start flash: the very first invoke after WebView boot can lose the
+    // race — one deferred retry before honestly declaring the lane down.
+    let probe = rows;
+    if (!Array.isArray(probe)) {
+      await new Promise(r => setTimeout(r, 1500));
+      probe = await cashSessionsNative(10);
+    }
+    const laneAlive = Array.isArray(probe);
     setOffline(!laneAlive);
-    if (rows) {
-      setHistory(rows as SessionRow[]);
-      const open = (rows as SessionRow[]).find(r => r.status === 'OPEN');
+    if (probe) {
+      setHistory(probe as SessionRow[]);
+      const open = (probe as SessionRow[]).find(r => r.status === 'OPEN');
       if (open) {
         const m = await cashMovementsNative(open.id, 50);
         if (m) setMovements(m as MovementRow[]);
@@ -74,7 +81,7 @@ export const CashSessionsView: React.FC = () => {
       } else {
         // No session open: the till card shows the open form, not a fossil.
         setLive(null);
-        const newest = (rows as SessionRow[])[0];
+        const newest = (probe as SessionRow[])[0];
         if (newest) {
           const m = await cashMovementsNative(newest.id, 50);
           if (m) setMovements(m as MovementRow[]);
