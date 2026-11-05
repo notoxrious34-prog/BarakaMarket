@@ -95,6 +95,21 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
   }
 });
 
+test('T8b: provisioned accounts start forced-change, blank names fall back', () => {
+  const p = tmpFile('rbac');
+  try {
+    const b = openBarakaDb(p);
+    const m = b.createUser({ username: 'Lina', display_name: '   ', role: 'cashier', pin: '4321' }, 'owner');
+    assert.equal(m.username, 'lina');
+    assert.equal(m.display_name, 'lina');
+    assert.equal(m.must_change_pin, 1);
+    assert.equal(b.verifyUser('lina', '4321').ok, true);
+    b.close();
+  } finally {
+    cleanup(p);
+  }
+});
+
 test('T8/T11: legacy v3 file climbs to v8 and reseeds the owner', () => {
   const p = tmpFile('rbac');
   try {

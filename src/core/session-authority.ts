@@ -99,23 +99,107 @@ export async function auditSessionEvent(actor: string, action: AuditAction, deta
   } catch { /* audit never breaks the flow */ }
 }
 
-/** Owner-gated creation (the server re-checks requesterRole — never trust the UI). */
+/** Last refusal reason of the user-management lane (validation, taken,
+ *  owner-gate, offline). Read it right after a null/false return — the lane
+ *  never throws, mirroring the fiscal `lastLaneError` pattern. */
+let userLaneError: string | null = null;
+export function lastUserLaneError(): string | null {
+  return userLaneError;
+}
+
+type LaneOut<T> = { ok: true; value: T } | { ok: false; error: string };
+
+async function invokeUserNative<T>(command: string, args: Record<string, unknown>): Promise<LaneOut<T>> {
+  if (!isTauriRuntime()) return { ok: false, error: '' };
+  try {
+    const mod = await import('@tauri-apps/api/core');
+    return { ok: true, value: (await mod.invoke(command, args)) as T };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+async function postUserLoopback<T>(path: string, body: unknown): Promise<LaneOut<T>> {
+  try {
+    const token = await getLoopbackToken();
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(`${LOOPBACK_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { 'x-baraka-loopback': token } : {}) },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) {
+      let detail = '';
+      try {
+        detail = (await r.json() as { error?: string }).error ?? '';
+      } catch {
+        /* text body — status is the signal */
+      }
+      return { ok: false, error: detail || `HTTP ${r.status}` };
+    }
+    return { ok: true, value: (await r.json()) as T };
+  } catch {
+    return { ok: false, error: 'lane unreachable' };
+  }
+}
+
+function isSessionUser(v: unknown): v is SessionUser {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'number' && typeof o.username === 'string' && typeof o.role === 'string';
+}
+
+/** Owner-gated creation (invoke-first, loopback fallback). Null on any
+ *  refusal — read `lastUserLaneError()` for the reason (taken, validation,
+ *  owner-gate, offline). Never throws. */
 export async function createSessionUser(
   input: { username: string; display_name?: string; role: Role; pin: string },
   requesterRole: Role,
   actor: string,
 ): Promise<SessionUser | null> {
-  if (isTauriRuntime()) return null; // T8b: native user management
-  const r = await postLoopback<SessionUser>('/api/users', { ...input, requesterRole, actor });
-  return r && typeof r.id === 'number' ? r : null;
+  userLaneError = null;
+  if (isTauriRuntime()) {
+    // The exe owns SQLite directly — no loopback server runs beside it, so a
+    // native refusal is final (no 4 s fallback stall).
+    const n = await invokeUserNative<SessionUser>('user_create', {
+      username: input.username,
+      displayName: input.display_name ?? '',
+      role: input.role,
+      pin: input.pin,
+      requesterRole,
+      actor,
+    });
+    if (n.ok && isSessionUser(n.value)) return n.value;
+    userLaneError = (n.ok ? '' : n.error) || 'native lane refused';
+    return null;
+  }
+  const l = await postUserLoopback<SessionUser>('/api/users', { ...input, requesterRole, actor });
+  if (l.ok && isSessionUser(l.value)) return l.value;
+  userLaneError = (l.ok ? '' : l.error) || 'server refused';
+  return null;
 }
 
-/** Owner-gated activate/deactivate (loopback lane; T8b brings the native lane). */
+/** Owner-gated activate/deactivate (invoke-first, loopback fallback). False
+ *  on any refusal — read `lastUserLaneError()` for the reason. Never throws. */
 export async function setSessionUserActive(
   id: number, active: boolean, requesterRole: Role, actor: string,
 ): Promise<boolean> {
-  if (isTauriRuntime()) return false; // T8b: native user management
-  return (await postLoopback<{ ok?: boolean }>('/api/users/active', { id, active, requesterRole, actor }))?.ok === true;
+  userLaneError = null;
+  if (isTauriRuntime()) {
+    const n = await invokeUserNative<{ ok?: boolean }>('user_set_active', {
+      userId: id, active, requesterRole, actor,
+    });
+    if (n.ok && n.value && n.value.ok === true) return true;
+    userLaneError = (n.ok ? '' : n.error) || 'native lane refused';
+    return false;
+  }
+  const l = await postUserLoopback<{ ok?: boolean }>('/api/users/active', { id, active, requesterRole, actor });
+  if (l.ok && l.value && l.value.ok === true) return true;
+  userLaneError = (l.ok ? '' : l.error) || 'server refused';
+  return false;
 }
 
 export interface AuditListRow {

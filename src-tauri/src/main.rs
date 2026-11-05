@@ -309,6 +309,43 @@ fn user_list() -> Result<serde_json::Value, String> {
     auth::user_list(&conn)
 }
 
+/// T8b: native user creation (owner-gated) — closes the production gap where
+/// the exe could verify users but never create them.
+#[tauri::command]
+fn user_create(
+    username: String,
+    displayName: String,
+    role: String,
+    pin: String,
+    requesterRole: String,
+    actor: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::user_create(
+        &conn,
+        &username,
+        &displayName,
+        &role,
+        &pin,
+        &requesterRole,
+        &actor,
+    )
+}
+
+/// T8b: native activate/deactivate (owner-gated, owners immune).
+#[tauri::command]
+fn user_set_active(
+    userId: i64,
+    active: bool,
+    requesterRole: String,
+    actor: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::user_set_active(&conn, userId, active, &requesterRole, &actor)
+}
+
 /// T8: native audit read for the manager lane.
 #[tauri::command]
 fn audit_list(limit: u32) -> Result<serde_json::Value, String> {
@@ -384,6 +421,8 @@ fn main() {
             user_verify,
             change_pin,
             user_list,
+            user_create,
+            user_set_active,
             audit_list,
             audit_log,
             cash_open,

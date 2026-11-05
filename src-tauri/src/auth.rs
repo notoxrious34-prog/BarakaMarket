@@ -309,6 +309,121 @@ pub fn user_list(conn: &Connection) -> Result<Value, String> {
     Ok(Value::Array(out))
 }
 
+/// T8b: native user creation (owner-gated). Mirrors the TS DAL validation so
+/// both lanes accept exactly the same usernames/roles/PINs. New users start
+/// with `must_change_pin = 1`: a provisioned PIN never survives first login.
+pub fn user_create(
+    conn: &Connection,
+    username: &str,
+    displayName: &str,
+    role: &str,
+    pin: &str,
+    requesterRole: &str,
+    actor: &str,
+) -> Result<Value, String> {
+    if requesterRole != "owner" {
+        return Err("[auth] owner role required".to_string());
+    }
+    let name = username.trim().to_lowercase();
+    if !valid_username(&name) {
+        return Err("[auth] bad username (3-20 chars: a-z 0-9 . _ -)".to_string());
+    }
+    if role != "cashier" && role != "manager" && role != "owner" {
+        return Err(format!("[auth] bad role: {role}"));
+    }
+    if !verify_pin_format(pin) {
+        return Err("[auth] PIN must be 4-8 numeric digits".to_string());
+    }
+    let dn_trimmed = displayName.trim();
+    let dn: String = if dn_trimmed.is_empty() {
+        name.clone()
+    } else {
+        dn_trimmed.chars().take(40).collect()
+    };
+    let v = mint_verifier(pin)?;
+    match conn.execute(
+        "INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, created_at)
+         VALUES (?1, ?2, ?3, ?4, 1, datetime('now'))",
+        rusqlite::params![name, dn, role, v],
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            let m = e.to_string();
+            if m.contains("UNIQUE") {
+                return Err(format!("[auth] username taken: {name}"));
+            }
+            return Err(m);
+        }
+    }
+    let id = conn.last_insert_rowid();
+    audit(
+        conn,
+        actor,
+        "user.create",
+        &format!("users:{name} role={role}"),
+    );
+    let row: (i64, String, String, String, i64, i64) = conn
+        .query_row(
+            "SELECT id, username, display_name, role, must_change_pin, active FROM users WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(
+        json!({ "id": row.0, "username": row.1, "display_name": row.2, "role": row.3, "must_change_pin": row.4, "active": row.5 }),
+    )
+}
+
+fn valid_username(name: &str) -> bool {
+    (3..=20).contains(&name.len())
+        && name.bytes().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'.' || c == b'_' || c == b'-'
+        })
+}
+
+/// T8b: native activate/deactivate (owner-gated). Owner accounts are immune —
+/// operators deactivate instead of deleting, and owners never deactivate.
+pub fn user_set_active(
+    conn: &Connection,
+    userId: i64,
+    active: bool,
+    requesterRole: &str,
+    actor: &str,
+) -> Result<Value, String> {
+    if requesterRole != "owner" {
+        return Err("[auth] owner role required".to_string());
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT username, role FROM users WHERE id = ?1",
+            [userId],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((uname, role)) = row else {
+        return Err(format!("[auth] unknown user: {userId}"));
+    };
+    if role == "owner" {
+        return Err("[auth] the owner account cannot be deactivated".to_string());
+    }
+    conn.execute(
+        "UPDATE users SET active = ?1 WHERE id = ?2",
+        rusqlite::params![if active { 1 } else { 0 }, userId],
+    )
+    .map_err(|e| e.to_string())?;
+    audit(
+        conn,
+        actor,
+        "user.deactivate",
+        &format!(
+            "users:{uname}: {}",
+            if active { "reactivated" } else { "deactivated" }
+        ),
+    );
+    Ok(json!({ "ok": true }))
+}
+
 // Convenience: rusqlite OptionalExtension trait import for .optional().
 use rusqlite::OptionalExtension;
 
@@ -414,5 +529,32 @@ mod tests {
         let v = super::user_verify(&conn, "owner", "5678").unwrap();
         assert_eq!(v["ok"], true);
         assert_eq!(v["user"]["must_change_pin"], 0);
+    }
+
+    #[test]
+    fn create_and_toggle_mirror_ts_rules() {
+        // T8b: the exe lane accepts exactly what the TS DAL accepts.
+        let db = memdb();
+        let refused_owner =
+            super::user_create(&db, "sara", "Sara", "manager", "5678", "manager", "m");
+        assert!(refused_owner.is_err());
+        assert!(super::user_create(&db, "x", "X", "cashier", "1111", "owner", "owner").is_err());
+        assert!(super::user_create(&db, "bob", "Bob", "super", "1111", "owner", "owner").is_err());
+        assert!(super::user_create(&db, "bob", "Bob", "cashier", "12", "owner", "owner").is_err());
+        let u =
+            super::user_create(&db, "Sara", "Sara", "manager", "5678", "owner", "owner").unwrap();
+        assert_eq!(u["username"], "sara");
+        assert_eq!(u["must_change_pin"], 1);
+        assert!(super::user_create(&db, "sara", "S", "cashier", "1111", "owner", "owner").is_err());
+        let id = u["id"].as_i64().unwrap();
+        assert_eq!(super::user_verify(&db, "sara", "5678").unwrap()["ok"], true);
+        assert!(super::user_set_active(&db, id, false, "owner", "owner").is_ok());
+        let locked_out = super::user_verify(&db, "sara", "5678").unwrap();
+        assert_eq!(locked_out["ok"], false);
+        assert!(super::user_set_active(&db, id, true, "owner", "owner").is_ok());
+        assert_eq!(super::user_verify(&db, "sara", "5678").unwrap()["ok"], true);
+        assert!(super::user_set_active(&db, 1, false, "owner", "owner").is_err());
+        assert!(super::user_set_active(&db, id, false, "manager", "m").is_err());
+        assert!(super::user_set_active(&db, 9999, false, "owner", "owner").is_err());
     }
 }

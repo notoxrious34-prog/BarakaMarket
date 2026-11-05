@@ -1932,10 +1932,14 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       if (!/^[a-z0-9._-]{3,20}$/.test(username)) throw new Error('[db] bad username (3-20 chars: a-z 0-9 . _ -)');
       if (!isRole(input.role)) throw new Error(`[db] bad role: ${input.role}`);
       if (!isValidP(input.pin)) throw new Error('[db] PIN must be 4-8 numeric digits');
+      // T8b: provisioned names fall back to the login and never exceed the
+      // list layout (40 chars); every new account starts forced-change so a
+      // handed-out PIN never survives first login (same as the owner seed).
+      const displayName = (input.display_name ?? '').trim().slice(0, 40) || username;
       try {
         const r = db.prepare(
-          'INSERT INTO users (username, display_name, role, pin_verifier, created_at) VALUES (?, ?, ?, ?, ?)',
-        ).run(username, input.display_name ?? username, input.role, createPinHash(input.pin), new Date().toISOString());
+          'INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, created_at) VALUES (?, ?, ?, ?, 1, ?)',
+        ).run(username, displayName, input.role, createPinHash(input.pin), new Date().toISOString());
         logAuditRow(db, { actor, action: 'user.create', entity: 'users', entityId: username, detail: `role=${input.role}` });
         return safeUser(userRow(db, Number(r.lastInsertRowid)));
       } catch (e) {
