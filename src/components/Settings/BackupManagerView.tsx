@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { auditSessionEvent } from '../../core/session-authority.js';
-import { getLoopbackToken } from '../../core/fiscal-authority.js';
+import { getLoopbackToken, backupCreateNative, backupListNative } from '../../core/fiscal-authority.js';
 import { backupAgeLabel } from '../../core/backup-catalog.js';
 import { LocalSnapshotPanel } from '../Inventory/ProductToolModals';
 
@@ -21,16 +21,32 @@ export const BackupManagerView: React.FC = () => {
   const isAr = language === 'ar';
   const [rows, setRows] = useState<BackupRow[]>([]);
   const [offline, setOffline] = useState(false);
+  /** v1.4.9 (#PROD-LOCAL): which lane served the registry. Restore/download
+      over HTTP exist only on the loopback lane; the native lane shows the
+      exact file path for manual USB copy (the live DB file is locked). */
+  const [lane, setLane] = useState<'native' | 'loopback' | null>(null);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
+    // Native first (installed app, no :3100) — then loopback (browser dev).
+    try {
+      const native = await backupListNative();
+      if (native) {
+        setRows(native as unknown as BackupRow[]);
+        setLane('native');
+        setOffline(false);
+        return;
+      }
+    } catch { /* fall through to loopback */ }
     try {
       const r = await fetch(`${API}/api/backups`);
       if (!r.ok) throw new Error();
       setRows(await r.json());
+      setLane('loopback');
       setOffline(false);
     } catch {
+      setLane(null);
       setOffline(true);
     }
   }, []);
@@ -67,6 +83,26 @@ export const BackupManagerView: React.FC = () => {
     }
   };
 
+  /** v1.4.9 (#PROD-LOCAL): create a hot snapshot — native first (the exe
+      backs itself up), loopback second, honest message when neither answers. */
+  const createNow = async () => {
+    setBusy(true);
+    try {
+      const meta = await backupCreateNative('manual-ui').catch(() => null);
+      if (meta) {
+        setMsg(isAr
+          ? `تم إنشاء النسخة جبائياً: ${meta.filename} (${(meta.fileSizeBytes / 1048576).toFixed(2)} MB)`
+          : `Snapshot créé (natif): ${meta.filename} (${(meta.fileSizeBytes / 1048576).toFixed(2)} MB)`);
+        audit('backup.create', JSON.stringify({ filename: meta.filename, sha256: meta.sha256Checksum }));
+        await refresh();
+        return;
+      }
+      await run(`${API}/api/backups/create`, { label: 'manual-ui' }, isAr ? 'تم إنشاء النسخة' : 'Snapshot créé', 'backup.create');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const download = (b: BackupRow, kind: 'db' | 'manifest') => {
     const a = document.createElement('a');
     a.href = `${API}/api/backups/file?backupPath=${encodeURIComponent(b.filename)}&kind=${kind}`;
@@ -87,7 +123,7 @@ export const BackupManagerView: React.FC = () => {
     <div className="space-y-4">
       {/* ADR-018: offline lane — always available, no server needed. */}
       <LocalSnapshotPanel isAr={isAr} audit={audit} />
-      {/* Fiscal SQLite lane — rendered only when the loopback server answers. No error banners. */}
+      {/* Fiscal SQLite lane — native in the installed app, loopback in browser dev. No error banners. */}
       {!offline && (
       <div className={card}>
       <div className="flex items-center justify-between mb-3">
@@ -95,7 +131,7 @@ export const BackupManagerView: React.FC = () => {
         <button
           disabled={busy}
           className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white cursor-pointer"
-          onClick={() => void run(`${API}/api/backups/create`, { label: 'manual-ui' }, isAr ? 'تم إنشاء النسخة' : 'Snapshot créé', 'backup.create')}
+          onClick={() => void createNow()}
         >
           {isAr ? 'إنشاء نسخة فورية' : 'Créer Sauvegarde'}
         </button>
@@ -143,6 +179,8 @@ export const BackupManagerView: React.FC = () => {
               {typeof b.schemaVersion === 'number' && b.schemaVersion > 0 && <span>schema v{b.schemaVersion} </span>}
             </div>
             <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5">
+              {lane === 'loopback' ? (
+                <>
               <button disabled={busy} className="text-emerald-300 hover:text-emerald-200 cursor-pointer disabled:opacity-40" onClick={() => void run(`${API}/api/backups/verify`, { backupPath: b.filePath }, isAr ? 'النسخة سليمة' : 'Snapshot vérifié')}>
                 {isAr ? 'تحقق' : 'Vérifier'}
               </button>
@@ -155,7 +193,18 @@ export const BackupManagerView: React.FC = () => {
               <button disabled={busy} className="text-amber-300 hover:text-amber-200 cursor-pointer disabled:opacity-40" onClick={() => { if (window.confirm(isAr ? `استعادة آمنة مع حجر صحي؟\n${b.filename}` : `Restauration avec quarantaine ?\n${b.filename}`)) void run(`${API}/api/backups/restore`, { backupPath: b.filePath }, isAr ? 'تمت الاستعادة' : 'Restauré', 'backup.restore'); }}>
                 {isAr ? 'استعادة' : 'Restaurer'}
               </button>
+                </>
+              ) : (
+                <span className="text-slate-500 font-mono break-all" dir="ltr">{b.filePath}</span>
+              )}
             </div>
+            {lane === 'native' && (
+              <div className="text-[10px] text-slate-500 mt-1">
+                {isAr
+                  ? 'للاستعادة: أغلق التطبيق وانسخ الملف فوق baraka.db يدوياً (القاعدة الحية مقفلة أثناء التشغيل).'
+                  : 'Restauration: fermez l’app puis copiez le fichier sur baraka.db (base verrouillée en cours d’exécution).'}
+              </div>
+            )}
           </div>
         ))}
       </div>

@@ -198,7 +198,8 @@ export function mintRowId(): string {
 
 async function invokeLane<T>(
   command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db' | 'factory_reset'
-    | 'cash_open' | 'cash_movement' | 'cash_active' | 'cash_sessions' | 'cash_movements' | 'cash_close_and_z',
+    | 'cash_open' | 'cash_movement' | 'cash_active' | 'cash_sessions' | 'cash_movements' | 'cash_close_and_z'
+    | 'record_loss' | 'backup_create' | 'backup_list' | 'z_list',
   args: Record<string, unknown>,
 ): Promise<T | null> {
   if (!isTauriRuntime()) return null;
@@ -212,6 +213,37 @@ async function invokeLane<T>(
     laneError = `[fiscal] ${command}: ${msg.slice(0, 220)}`;
     return null;
   }
+}
+
+/** v1.4.9 (#PROD-LOCAL): fiscal loss twin (native → loopback). Null when neither lane answers. */
+export async function recordLossNative(input: {
+  product_id: number; qty_milli: number; reason: string;
+  unit_cost_ct?: number; total_loss_ct?: number; notes?: string | null;
+}): Promise<{ stock_milli: number } | null> {
+  const r = await invokeLane<{ stock_milli?: number }>('record_loss', { input });
+  return r && typeof r.stock_milli === 'number' ? { stock_milli: r.stock_milli } : null;
+}
+
+/** v1.4.9 (#PROD-LOCAL): self-contained hot backup (native → loopback create). */
+export async function backupCreateNative(label: string): Promise<{
+  id: string; filename: string; filePath: string; fileSizeBytes: number;
+  sha256Checksum: string; salesCount: number; productsCount: number;
+  status: string; label: string; appVersion: string;
+} | null> {
+  const r = await invokeLane('backup_create', { label });
+  return r && typeof (r as { id?: unknown }).id === 'string' ? (r as never) : null;
+}
+
+/** v1.4.9 (#PROD-LOCAL): list registered hot snapshots, native-first. */
+export async function backupListNative(): Promise<Array<Record<string, unknown>> | null> {
+  const r = await invokeLane<Array<Record<string, unknown>>>('backup_list', {});
+  return Array.isArray(r) ? r : null;
+}
+
+/** v1.4.9 (#PROD-LOCAL): Z registry (rows + chain head), native-first. */
+export async function zListNative(): Promise<{ rows: Array<Record<string, unknown>>; prev_hash: string } | null> {
+  const r = await invokeLane<{ rows?: Array<Record<string, unknown>>; prev_hash?: string }>('z_list', {});
+  return r && Array.isArray(r.rows) ? { rows: r.rows, prev_hash: typeof r.prev_hash === 'string' ? r.prev_hash : '' } : null;
 }
 
 /** Last native/loopback refusal reason (set whenever a lane answers null). Never throws. */

@@ -255,6 +255,43 @@ fn cash_close_and_z(
     fiscal::cash_close_and_z(&mut conn, &sessionId, countedCashCt, notes.as_deref())
 }
 
+/// v1.4.9 (#PROD-LOCAL): fiscal loss — ledger row + stock decrement, no :3100.
+#[tauri::command]
+fn record_loss(input: serde_json::Value) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::record_loss(&mut conn, &input)
+}
+
+/// v1.4.9 (#PROD-LOCAL): self-contained hot backup (dest derived from DB dir).
+#[tauri::command]
+fn backup_create(app: tauri::AppHandle, label: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let dir = db
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    let ver = app.package_info().version.to_string();
+    fiscal::backup_create(&conn, &dir, &label, &ver)
+}
+
+/// v1.4.9 (#PROD-LOCAL): list registered hot snapshots (newest first).
+#[tauri::command]
+fn backup_list() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::backup_list(&conn)
+}
+
+/// v1.4.9 (#PROD-LOCAL): Z registry for the exe (reprint + chain after restart).
+#[tauri::command]
+fn z_list() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::z_list(&conn)
+}
+
 /// T12 fix: native PIN change. The exe never had this command — forced-change
 /// died with "check the connection" because no loopback runs in the shell.
 #[tauri::command]
@@ -354,7 +391,11 @@ fn main() {
             cash_active,
             cash_sessions,
             cash_movements,
-            cash_close_and_z
+            cash_close_and_z,
+            record_loss,
+            backup_create,
+            backup_list,
+            z_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");

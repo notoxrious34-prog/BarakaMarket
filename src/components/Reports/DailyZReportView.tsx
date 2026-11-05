@@ -3,7 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
-import { commitZClose, fetchDailyZ } from '../../core/fiscal-authority';
+import { commitZClose, fetchDailyZ, zListNative } from '../../core/fiscal-authority';
 import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
 import { fiscalDayISO } from '../../core/fiscal-day';
 import { APP_VERSION } from '../../core/version';
@@ -50,47 +50,50 @@ export const DailyZReportView: React.FC = () => {
   const [closing, setClosing] = useState(false);
   const [closeNote, setCloseNote] = useState('');
 
-  // #004: probe the legal day-lock on mount. Loopback lane reads the stored
-  // DAY row (reprint source); exe lane reads the native `closed` flag.
-  // Chain head from the SQLite loopback (genesis if offline).
+  // #004: probe the legal day-lock on mount. v1.4.9 (#PROD-LOCAL): the native
+  // z_list is the registry in the installed app (reprint + chain after
+  // restart); the :3100 fetches stay as the browser-dev fallback.
   useEffect(() => {
     let alive = true;
-    fetch('http://127.0.0.1:3100/api/z/latest-hash')
+    const applyStoredDay = (day: Record<string, unknown>) => {
+      setClosedRow({ report_number: String(day.report_number ?? ''), closing_time: String(day.closing_time ?? ''), hash: String(day.hash ?? ''), prev_hash: String(day.prev_hash ?? '') });
+      setDayRow({
+        salesCount: Number(day.total_sales_count), ht: Number(day.total_ht_ct), b0: Number(day.tva0_base_ct),
+        b9: Number(day.tva9_base_ct), a9: Number(day.tva9_amt_ct), b19: Number(day.tva19_base_ct),
+        a19: Number(day.tva19_amt_ct), tva: Number(day.total_tva_ct), timbre: Number(day.total_timbre_ct),
+        ttc: Number(day.total_ttc_ct), esp: Number(day.especes_gross_ct),
+        bank: Number(day.cib_total_ct) + Number(day.dahabiya_total_ct),
+        cred: Number(day.credit_granted_ct), coll: Number(day.credit_collected_ct),
+        first: String(day.first_invoice_number ?? ''), last: String(day.last_invoice_number ?? ''),
+      });
+      setClosure({ report_number: String(day.report_number ?? ''), hash: String(day.hash ?? '') });
+      setPrevHash(String(day.prev_hash ?? ''));
+      setDayLocked(true);
+      setCloseNote(isAr ? 'اليوم مقفل قانونياً — إعادة طباعة من السجل' : 'Jour verrouillé — réimpression depuis le registre');
+    };
+    zListNative().then(z => {
+      if (!alive || !z) return false;
+      if (z.prev_hash) setPrevHash(z.prev_hash);
+      const day = z.rows.find(r => r.day === zReport.date && r.close_kind === 'DAY');
+      if (day && typeof day.report_number === 'string') applyStoredDay(day);
+      return true;
+    }).catch(() => false).then(nativeDone => {
+      if (!alive || nativeDone) { return; }
+      fetch('http://127.0.0.1:3100/api/z/latest-hash')
       .then(r => (r.ok ? r.json() : null))
       .then((j: { prev_hash?: string } | null) => {
         if (alive && j?.prev_hash) setPrevHash(j.prev_hash);
       })
       .catch(() => {});
-    fetch('http://127.0.0.1:3100/api/z/list')
+      fetch('http://127.0.0.1:3100/api/z/list')
       .then(r => (r.ok ? r.json() : null))
       .then((rows: Array<Record<string, unknown>> | null) => {
         if (!alive || !Array.isArray(rows)) return;
-        const day = rows.find(r => r.day === zReport.date && r.close_kind === 'DAY') as
-          | { report_number: string; closing_time: string; hash: string; prev_hash: string;
-              total_sales_count: number; total_ht_ct: number; tva0_base_ct: number;
-              tva9_base_ct: number; tva9_amt_ct: number; tva19_base_ct: number;
-              tva19_amt_ct: number; total_tva_ct: number; total_timbre_ct: number;
-              total_ttc_ct: number; especes_gross_ct: number; cib_total_ct: number;
-              dahabiya_total_ct: number; credit_granted_ct: number; credit_collected_ct: number;
-              first_invoice_number: string; last_invoice_number: string } | undefined;
-        if (day && typeof day.report_number === 'string') {
-          setClosedRow({ report_number: day.report_number, closing_time: day.closing_time, hash: String(day.hash), prev_hash: String(day.prev_hash) });
-          setDayRow({
-            salesCount: Number(day.total_sales_count), ht: Number(day.total_ht_ct), b0: Number(day.tva0_base_ct),
-            b9: Number(day.tva9_base_ct), a9: Number(day.tva9_amt_ct), b19: Number(day.tva19_base_ct),
-            a19: Number(day.tva19_amt_ct), tva: Number(day.total_tva_ct), timbre: Number(day.total_timbre_ct),
-            ttc: Number(day.total_ttc_ct), esp: Number(day.especes_gross_ct),
-            bank: Number(day.cib_total_ct) + Number(day.dahabiya_total_ct),
-            cred: Number(day.credit_granted_ct), coll: Number(day.credit_collected_ct),
-            first: String(day.first_invoice_number ?? ''), last: String(day.last_invoice_number ?? ''),
-          });
-          setClosure({ report_number: day.report_number, hash: String(day.hash) });
-          setPrevHash(String(day.prev_hash));
-          setDayLocked(true);
-          setCloseNote(isAr ? 'اليوم مقفل قانونياً — إعادة طباعة من السجل' : 'Jour verrouillé — réimpression depuis le registre');
-        }
+        const day = rows.find(r => r.day === zReport.date && r.close_kind === 'DAY');
+        if (day && typeof day.report_number === 'string') applyStoredDay(day);
       })
       .catch(() => {});
+    });
     fetchDailyZ(zReport.date)
       .then(z => { if (alive && z?.closed) setDayLocked(true); })
       .catch(() => {});

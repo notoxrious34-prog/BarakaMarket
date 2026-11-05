@@ -9,7 +9,7 @@ import { generateEan13Svg } from '../../core/barcode-svg.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../../core/reference-search.js';
 import { initialCategories } from '../../data/seedData';
 import { upsertProductsNative } from '../../core/product-authority';
-import { getLoopbackToken } from '../../core/fiscal-authority.js';
+import { getLoopbackToken, recordLossNative } from '../../core/fiscal-authority.js';
 
 const LOOPBACK = 'http://127.0.0.1:3100';
 
@@ -227,10 +227,25 @@ export const LossModal: React.FC<{
     const prod = products.find(p => p.id === productId);
     if (!prod) { setMsg(isAr ? 'منتج غير موجود' : 'Produit introuvable'); return; }
     if (q > prod.stock_qty) { setMsg(isAr ? `الكمية تتجاوز المخزون (${prod.stock_qty})` : `Quantité > stock (${prod.stock_qty})`); return; }
-    // S2-fix (institutional stock audit): the fiscal loss lane is authoritative
-    // wherever it is reachable (installed app / loopback up). The UI decrement
-    // + local journal stay as the offline/web fallback — never double-counted
-    // (server and UI own separate stores).
+    // S2-fix (institutional stock audit) + v1.4.9 (#PROD-LOCAL): the fiscal loss
+    // lane is authoritative wherever it is reachable — native first (installed
+    // app, no :3100), loopback second, UI decrement + local journal as the
+    // offline/web fallback. Never double-counted (server and UI own stores).
+    const nativeLoss = await recordLossNative({
+      product_id: productId, qty_milli: Math.round(q * 1000), reason,
+      unit_cost_ct: Math.round((prod.buy_price ?? 0) * 100), notes: notes || null,
+    }).catch(() => null);
+    if (nativeLoss) {
+      onLossRecorded(productId, q);
+      try {
+        const raw = localStorage.getItem(LOSS_JOURNAL_KEY);
+        const journal = raw ? JSON.parse(raw) as unknown[] : [];
+        journal.push({ product_id: productId, qty_units: q, reason, notes: notes || null, at: new Date().toISOString(), fiscal: true });
+        localStorage.setItem(LOSS_JOURNAL_KEY, JSON.stringify(journal.slice(-500)));
+      } catch { /* private mode — state already updated */ }
+      setMsg(isAr ? 'تم تسجيل الخسارة جبائياً ومحلياً' : 'Perte enregistrée (fiscale + locale)');
+      return;
+    }
     const token = await getLoopbackToken().catch(() => null);
     if (token) {
       try {

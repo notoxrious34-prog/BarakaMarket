@@ -982,6 +982,202 @@ pub fn register_backup(
     }))
 }
 
+/// v1.4.9 (#PROD-LOCAL): self-contained hot backup. The dest is derived
+/// from the live DB dir (…/backups/baraka-YYYYMMDD-HHMMSS[-label][-n].db),
+/// then VACUUM + integrity check + register + retention prune (newest 30
+/// non-exempt). No :3100 needed — the installed app backs itself up.
+pub fn backup_create(
+    conn: &Connection,
+    dir: &std::path::Path,
+    label: &str,
+    app_version: &str,
+) -> Result<Value, String> {
+    let bdir = dir.join("backups");
+    std::fs::create_dir_all(&bdir).map_err(|e| format!("[fiscal] backups dir: {e}"))?;
+    let stamp = now_iso().replace(['-', ':', 'T', '.', 'Z'], "");
+    let clean: String = label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(24)
+        .collect();
+    let mut n = 0;
+    let dest = loop {
+        let suffix = if n == 0 {
+            String::new()
+        } else {
+            format!("-{n}")
+        };
+        let name = if clean.is_empty() {
+            format!("baraka-{stamp}{suffix}.db")
+        } else {
+            format!("baraka-{stamp}-{clean}{suffix}.db")
+        };
+        let p = bdir.join(&name);
+        if !p.exists() {
+            break p;
+        }
+        n += 1;
+    };
+    let dest_s = dest.to_string_lossy().to_string();
+    backup_db(conn, &dest_s)?;
+    // Integrity gate on the snapshot itself (same rule as the TS lane).
+    let snap = Connection::open(&dest).map_err(|e| e.to_string())?;
+    let check: String = snap
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if check != "ok" {
+        return Err(format!("[fiscal] snapshot integrity_check failed: {check}"));
+    }
+    let filename = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or(dest_s.clone());
+    let meta = register_backup(conn, &filename, &dest_s, &clean, app_version, false)?;
+    // Retention: newest 30 non-exempt survive; older files + rows are pruned.
+    let mut rows: Vec<(String, String)> = vec![];
+    {
+        let mut st = conn.prepare("SELECT id, file_path FROM backups_log WHERE exempt != 1 ORDER BY created_at DESC, rowid DESC").map_err(|e| e.to_string())?;
+        let it = st
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        for r in it {
+            rows.push(r.map_err(|e| e.to_string())?);
+        }
+    }
+    for (oid, opath) in rows.iter().skip(30) {
+        let _ = std::fs::remove_file(opath);
+        let manifest = format!("{opath}.manifest.json");
+        let _ = std::fs::remove_file(&manifest);
+        let _ = conn.execute("DELETE FROM backups_log WHERE id = ?1", [oid]);
+    }
+    Ok(meta)
+}
+
+/// v1.4.9 (#PROD-LOCAL): list registered hot snapshots (newest first).
+pub fn backup_list(conn: &Connection) -> Result<Value, String> {
+    let mut st = conn.prepare("SELECT id, filename, file_path, file_size_bytes, sha256_checksum, sales_count, products_count, status, created_at, exempt FROM backups_log ORDER BY created_at DESC, rowid DESC LIMIT 100").map_err(|e| e.to_string())?;
+    let it = st.query_map([], |r| {
+        Ok(serde_json::json!({
+            "id": r.get::<_, String>(0)?, "filename": r.get::<_, String>(1)?,
+            "filePath": r.get::<_, String>(2)?, "fileSizeBytes": r.get::<_, i64>(3)?,
+            "sha256Checksum": r.get::<_, String>(4)?, "salesCount": r.get::<_, i64>(5)?,
+            "productsCount": r.get::<_, i64>(6)?, "status": r.get::<_, String>(7)?,
+            "createdAt": r.get::<_, String>(8)?, "exempt": r.get::<_, i64>(10).unwrap_or(0) == 1,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut rows = vec![];
+    for r in it {
+        rows.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(Value::Array(rows))
+}
+
+/// v1.4.9 (#PROD-LOCAL): Z registry for the exe (reprint + chain after restart).
+pub fn z_list(conn: &Connection) -> Result<Value, String> {
+    let cols = "day, report_number, closing_time, hash, prev_hash, total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct, tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct, especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct, credit_collected_ct, first_invoice_number, last_invoice_number, close_kind";
+    let mut st = conn
+        .prepare(&format!(
+            "SELECT {cols} FROM z_reports ORDER BY day DESC LIMIT 200"
+        ))
+        .map_err(|e| e.to_string())?;
+    let it = st.query_map([], |r| {
+        Ok(serde_json::json!({
+            "day": r.get::<_, String>(0)?, "report_number": r.get::<_, String>(1)?,
+            "closing_time": r.get::<_, String>(2)?, "hash": r.get::<_, String>(3)?,
+            "prev_hash": r.get::<_, String>(4)?, "total_sales_count": r.get::<_, i64>(5)?,
+            "total_ht_ct": r.get::<_, i64>(6)?, "tva0_base_ct": r.get::<_, i64>(7)?,
+            "tva9_base_ct": r.get::<_, i64>(8)?, "tva9_amt_ct": r.get::<_, i64>(9)?,
+            "tva19_base_ct": r.get::<_, i64>(10)?, "tva19_amt_ct": r.get::<_, i64>(11)?,
+            "total_tva_ct": r.get::<_, i64>(12)?, "total_timbre_ct": r.get::<_, i64>(13)?,
+            "total_ttc_ct": r.get::<_, i64>(14)?, "especes_gross_ct": r.get::<_, i64>(15)?,
+            "cib_total_ct": r.get::<_, i64>(16)?, "dahabiya_total_ct": r.get::<_, i64>(17)?,
+            "credit_granted_ct": r.get::<_, i64>(18)?, "credit_collected_ct": r.get::<_, i64>(19)?,
+            "first_invoice_number": r.get::<_, String>(20)?, "last_invoice_number": r.get::<_, String>(21)?,
+            "close_kind": r.get::<_, String>(22)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut rows = vec![];
+    for r in it {
+        rows.push(r.map_err(|e| e.to_string())?);
+    }
+    let prev: String = conn
+        .query_row(
+            "SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| "GENESIS".to_string());
+    Ok(serde_json::json!({ "rows": rows, "prev_hash": prev }))
+}
+
+fn loss_reason_ok(r: &str) -> bool {
+    matches!(
+        r,
+        "EXPIRED" | "BROKEN" | "DAMAGED" | "THEFT" | "INTERNAL_USE" | "AUTRE"
+    )
+}
+
+/// v1.4.9 (#PROD-LOCAL): fiscal loss twin of the TS lane — ledger row +
+/// stock decrement atomically; product must exist with sufficient stock.
+pub fn record_loss(conn: &mut Connection, input: &Value) -> Result<Value, String> {
+    let product_id = input["product_id"]
+        .as_i64()
+        .ok_or("[fiscal] loss needs product_id")?;
+    let qty = input["qty_milli"]
+        .as_i64()
+        .ok_or("[fiscal] loss needs qty_milli")?;
+    if qty <= 0 {
+        return Err(format!("[fiscal] loss qty_milli must be > 0 (got {qty})"));
+    }
+    let reason = str_field(&input["reason"], "reason")?;
+    if !loss_reason_ok(&reason) {
+        return Err(format!("[fiscal] bad loss reason: {reason}"));
+    }
+    let unit_cost = input["unit_cost_ct"].as_i64().unwrap_or(0);
+    if unit_cost < 0 {
+        return Err("[fiscal] loss unit_cost_ct must be >= 0".to_string());
+    }
+    let total = input["total_loss_ct"]
+        .as_i64()
+        .unwrap_or((unit_cost * qty) / 1000);
+    if total < 0 {
+        return Err("[fiscal] loss total_loss_ct must be >= 0".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let stock: i64 = tx
+        .query_row(
+            "SELECT stock_milli FROM products WHERE id = ?1",
+            [product_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| format!("[fiscal] loss target product not found: {product_id}"))?;
+    if qty > stock {
+        return Err(format!(
+            "[fiscal] loss qty {qty} exceeds stock {stock} (product {product_id})"
+        ));
+    }
+    tx.execute(
+        "INSERT INTO inventory_losses (product_id, qty_milli, reason, unit_cost_ct, total_loss_ct, notes, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        rusqlite::params![product_id, qty, reason, unit_cost, total, opt_str(&input["notes"], "notes")?, now_iso()],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE products SET stock_milli = stock_milli - ?1 WHERE id = ?2",
+        rusqlite::params![qty, product_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let left: i64 = tx
+        .query_row(
+            "SELECT stock_milli FROM products WHERE id = ?1",
+            [product_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "stock_milli": left }))
+}
+
 /// P3 (v1.4.4): audited clean-start — the mirror of the TS `factoryReset`.
 /// Refuses unless a VERIFIED exempt pre-reset archive exists and matches its
 /// bytes. Append-only triggers are dropped and rebuilt inside the same
@@ -2245,5 +2441,77 @@ mod tests {
         assert!(z["zNumber"].as_str().unwrap().starts_with("Z-"));
         assert!(cash_active(&db).unwrap().is_null());
         assert!(cash_close_and_z(&mut db, "s1", 105000, None).is_err()); // terminal
+    }
+
+    /// v1.4.9 (#PROD-LOCAL): loss ledger + stock decrement, refusals named.
+    #[test]
+    fn prodlocal_loss_ok_and_refusals() {
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO products (id, barcode, name_fr, buy_price_ct, stock_milli, sell_price_ct, tva_rate, unit) VALUES (9,'L9','Loss9',8000,5000,100,9,'PIECE')",
+            [],
+        ).unwrap();
+        let ok = record_loss(
+            &mut db,
+            &serde_json::json!({
+                "product_id": 9, "qty_milli": 2000, "reason": "BROKEN",
+                "unit_cost_ct": 80, "notes": "lane-test",
+            }),
+        )
+        .unwrap();
+        assert_eq!(ok["stock_milli"], 3000);
+        let logged: i64 = db
+            .query_row(
+                "SELECT total_loss_ct FROM inventory_losses WHERE product_id = 9",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(logged, (80 * 2000) / 1000);
+        // Over-stock refused, ghost product refused, bad reason refused.
+        assert!(record_loss(
+            &mut db,
+            &serde_json::json!({"product_id": 9, "qty_milli": 99999, "reason": "BROKEN"})
+        )
+        .is_err());
+        assert!(record_loss(
+            &mut db,
+            &serde_json::json!({"product_id": 4242, "qty_milli": 1, "reason": "BROKEN"})
+        )
+        .is_err());
+        assert!(record_loss(
+            &mut db,
+            &serde_json::json!({"product_id": 9, "qty_milli": 1, "reason": "MYSTERY"})
+        )
+        .is_err());
+        // Stock untouched by the refusals.
+        let left: i64 = db
+            .query_row("SELECT stock_milli FROM products WHERE id = 9", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 3000);
+    }
+
+    /// v1.4.9 (#PROD-LOCAL): self-contained snapshot roundtrip — VERIFIED meta
+    /// + listed newest-first; empty registry returns GENESIS head.
+    #[test]
+    fn prodlocal_backup_and_z_registry() {
+        let db = memdb();
+        let dir = std::env::temp_dir().join("baraka-prodlocal-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let meta = backup_create(&db, &dir, "lane-test", "1.4.9-test").unwrap();
+        assert_eq!(meta["status"], "VERIFIED");
+        assert!(meta["filename"].as_str().unwrap().starts_with("baraka-"));
+        let list = backup_list(&db).unwrap();
+        assert!(list
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["id"] == meta["id"]));
+        let reg = z_list(&db).unwrap();
+        assert_eq!(reg["rows"].as_array().unwrap().len(), 0);
+        assert_eq!(reg["prev_hash"], "GENESIS");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
