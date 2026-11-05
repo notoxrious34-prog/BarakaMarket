@@ -8,6 +8,7 @@
 //! in TS converge any file to LATEST_SCHEMA_VERSION (idempotent steps).
 
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde_json::Value;
 
 use crate::auth::sha256_hex;
@@ -1078,6 +1079,576 @@ pub fn factory_reset(conn: &Connection, archive_ref: &str, actor: &str) -> Resul
     }
 }
 
+// ── v1.4.6: native cash-session lane (production independence).
+// The installed app has no :3100 loopback, so the Cloture page and the POS
+// till-expense path were dead on user machines ("Mode autonome"). These
+// twins mirror TS sqlite.ts semantics exactly: single OPEN session, guarded
+// movements, live theoretical, atomic SHIFT close with a hash-chained Z.
+// Views call invoke-first, loopback second; legacy files get the tables
+// idempotently here (same DDL as db/schema.sql).
+
+fn now_iso() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        y,
+        m,
+        d,
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+fn ensure_cash_tables(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS cash_sessions (
+           id                 TEXT PRIMARY KEY,
+           cashier_name       TEXT NOT NULL,
+           opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
+           closed_at          TEXT,
+           opening_float_ct   INTEGER NOT NULL DEFAULT 0,
+           closing_counted_ct INTEGER,
+           theoretical_cash_ct INTEGER,
+           cash_diff_ct       INTEGER,
+           status             TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')) DEFAULT 'OPEN',
+           z_report_id        TEXT REFERENCES z_reports (report_number),
+           notes              TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_cash_sessions_status ON cash_sessions (status);
+         CREATE TABLE IF NOT EXISTS cash_movements (
+           id            TEXT PRIMARY KEY,
+           session_id    TEXT NOT NULL REFERENCES cash_sessions (id) ON DELETE CASCADE,
+           movement_type TEXT NOT NULL CHECK (movement_type IN ('DEPOSIT', 'WITHDRAWAL', 'EXPENSE')),
+           amount_ct     INTEGER NOT NULL CHECK (amount_ct > 0),
+           reason        TEXT NOT NULL,
+           created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_cash_movements_session ON cash_movements (session_id);",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Single-OPEN-session open. Mirrors TS openCashSession (name non-empty,
+/// float >= 0, refuses when a session is already OPEN).
+pub fn cash_open(
+    conn: &rusqlite::Connection,
+    id: &str,
+    cashier_name: &str,
+    opening_float_ct: i64,
+) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    let name = cashier_name.trim();
+    if name.is_empty() {
+        return Err("[fiscal] cashierName must be non-empty".to_string());
+    }
+    if opening_float_ct < 0 {
+        return Err("[fiscal] openingFloatCt must be >= 0".to_string());
+    }
+    if id.trim().is_empty() {
+        return Err("[fiscal] cash session id must be non-empty".to_string());
+    }
+    let open: Option<String> = conn
+        .query_row(
+            "SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(existing) = open {
+        return Err(format!("[fiscal] cash session already OPEN: {existing}"));
+    }
+    let opened_at = now_iso();
+    conn.execute(
+        "INSERT INTO cash_sessions (id, cashier_name, opened_at, opening_float_ct, status)
+         VALUES (?1, ?2, ?3, ?4, 'OPEN')",
+        rusqlite::params![id, name, opened_at, opening_float_ct],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "id": id, "cashierName": name, "openedAt": opened_at,
+        "openingFloatCt": opening_float_ct, "status": "OPEN",
+    }))
+}
+
+/// Guarded movement (F3/F4 twins: amount > 0, reason non-empty, session OPEN).
+pub fn cash_movement(
+    conn: &rusqlite::Connection,
+    id: &str,
+    session_id: &str,
+    movement_type: &str,
+    amount_ct: i64,
+    reason: &str,
+) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    if !["DEPOSIT", "WITHDRAWAL", "EXPENSE"].contains(&movement_type) {
+        return Err(format!(
+            "[fiscal] movement type must be DEPOSIT|WITHDRAWAL|EXPENSE (got {movement_type})"
+        ));
+    }
+    if amount_ct <= 0 {
+        return Err("[fiscal] movement amount must be > 0".to_string());
+    }
+    let why = reason.trim();
+    if why.is_empty() {
+        return Err("[fiscal] movement reason must be non-empty".to_string());
+    }
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM cash_sessions WHERE id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match status.as_deref() {
+        None => return Err(format!("[fiscal] cash session not found: {session_id}")),
+        Some(s) if s != "OPEN" => {
+            return Err(format!("[fiscal] cash session is {s}: {session_id}"))
+        }
+        _ => {}
+    }
+    let created_at = now_iso();
+    conn.execute(
+        "INSERT INTO cash_movements (id, session_id, movement_type, amount_ct, reason, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![id, session_id, movement_type, amount_ct, why, created_at],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "id": id, "sessionId": session_id, "type": movement_type,
+        "amountCt": amount_ct, "reason": why, "createdAt": created_at,
+    }))
+}
+
+fn status_sums(
+    conn: &rusqlite::Connection,
+    opened_at: &str,
+    end: &str,
+    session_id: &str,
+) -> Result<(i64, i64, i64, i64, i64, i64), String> {
+    let (cash, n): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0),
+                    COUNT(*)
+             FROM sales WHERE status = 'COMPLETED' AND created_at >= ?1 AND created_at <= ?2",
+            rusqlite::params![opened_at, end],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let settled: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(total_collected_ct), 0) FROM client_settlements
+             WHERE payment_method = 'ESPECES' AND date >= ?1 AND date <= ?2",
+            rusqlite::params![opened_at, end],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let (dep, wit, exp): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(CASE WHEN movement_type = 'DEPOSIT' THEN amount_ct ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN movement_type = 'WITHDRAWAL' THEN amount_ct ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN movement_type = 'EXPENSE' THEN amount_ct ELSE 0 END), 0)
+             FROM cash_movements WHERE session_id = ?1",
+            [session_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((cash, n, settled, dep, wit, exp))
+}
+
+/// Live till status. Mirrors TS getCashSessionStatus (same theoretical).
+pub fn cash_session_status(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    let row: Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        String,
+        Option<String>,
+        Option<String>,
+    )> = conn
+        .query_row(
+            "SELECT id, cashier_name, opened_at, closed_at, opening_float_ct,
+                    closing_counted_ct, theoretical_cash_ct, cash_diff_ct,
+                    status, z_report_id, notes
+             FROM cash_sessions WHERE id = ?1",
+            [session_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let (
+        id,
+        cashier_name,
+        opened_at,
+        closed_at,
+        opening_float_ct,
+        closing_counted_ct,
+        theoretical_stored,
+        diff_stored,
+        status,
+        z_report_id,
+        notes,
+    ) = row.ok_or_else(|| format!("[fiscal] cash session not found: {session_id}"))?;
+    let end = if status == "OPEN" {
+        now_iso()
+    } else {
+        closed_at.clone().unwrap_or_else(now_iso)
+    };
+    let (cash, n, settled, dep, wit, exp) = status_sums(conn, &opened_at, &end, &id)?;
+    let theoretical = opening_float_ct + cash + settled + dep - wit - exp;
+    let mut session = serde_json::json!({
+        "id": id, "cashierName": cashier_name, "openedAt": opened_at,
+        "openingFloatCt": opening_float_ct, "status": status,
+    });
+    if let Some(c) = closed_at {
+        session["closedAt"] = serde_json::json!(c);
+    }
+    if let Some(c) = closing_counted_ct {
+        session["closingCountedCt"] = serde_json::json!(c);
+    }
+    session["theoreticalCashCt"] = serde_json::json!(theoretical_stored.unwrap_or(theoretical));
+    if let Some(d) = diff_stored {
+        session["cashDiffCt"] = serde_json::json!(d);
+    }
+    if let Some(z) = z_report_id {
+        session["zReportId"] = serde_json::json!(z);
+    }
+    if let Some(nt) = notes {
+        session["notes"] = serde_json::json!(nt);
+    }
+    Ok(serde_json::json!({
+        "session": session, "openingFloatCt": opening_float_ct,
+        "cashSalesCt": cash, "settlementsCashCt": settled,
+        "depositsCt": dep, "withdrawalsCt": wit, "expensesCt": exp,
+        "theoreticalCashCt": theoretical, "totalSalesCount": n,
+    }))
+}
+
+pub fn cash_active(conn: &rusqlite::Connection) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    let open: Option<String> = conn
+        .query_row(
+            "SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match open {
+        None => Ok(serde_json::Value::Null),
+        Some(id) => cash_session_status(conn, &id),
+    }
+}
+
+pub fn cash_sessions(conn: &rusqlite::Connection, limit: i64) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    let n = limit.clamp(1, 100);
+    let mut st = conn
+        .prepare(
+            "SELECT id, cashier_name, opened_at, closed_at, opening_float_ct,
+                    closing_counted_ct, theoretical_cash_ct, cash_diff_ct, status,
+                    z_report_id, notes
+             FROM cash_sessions ORDER BY opened_at DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map([n], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(5)?,
+                r.get::<_, Option<i64>>(6)?,
+                r.get::<_, Option<i64>>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, name, opened, closed, fl, counted, theo, diff, status, zid, notes) =
+            row.map_err(|e| e.to_string())?;
+        let mut s = serde_json::json!({
+            "id": id, "cashierName": name, "openedAt": opened,
+            "openingFloatCt": fl, "status": status,
+        });
+        if let Some(c) = closed {
+            s["closedAt"] = serde_json::json!(c);
+        }
+        if let Some(c) = counted {
+            s["closingCountedCt"] = serde_json::json!(c);
+        }
+        if let Some(t) = theo {
+            s["theoreticalCashCt"] = serde_json::json!(t);
+        }
+        if let Some(d) = diff {
+            s["cashDiffCt"] = serde_json::json!(d);
+        }
+        if let Some(z) = zid {
+            s["zReportId"] = serde_json::json!(z);
+        }
+        if let Some(nt) = notes {
+            s["notes"] = serde_json::json!(nt);
+        }
+        out.push(s);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+pub fn cash_movements(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    limit: i64,
+) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    let n = limit.clamp(1, 200);
+    let mut st = conn
+        .prepare(
+            "SELECT id, session_id, movement_type, amount_ct, reason, created_at
+             FROM cash_movements WHERE session_id = ?1
+             ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = st
+        .query_map(rusqlite::params![session_id, n], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, sid, typ, amt, why, created) = row.map_err(|e| e.to_string())?;
+        out.push(serde_json::json!({
+            "id": id, "sessionId": sid, "type": typ,
+            "amountCt": amt, "reason": why.unwrap_or_default(), "createdAt": created,
+        }));
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+/// Atomic SHIFT close + hash-chained Z. Mirrors TS closeCashSessionAndGenerateZ:
+/// day-lock (#004/F2), session-window aggregates, Z-{year}-{seq:06}, SHIFT.
+pub fn cash_close_and_z(
+    conn: &mut rusqlite::Connection,
+    session_id: &str,
+    counted_cash_ct: i64,
+    notes: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    ensure_cash_tables(conn)?;
+    if counted_cash_ct < 0 {
+        return Err("[fiscal] countedCashCt must be >= 0".to_string());
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let run = || -> Result<serde_json::Value, String> {
+        let row: Option<(String, String, i64, String)> = tx
+            .query_row(
+                "SELECT id, cashier_name, opening_float_ct, opened_at FROM cash_sessions WHERE id = ?1",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let (id, cashier_name, opening_float_ct, opened_at) =
+            row.ok_or_else(|| format!("[fiscal] cash session not found: {session_id}"))?;
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM cash_sessions WHERE id = ?1",
+                [session_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if status != "OPEN" {
+            return Err(format!(
+                "[fiscal] cash session already {status}: {session_id}"
+            ));
+        }
+        let period_end = now_iso();
+        let period_day = algiers_day(&period_end)?;
+        let locked: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM z_reports WHERE day = ?1 AND close_kind = 'DAY'",
+                [&period_day],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if locked > 0 {
+            return Err(format!(
+                "[fiscal] day {period_day} is already legally closed (Z FINALISÉ) — shift close refused"
+            ));
+        }
+        let agg: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, Option<String>, Option<String>) = tx
+            .query_row(
+                "SELECT COUNT(*),
+                   COALESCE(SUM(total_ht_ct), 0), COALESCE(SUM(tva9_base_ct), 0),
+                   COALESCE(SUM(tva9_amt_ct), 0), COALESCE(SUM(tva19_base_ct), 0),
+                   COALESCE(SUM(tva19_amt_ct), 0), COALESCE(SUM(timbre_ct), 0),
+                   COALESCE(SUM(total_ttc_ct), 0),
+                   COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN payment_method = 'CIB' THEN total_ttc_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN payment_method = 'DAHABIYA' THEN total_ttc_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END), 0),
+                   MIN(invoice_number), MAX(invoice_number)
+                 FROM sales WHERE status = 'COMPLETED' AND created_at >= ?1 AND created_at <= ?2",
+                rusqlite::params![opened_at, period_end],
+                |r| {
+                    Ok((
+                        r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                        r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?,
+                        r.get(11)?, r.get(12)?, r.get(13)?,
+                    ))
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        let (n, ht, b9, a9, b19, a19, timbre, ttc, cash, cib, dah, cred, first, last) = agg;
+        let settled: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(total_collected_ct), 0) FROM client_settlements
+                 WHERE payment_method = 'ESPECES' AND date >= ?1 AND date <= ?2",
+                rusqlite::params![opened_at, period_end],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let (dep, wit, exp): (i64, i64, i64) = tx
+            .query_row(
+                "SELECT COALESCE(SUM(CASE WHEN movement_type = 'DEPOSIT' THEN amount_ct ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN movement_type = 'WITHDRAWAL' THEN amount_ct ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN movement_type = 'EXPENSE' THEN amount_ct ELSE 0 END), 0)
+                 FROM cash_movements WHERE session_id = ?1",
+                [session_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let theoretical = opening_float_ct + cash + settled + dep - wit - exp;
+        let diff = counted_cash_ct - theoretical;
+        let day = algiers_day(&period_end)?;
+        let year: i64 = day[0..4].parse().map_err(|_| "[fiscal] bad day")?;
+        let prev: Option<String> = tx
+            .query_row(
+                "SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let prev = prev.unwrap_or_else(|| "0".repeat(64));
+        let number = format!("Z-{year}-{:06}", bump_seq(&tx, "Z", year)?);
+        let hash = z_hash(&prev, &number, &day, ttc, timbre);
+        tx.execute(
+            "INSERT INTO z_reports (report_number, day, opening_time, closing_time,
+              total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
+              tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
+              especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
+              credit_collected_ct, first_invoice_number, last_invoice_number,
+              prev_hash, hash, finalized, close_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 1, 'SHIFT')",
+            rusqlite::params![
+                number,
+                day,
+                opened_at,
+                period_end,
+                n,
+                ht,
+                b9,
+                a9,
+                b19,
+                a19,
+                a9 + a19,
+                timbre,
+                ttc,
+                cash,
+                cib,
+                dah,
+                cred,
+                settled,
+                first.unwrap_or_default(),
+                last.unwrap_or_default(),
+                prev,
+                hash,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE cash_sessions SET status = 'CLOSED', closed_at = ?1, closing_counted_ct = ?2,
+               theoretical_cash_ct = ?3, cash_diff_ct = ?4, z_report_id = ?5,
+               notes = COALESCE(?6, notes) WHERE id = ?7",
+            rusqlite::params![
+                period_end,
+                counted_cash_ct,
+                theoretical,
+                diff,
+                number,
+                notes,
+                id
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({
+            "zNumber": number, "sessionId": id, "cashierName": cashier_name,
+            "periodStart": opened_at, "periodEnd": period_end,
+            "totalHtCt": ht, "totalTva9Ct": a9, "totalTva19Ct": a19,
+            "totalTimbreCt": timbre, "totalTtcCt": ttc, "salesCount": n,
+            "cashSalesCt": cash, "cibSalesCt": cib, "dahabiyaSalesCt": dah,
+            "creditSalesCt": cred, "settlementsCashCt": settled,
+            "depositsCt": dep, "withdrawalsCt": wit, "expensesCt": exp,
+            "openingFloatCt": opening_float_ct, "theoreticalCashCt": theoretical,
+            "closingCountedCt": counted_cash_ct, "cashDiffCt": diff,
+            "hash": hash, "prevHash": prev,
+        }))
+    };
+    match run() {
+        Ok(v) => {
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = tx.rollback();
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1573,5 +2144,36 @@ mod tests {
             .unwrap();
         assert_eq!((status.as_str(), exempt), ("VERIFIED", 1));
         let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn cash_lane_open_move_status_close() {
+        // v1.4.6: the production-independence lane — open (single), guarded
+        // movements, live theoretical, atomic SHIFT close with chained Z.
+        let mut db = memdb();
+        let s = cash_open(&db, "s1", "Gérant", 5000).unwrap();
+        assert_eq!(s["status"], "OPEN");
+        assert!(cash_open(&db, "s2", "Autre", 0).is_err()); // single OPEN
+        let m = cash_movement(&db, "m1", "s1", "DEPOSIT", 100000, "appoint").unwrap();
+        assert_eq!(m["amountCt"], 100000);
+        assert!(cash_movement(&db, "m2", "s1", "EXPENSE", 0, "x").is_err()); // F4
+        assert!(cash_movement(&db, "m3", "s1", "EXPENSE", 500, "  ").is_err()); // F3
+        let live = cash_session_status(&db, "s1").unwrap();
+        assert_eq!(live["theoreticalCashCt"], 105000); // 5000 + 100000
+        assert!(cash_active(&db).unwrap().is_object());
+        assert_eq!(cash_sessions(&db, 20).unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(
+            cash_movements(&db, "s1", 50)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let z = cash_close_and_z(&mut db, "s1", 105000, None).unwrap();
+        assert_eq!(z["cashDiffCt"], 0);
+        assert!(z["zNumber"].as_str().unwrap().starts_with("Z-"));
+        assert!(cash_active(&db).unwrap().is_null());
+        assert!(cash_close_and_z(&mut db, "s1", 105000, None).is_err()); // terminal
     }
 }

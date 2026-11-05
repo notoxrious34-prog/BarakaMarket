@@ -192,7 +192,8 @@ export function mintRowId(): string {
 }
 
 async function invokeLane<T>(
-  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db' | 'factory_reset',
+  command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db' | 'factory_reset'
+    | 'cash_open' | 'cash_movement' | 'cash_active' | 'cash_sessions' | 'cash_movements' | 'cash_close_and_z',
   args: Record<string, unknown>,
 ): Promise<T | null> {
   if (!isTauriRuntime()) return null;
@@ -361,6 +362,105 @@ export async function backupDatabase(
   } catch {
     return null;
   }
+}
+
+// ── v1.4.6: native cash-session lane (#PROD-CASH). The installed app has no
+// :3100 loopback — invoke-first, loopback second; legacy "Mode autonome"
+// survives only when BOTH lanes are down (dev without server).
+export type CashSessionRecordDTO = {
+  id: string; cashierName: string; openedAt: string; closedAt?: string;
+  openingFloatCt: number; closingCountedCt?: number; theoreticalCashCt?: number;
+  cashDiffCt?: number; status: 'OPEN' | 'CLOSED'; zReportId?: string; notes?: string;
+};
+export type CashLiveStatusDTO = {
+  session: CashSessionRecordDTO; openingFloatCt: number; cashSalesCt: number;
+  settlementsCashCt: number; depositsCt: number; withdrawalsCt: number;
+  expensesCt: number; theoreticalCashCt: number; totalSalesCount: number;
+};
+export type CashMovementDTO = {
+  id: string; sessionId: string; type: string; amountCt: number;
+  reason: string; createdAt: string;
+};
+
+const newCashId = (): string =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `cash-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+
+async function cashLoopback<T>(path: string, init?: RequestInit): Promise<T | null> {
+  // The :3100 loopback exists only in the browser dev lane; in the installed
+  // app the native lane is the only truth (no server to call).
+  if (isTauriRuntime()) return null;
+  try {
+    const token = await getLoopbackToken();
+    const r = await fetch(`${LOOPBACK_BASE}${path}`, {
+      ...init,
+      headers: { 'content-type': 'application/json', ...authHeaders(token), ...(init?.headers ?? {}) },
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+export async function cashActiveNative(): Promise<CashLiveStatusDTO | null> {
+  const native = await invokeLane<CashLiveStatusDTO>('cash_active', {});
+  if (native && native.session) return native;
+  return cashLoopback<CashLiveStatusDTO>('/api/cash/active');
+}
+
+export async function cashOpenNative(
+  cashierName: string, openingFloatCt: number,
+): Promise<CashSessionRecordDTO | null> {
+  const native = await invokeLane<CashSessionRecordDTO>(
+    'cash_open', { id: newCashId(), cashierName, openingFloatCt },
+  );
+  if (native && native.id) return native;
+  return cashLoopback<CashSessionRecordDTO>('/api/cash/open', {
+    method: 'POST', body: JSON.stringify({ cashierName, openingFloatCt }),
+  });
+}
+
+export async function cashMoveNative(
+  sessionId: string, movementType: string, amountCt: number, reason: string,
+): Promise<CashMovementDTO | null> {
+  const native = await invokeLane<CashMovementDTO>(
+    'cash_movement', { id: newCashId(), sessionId, movementType, amountCt, reason },
+  );
+  if (native && native.id) return native;
+  return cashLoopback<CashMovementDTO>('/api/cash/movement', {
+    method: 'POST', body: JSON.stringify({ sessionId, movementType, amountCt, reason }),
+  });
+}
+
+export async function cashSessionsNative(limit = 20): Promise<CashSessionRecordDTO[] | null> {
+  const native = await invokeLane<CashSessionRecordDTO[]>('cash_sessions', { limit });
+  if (Array.isArray(native)) return native;
+  return cashLoopback<CashSessionRecordDTO[]>(`/api/cash/sessions?limit=${limit}`);
+}
+
+export async function cashMovementsNative(
+  sessionId: string, limit = 50,
+): Promise<CashMovementDTO[] | null> {
+  const native = await invokeLane<CashMovementDTO[]>(
+    'cash_movements', { sessionId, limit },
+  );
+  if (Array.isArray(native)) return native;
+  return cashLoopback<CashMovementDTO[]>(
+    `/api/cash/movements?sessionId=${encodeURIComponent(sessionId)}&limit=${limit}`,
+  );
+}
+
+export async function cashCloseNative(
+  sessionId: string, countedCashCt: number, notes?: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<any | null> {
+  const native = await invokeLane('cash_close_and_z', { sessionId, countedCashCt, notes: notes ?? null });
+  if (native && (native as { zNumber?: string }).zNumber) return native;
+  return cashLoopback('/api/cash/close-and-z', {
+    method: 'POST', body: JSON.stringify({ sessionId, countedCashCt, notes }),
+  });
 }
 
 /**

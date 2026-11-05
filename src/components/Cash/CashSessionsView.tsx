@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { formatDZD } from '../../core/display';
-import { getLoopbackToken } from '../../core/fiscal-authority';
-
-const API = 'http://127.0.0.1:3100';
+import {
+  cashActiveNative, cashCloseNative, cashMoveNative, cashMovementsNative,
+  cashOpenNative, cashSessionsNative,
+} from '../../core/fiscal-authority';
 
 interface LiveStatus {
   session: { id: string; cashierName: string; openedAt: string };
@@ -52,29 +53,27 @@ export const CashSessionsView: React.FC = () => {
   const closeBlocked = liveDiffCt !== null && liveDiffCt !== 0 && closeReason.trim() === '';
 
   const refresh = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/api/cash/active`);
-      if (!r.ok) throw new Error();
-      setLive(await r.json());
+    // v1.4.6 (#PROD-CASH): invoke-first, loopback second. The installed app
+    // has no :3100 — the native lane IS the till there. `offline` survives
+    // only when both lanes are down (dev preview without server).
+    const active = await cashActiveNative();
+    if (active) {
+      setLive(active as LiveStatus);
       setOffline(false);
-    } catch {
+    } else {
       setOffline(true);
     }
-    try {
-      const h = await fetch(`${API}/api/cash/sessions?limit=10`);
-      if (h.ok) {
-        const rows: SessionRow[] = await h.json();
-        setHistory(rows);
-        // F8: the movement trail of the newest session (read-only, with the polls).
-        const open = rows.find(r => r.status === 'OPEN') ?? rows[0];
-        if (open) {
-          try {
-            const m = await fetch(`${API}/api/cash/movements?sessionId=${encodeURIComponent(open.id)}&limit=50`);
-            if (m.ok) setMovements(await m.json());
-          } catch { /* trail is a bonus, never blocks the till */ }
-        } else setMovements([]);
-      }
-    } catch { /* history is a bonus, never blocks the till */ }
+    const rows = await cashSessionsNative(10);
+    if (rows) {
+      setHistory(rows as SessionRow[]);
+      // F8: the movement trail of the newest session (read-only, with the polls).
+      const open = (rows as SessionRow[]).find(r => r.status === 'OPEN') ?? rows[0];
+      if (open) {
+        const m = await cashMovementsNative(open.id, 50);
+        if (m) setMovements(m as MovementRow[]);
+      } else setMovements([]);
+    }
+    // history/trail stay bonuses — the till card above never blocks on them.
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -85,22 +84,30 @@ export const CashSessionsView: React.FC = () => {
     return () => clearInterval(t);
   }, [refresh]);
 
-  // P0 (institutional audit): the loopback write token MUST ride every cash POST —
-  // without it the installed app 401s on open/movement/close (dead Caisse page).
-  // Same relay pattern as BackupManagerView/print-lane (web lane: '' → unchanged).
-  const post = async (url: string, body: unknown, okMsg: string) => {
+  // v1.4.6 (#PROD-CASH): invoke-first writes. The loopback token relay is
+  // gone — the native lane owns the guards (F3/F4/K5/K14) in the installed
+  // app, the loopback owns them in browser dev. Same `post(url, body, okMsg)`
+  // call shape, so the JSX below is untouched.
+  const post = async (url: string, body: Record<string, unknown>, okMsg: string) => {
     try {
-      const token = await getLoopbackToken();
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', ...(token ? { 'x-baraka-loopback': token } : {}) },
-        body: JSON.stringify(body),
-      });
-      const j = await r.json();
-      if (!r.ok) throw new Error(r.status === 401 ? 'LOOPBACK_401' : (j.error ?? 'error'));
+      let j: unknown = null;
+      if (url.endsWith('/cash/open')) {
+        j = await cashOpenNative(String(body.cashierName ?? ''), Number(body.openingFloatCt ?? 0));
+      } else if (url.endsWith('/cash/movement')) {
+        j = await cashMoveNative(
+          String(body.sessionId ?? ''), String(body.movementType ?? ''),
+          Number(body.amountCt ?? 0), String(body.reason ?? ''),
+        );
+      } else if (url.endsWith('/cash/close-and-z')) {
+        j = await cashCloseNative(
+          String(body.sessionId ?? ''), Number(body.countedCashCt ?? 0),
+          typeof body.notes === 'string' ? body.notes : undefined,
+        );
+      }
+      if (!j) throw new Error('CASH_LANE_DOWN');
       setMsg(okMsg);
       // K11: a movement response carries no zNumber — never wipe the last Z.
-      if (j.zNumber) {
+      if ((j as ZResult).zNumber) {
         setLastZ(j as ZResult);
         // K10: a real close retires the close form (no stale counted/reason).
         setCounted(''); setCloseReason('');
@@ -109,14 +116,8 @@ export const CashSessionsView: React.FC = () => {
       }
       await refresh();
     } catch (e) {
-      // QA-P1: the loopback write token exists only in the native shell — web
-      // preview is honestly read-only for cash writes. Say so, plainly.
-      if ((e as Error).message === 'LOOPBACK_401') {
-        setMsg(isAr
-          ? 'تعذّرت الكتابة: تتطلب هذه العملية التطبيق المثبت (المسار الأصلي). المعروض قراءة حيّة فقط.'
-          : 'Écriture impossible : opération réservée à l’application installée (canal natif). Affichage en lecture seule.');
-        return;
-      }
+      // No native lane and no loopback: dev preview without server, or a
+      // shell older than v1.4.6. Honest, in the user's language.
       setMsg(`${isAr ? 'خطأ: ' : 'Erreur: '}${(e as Error).message}`);
     }
   };
@@ -165,7 +166,7 @@ export const CashSessionsView: React.FC = () => {
               const f = Math.round(Number(opening) * 100);
               if (!cashier.trim()) { setMsg(isAr ? 'اكتب اسم الكاشير أولاً' : 'Nom du caissier requis'); return; }
               if (opening.trim() === '' || !Number.isFinite(f) || f < 0) { setMsg(isAr ? 'الصندوق الافتتاحي رقم ≥ 0' : 'Fond de caisse : nombre ≥ 0'); return; }
-              void post(`${API}/api/cash/open`, { cashierName: cashier.trim(), openingFloatCt: f }, isAr ? 'تم فتح الجلسة' : 'Session ouverte');
+              void post('/cash/open', { cashierName: cashier.trim(), openingFloatCt: f }, isAr ? 'تم فتح الجلسة' : 'Session ouverte');
             }}
           >
             {isAr ? 'فتح الجلسة' : 'Ouvrir'}
@@ -208,7 +209,7 @@ export const CashSessionsView: React.FC = () => {
                   setMsg(isAr ? 'اكتب المبلغ (> 0) وسبباً حقيقياً للحركة أولاً' : 'Saisissez un montant (> 0) et un motif réel d’abord');
                   return;
                 }
-                void post(`${API}/api/cash/movement`, { sessionId: live.session.id, movementType: movType, amountCt: Math.round(Number(movAmount) * 100), reason: movReason.trim() }, isAr ? 'تم تسجيل الحركة' : 'Mouvement enregistré');
+                void post('/cash/movement', { sessionId: live.session.id, movementType: movType, amountCt: Math.round(Number(movAmount) * 100), reason: movReason.trim() }, isAr ? 'تم تسجيل الحركة' : 'Mouvement enregistré');
               }}
             >
               {isAr ? 'تسجيل' : 'Enregistrer'}
@@ -254,7 +255,7 @@ export const CashSessionsView: React.FC = () => {
                     ? `إغلاق نهائي للجلسة؟ النظري ${dz(live.theoreticalCashCt)} — المحسوب ${dz(countedCt)}. لا رجوع بعد الطبع.`
                     : `Clôture définitive ? Théorique ${dz(live.theoreticalCashCt)} — compté ${dz(countedCt)}. Irréversible après impression.`);
                   if (!ok) return;
-                  void post(`${API}/api/cash/close-and-z`, { sessionId: live.session.id, countedCashCt: countedCt, notes: closeReason.trim() || undefined, printReceipt: true, actor: session?.username ?? cashier }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé');
+                  void post('/cash/close-and-z', { sessionId: live.session.id, countedCashCt: countedCt, notes: closeReason.trim() || undefined, printReceipt: true, actor: session?.username ?? cashier }, isAr ? 'تم الإغلاق وطبع Z' : 'Clôturé — Z imprimé');
                 }}
               >
                 {isAr ? 'إغلاق وطبع Z' : 'Clôturer + Z'}

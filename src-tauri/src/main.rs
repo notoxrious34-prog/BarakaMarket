@@ -191,6 +191,70 @@ fn register_backup(
     fiscal::register_backup(&conn, &id, &dest, &label, &appVersion, exempt)
 }
 
+/// v1.4.6: native cash-session lane (production independence, #PROD-CASH).
+/// The installed app has no :3100 loopback — these replace the server calls
+/// the Cloture page and the POS till-expense path used to make.
+#[tauri::command]
+fn cash_open(
+    id: String,
+    cashierName: String,
+    openingFloatCt: i64,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::cash_open(&conn, &id, &cashierName, openingFloatCt)
+}
+
+/// v1.4.6: guarded till movement (F3/F4 twins enforced natively).
+#[tauri::command]
+fn cash_movement(
+    id: String,
+    sessionId: String,
+    movementType: String,
+    amountCt: i64,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::cash_movement(&conn, &id, &sessionId, &movementType, amountCt, &reason)
+}
+
+/// v1.4.6: live till status (native theoretical, same equation as the server).
+#[tauri::command]
+fn cash_active() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::cash_active(&conn)
+}
+
+/// v1.4.6: newest-first session history for the Cloture page.
+#[tauri::command]
+fn cash_sessions(limit: i64) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::cash_sessions(&conn, limit)
+}
+
+/// v1.4.6: the movement trail of one session (F8), newest first.
+#[tauri::command]
+fn cash_movements(sessionId: String, limit: i64) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::cash_movements(&conn, &sessionId, limit)
+}
+
+/// v1.4.6: atomic SHIFT close + hash-chained Z (day-lock enforced natively).
+#[tauri::command]
+fn cash_close_and_z(
+    sessionId: String,
+    countedCashCt: i64,
+    notes: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::cash_close_and_z(&mut conn, &sessionId, countedCashCt, notes.as_deref())
+}
+
 /// T12 fix: native PIN change. The exe never had this command — forced-change
 /// died with "check the connection" because no loopback runs in the shell.
 #[tauri::command]
@@ -284,7 +348,13 @@ fn main() {
             change_pin,
             user_list,
             audit_list,
-            audit_log
+            audit_log,
+            cash_open,
+            cash_movement,
+            cash_active,
+            cash_sessions,
+            cash_movements,
+            cash_close_and_z
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");

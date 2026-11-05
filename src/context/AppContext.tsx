@@ -37,7 +37,7 @@ import {
 import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
 import { advancesForMonth, settleSalaryMath, applyAdvanceToBalance, applyPaydayToBalance } from '../core/payroll';
-import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, getLoopbackToken, LOOPBACK_BASE, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
+import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, cashActiveNative, cashMoveNative, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { APP_VERSION } from '../core/version';
 import { detectVersionShift } from '../core/version-change';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
@@ -1902,25 +1902,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return s;
   };
 
+  // v1.4.6 (#PROD-CASH): invoke-first till expense — the POS path was
+  // fetch-only, so on user machines (no :3100) the till never saw till
+  // expenses and the Z diff was wrong. Native lane owns the guards now.
   const postTillExpense = async (amountCt: number, reason: string): Promise<boolean> => {
     try {
-      const a = await fetch(`${LOOPBACK_BASE}/api/cash/active`);
-      if (!a.ok) return false;
-      const live = await a.json();
-      const sid = live?.session?.id as string | undefined;
+      if (!Number.isInteger(amountCt) || amountCt <= 0) return false;
+      const active = await cashActiveNative();
+      const sid = active?.session?.id;
       if (!sid) return false;
-      // Production (Tauri) attaches the relayed loopback token; dev web has
-      // none, so the movement is honestly refused and the expense stays hors-caisse.
-      const token = await getLoopbackToken();
-      const r = await fetch(`${LOOPBACK_BASE}/api/cash/movement`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(token ? { 'x-baraka-loopback': token } : {}),
-        },
-        body: JSON.stringify({ sessionId: sid, movementType: 'EXPENSE', amountCt, reason }),
-      });
-      return r.ok;
+      const row = await cashMoveNative(sid, 'EXPENSE', amountCt, reason?.trim() || 'dépense');
+      return !!row;
     } catch {
       return false;
     }
