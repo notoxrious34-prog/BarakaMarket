@@ -433,6 +433,12 @@ CREATE TABLE IF NOT EXISTS users (
   -- deactivate, cleared on reactivate; never edited in place.
   freeze_reason     TEXT    CHECK (freeze_reason IN ('RESIGNED', 'LEAVE', 'MISUSE', 'OTHER')),
   freeze_note       TEXT,
+  -- v1.5.1 (USERS-PLUS §3): temp-PIN expiry (`YYYY-MM-DDTHH:MM:SS`, UTC).
+  -- Set by owner reset only; NULL = no expiry (provisioned accounts).
+  pin_expires_at    TEXT,
+  -- v1.5.1 (USERS-PLUS §4): last PIN change, rotation clock. Backfilled
+  -- with `now` at climb; refreshed by every create/change/reset.
+  pin_changed_at    TEXT,
   failed_attempts   INTEGER NOT NULL DEFAULT 0,
   locked_until_ms   INTEGER NOT NULL DEFAULT 0,
   lock_cycles       INTEGER NOT NULL DEFAULT 0,

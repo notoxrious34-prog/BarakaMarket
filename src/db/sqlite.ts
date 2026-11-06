@@ -185,7 +185,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 10;
+export const LATEST_SCHEMA_VERSION = 11;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -227,6 +227,8 @@ export interface SafeUser {
   must_change_pin: number; active: number;
   /** v1.5.1 §1: set on deactivate, cleared on reactivate. */
   freeze_reason: string | null; freeze_note: string | null;
+  /** v1.5.1 §3: temp-PIN expiry (`YYYY-MM-DDTHH:MM:SS`), NULL = no expiry. */
+  pin_expires_at: string | null;
 }
 
 export interface AuditRow {
@@ -250,6 +252,7 @@ const safeUser = (r: UserRow): SafeUser => ({
   id: r.id, username: r.username, display_name: r.display_name,
   role: r.role, must_change_pin: r.must_change_pin, active: r.active,
   freeze_reason: r.freeze_reason, freeze_note: r.freeze_note,
+  pin_expires_at: r.pin_expires_at ?? null,
 });
 
 /** T11 (ADR-034): append-only + terminal-state guards. Mirrors schema.sql tail;
@@ -446,6 +449,21 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 10');
     v = 10;
   }
+  // v10 → v11 (USERS-PLUS §3+§4, v1.5.1): temp-PIN expiry + rotation clock.
+  // Fresh files get both from schema.sql; legacy files climb here with the
+  // rotation clock backfilled to `now` so upgrades never force-change live.
+  if (v < 11) {
+    const ucols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+    if (!ucols.some(c => c.name === 'pin_expires_at')) {
+      db.exec('ALTER TABLE users ADD COLUMN pin_expires_at TEXT');
+    }
+    if (!ucols.some(c => c.name === 'pin_changed_at')) {
+      db.exec('ALTER TABLE users ADD COLUMN pin_changed_at TEXT');
+    }
+    db.exec("UPDATE users SET pin_changed_at = replace(datetime('now'),' ','T') WHERE pin_changed_at IS NULL");
+    db.exec('PRAGMA user_version = 11');
+    v = 11;
+  }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -565,8 +583,10 @@ export interface BarakaDb {
   setUserActive(id: number, active: boolean, actor: string, opts?: { reason?: string; note?: string | null }): void;
   changePin(userId: number, oldPin: string, newPin: string): void;
   /** v1.5.1 §3: owner-issued temporary PIN. Sets `must_change_pin = 1` so the
-   *  new PIN dies at first login; owner accounts are immune (self-change). */
-  resetUserPin(userId: number, newPin: string, actor: string): void;
+   *  new PIN dies at first login; owner accounts are immune (self-change).
+   *  `opts.expiresAt` (`YYYY-MM-DDTHH:MM:SS`, UTC, future) arms auto-expiry;
+   *  omitted = provisioned-style flag with no deadline. */
+  resetUserPin(userId: number, newPin: string, actor: string, opts?: { expiresAt?: string | null }): void;
   listAudit(limit?: number): AuditRow[];
   logAudit(e: AuditEvent): void;
 }
@@ -2328,8 +2348,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const displayName = (input.display_name ?? '').trim().slice(0, 40) || username;
       try {
         const r = db.prepare(
-          'INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, created_at) VALUES (?, ?, ?, ?, 1, ?)',
-        ).run(username, displayName, input.role, createPinHash(input.pin), new Date().toISOString());
+          'INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, pin_changed_at, created_at) VALUES (?, ?, ?, ?, 1, ?, ?)',
+        ).run(username, displayName, input.role, createPinHash(input.pin), new Date().toISOString().slice(0, 19), new Date().toISOString());
         logAuditRow(db, { actor, action: 'user.create', entity: 'users', entityId: username, detail: `role=${input.role}` });
         return safeUser(userRow(db, Number(r.lastInsertRowid)));
       } catch (e) {
@@ -2360,12 +2380,18 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         logAuditRow(db, { actor: name, action: 'login.fail' });
         return { ok: false as const, locked: (next.lockedUntil ?? 0) > now };
       }
+      // v1.5.1 §3: a temp PIN past its deadline dies even with the right code.
+      if (row.must_change_pin === 1 && row.pin_expires_at != null
+        && row.pin_expires_at <= new Date().toISOString().slice(0, 19)) {
+        logAuditRow(db, { actor: name, action: 'login.fail', detail: 'temp-expired' });
+        return { ok: false as const, locked: false };
+      }
       db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
       logAuditRow(db, { actor: name, action: 'login.ok' });
       return { ok: true as const, user: safeUser(row) };
     },
     listUsers(): SafeUser[] {
-      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note FROM users ORDER BY id').all() as unknown as SafeUser[]);
+      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note, pin_expires_at FROM users ORDER BY id').all() as unknown as SafeUser[]);
     },
     /** v1.5.1 §1: deactivation REQUIRES a freeze reason (+ optional note ≤140);
      * reactivation clears both. Reason travels into the audit detail. */
@@ -2386,13 +2412,28 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         logAuditRow(db, { actor, action: 'user.deactivate', entity: 'users', entityId: row.username, detail: 'reactivated' });
       }
     },
-    resetUserPin(userId: number, newPin: string, actor: string): void {
+    resetUserPin(userId: number, newPin: string, actor: string, opts?: { expiresAt?: string | null }): void {
       const row = userRow(db, userId);
       if (row.role === 'owner') throw new Error('[db] owner accounts are never reset — use self-change');
       if (!isValidP(newPin)) throw new Error('[db] PIN must be 4-8 numeric digits');
-      db.prepare('UPDATE users SET pin_verifier = ?, must_change_pin = 1 WHERE id = ?').run(createPinHash(newPin), userId);
+      // Canonical temp-PIN deadline: 19-char UTC stamp, strictly in the future.
+      let exp: string | null = null;
+      if (opts?.expiresAt != null) {
+        if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(opts.expiresAt)) {
+          throw new Error('[db] expiresAt must be YYYY-MM-DDTHH:MM:SS');
+        }
+        if (opts.expiresAt <= new Date().toISOString().slice(0, 19)) {
+          throw new Error('[db] temp PIN expiry must be in the future');
+        }
+        exp = opts.expiresAt;
+      }
+      db.prepare("UPDATE users SET pin_verifier = ?, must_change_pin = 1, pin_expires_at = ?, pin_changed_at = ? WHERE id = ?")
+        .run(createPinHash(newPin), exp, new Date().toISOString().slice(0, 19), userId);
       // The verifier is a salted hash — the audit carries the target only.
-      logAuditRow(db, { actor, action: 'pin.reset', entity: 'users', entityId: row.username, detail: 'temporary — change enforced at login' });
+      logAuditRow(db, {
+        actor, action: 'pin.reset', entity: 'users', entityId: row.username,
+        detail: exp ? `temporary until ${exp} — change enforced at login` : 'temporary — change enforced at login',
+      });
     },
     changePin(userId: number, oldPin: string, newPin: string): void {
       const row = userRow(db, userId);
@@ -2401,7 +2442,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         throw new Error('[db] current PIN is wrong');
       }
       if (!isValidP(newPin)) throw new Error('[db] PIN must be 4-8 numeric digits');
-      db.prepare('UPDATE users SET pin_verifier = ?, must_change_pin = 0 WHERE id = ?').run(createPinHash(newPin), userId);
+      db.prepare("UPDATE users SET pin_verifier = ?, must_change_pin = 0, pin_expires_at = NULL, pin_changed_at = ? WHERE id = ?").run(createPinHash(newPin), new Date().toISOString().slice(0, 19), userId);
       logAuditRow(db, { actor: row.username, action: 'pin.change' });
     },
     listAudit(limit = 100): AuditRow[] {

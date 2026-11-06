@@ -213,13 +213,24 @@ pub fn user_verify(conn: &Connection, username: &str, pin: &str) -> Result<Value
         )
         .map_err(|e| e.to_string())?;
         audit(conn, &name, "login.ok", "");
-        let must: i64 = conn
+        let row2: (i64, Option<String>) = conn
             .query_row(
-                "SELECT must_change_pin FROM users WHERE id = ?1",
+                "SELECT must_change_pin, pin_expires_at FROM users WHERE id = ?1",
                 [id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|e| e.to_string())?;
+        // v1.5.1 §3: a temp PIN past its deadline dies even with the right code.
+        if row2.0 == 1 {
+            if let Some(ref exp) = row2.1 {
+                let now19 = &crate::fiscal::now_iso()[..19];
+                if exp.as_str() <= now19 {
+                    audit(conn, &name, "login.fail", "temp-expired");
+                    return Ok(json!({ "ok": false, "locked": false }));
+                }
+            }
+        }
+        let must: i64 = row2.0;
         return Ok(
             json!({ "ok": true, "user": { "id": id, "username": uname, "display_name": display, "role": role, "must_change_pin": must, "active": 1 } }),
         );
@@ -269,8 +280,8 @@ pub fn user_change_pin(
     }
     let v = mint_verifier(new_pin)?;
     conn.execute(
-        "UPDATE users SET pin_verifier = ?1, must_change_pin = 0 WHERE id = ?2",
-        rusqlite::params![v, user_id],
+        "UPDATE users SET pin_verifier = ?1, must_change_pin = 0, pin_expires_at = NULL, pin_changed_at = substr(?2, 1, 19) WHERE id = ?3",
+        rusqlite::params![v, crate::fiscal::now_iso(), user_id],
     )
     .map_err(|e| e.to_string())?;
     audit(conn, &uname, "pin.change", "");
@@ -279,13 +290,16 @@ pub fn user_change_pin(
 
 /// v1.5.1 §3: owner-issued temporary PIN. Flags `must_change_pin = 1` so the
 /// new PIN dies at first login; owner accounts are immune (self-change with
-/// the old PIN). The audit carries the target only — verifiers never leave.
+/// the old PIN). `expires_at` (`YYYY-MM-DDTHH:MM:SS`, UTC, future) arms
+/// auto-expiry; empty = provisioned-style flag with no deadline.
+/// The audit carries the target only — verifiers never leave.
 pub fn user_reset_pin(
     conn: &Connection,
     user_id: i64,
     new_pin: &str,
     requester_role: &str,
     actor: &str,
+    expires_at: &str,
 ) -> Result<Value, String> {
     if requester_role != "owner" {
         return Err("[auth] owner role required".to_string());
@@ -307,17 +321,40 @@ pub fn user_reset_pin(
     if !verify_pin_format(new_pin) {
         return Err("[auth] PIN must be 4-8 numeric digits".to_string());
     }
+    // Canonical temp-PIN deadline: 19-char UTC stamp, strictly in the future.
+    let exp: Option<String> = if expires_at.trim().is_empty() {
+        None
+    } else {
+        let e = expires_at.trim();
+        let shape = e.len() == 19
+            && e.as_bytes()[4] == b'-'
+            && e.as_bytes()[7] == b'-'
+            && e.as_bytes()[10] == b'T'
+            && e.as_bytes()[13] == b':'
+            && e.as_bytes()[16] == b':';
+        if !shape {
+            return Err("[auth] expiresAt must be YYYY-MM-DDTHH:MM:SS".to_string());
+        }
+        let now19 = &crate::fiscal::now_iso()[..19];
+        if e <= now19 {
+            return Err("[auth] temp PIN expiry must be in the future".to_string());
+        }
+        Some(e.to_string())
+    };
     let v = mint_verifier(new_pin)?;
     conn.execute(
-        "UPDATE users SET pin_verifier = ?1, must_change_pin = 1 WHERE id = ?2",
-        rusqlite::params![v, user_id],
+        "UPDATE users SET pin_verifier = ?1, must_change_pin = 1, pin_expires_at = ?2, pin_changed_at = substr(?3, 1, 19) WHERE id = ?4",
+        rusqlite::params![v, exp, crate::fiscal::now_iso(), user_id],
     )
     .map_err(|e| e.to_string())?;
     audit(
         conn,
         actor,
         "pin.reset",
-        &format!("users:{uname} temporary — change enforced at login"),
+        &match exp {
+            Some(ref e) => format!("users:{uname} temporary until {e} — change enforced at login"),
+            None => format!("users:{uname} temporary — change enforced at login"),
+        },
     );
     Ok(json!({ "ok": true }))
 }
@@ -336,7 +373,7 @@ pub fn audit_log(
 
 pub fn user_list(conn: &Connection) -> Result<Value, String> {
     let mut st = conn
-        .prepare("SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note FROM users ORDER BY id")
+        .prepare("SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note, pin_expires_at FROM users ORDER BY id")
         .map_err(|e| e.to_string())?;
     let rows = st
         .query_map([], |r| {
@@ -346,6 +383,7 @@ pub fn user_list(conn: &Connection) -> Result<Value, String> {
                 "must_change_pin": r.get::<_, i64>(4)?, "active": r.get::<_, i64>(5)?,
                 "freeze_reason": r.get::<_, Option<String>>(6)?,
                 "freeze_note": r.get::<_, Option<String>>(7)?,
+                "pin_expires_at": r.get::<_, Option<String>>(8)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -389,8 +427,8 @@ pub fn user_create(
     };
     let v = mint_verifier(pin)?;
     match conn.execute(
-        "INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, created_at)
-         VALUES (?1, ?2, ?3, ?4, 1, datetime('now'))",
+        "INSERT INTO users (username, display_name, role, pin_verifier, must_change_pin, pin_changed_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, 1, replace(datetime('now'),' ','T'), datetime('now'))",
         rusqlite::params![name, dn, role, v],
     ) {
         Ok(_) => {}
@@ -417,7 +455,7 @@ pub fn user_create(
         )
         .map_err(|e| e.to_string())?;
     Ok(
-        json!({ "id": row.0, "username": row.1, "display_name": row.2, "role": row.3, "must_change_pin": row.4, "active": row.5 }),
+        json!({ "id": row.0, "username": row.1, "display_name": row.2, "role": row.3, "must_change_pin": row.4, "active": row.5, "pin_expires_at": Value::Null }),
     )
 }
 
@@ -673,11 +711,11 @@ mod tests {
         assert!(super::user_set_active(&db, 9999, false, "owner", "owner", "LEAVE", "").is_err());
         // v1.5.1 §3: temporary PIN — owner-gated, owner immune, shape
         // checked, flag set, old PIN dead, audit carries no PIN digits.
-        assert!(super::user_reset_pin(&db, id, "4242", "manager", "m").is_err());
-        assert!(super::user_reset_pin(&db, 1, "4242", "owner", "owner").is_err());
-        assert!(super::user_reset_pin(&db, id, "12", "owner", "owner").is_err());
-        assert!(super::user_reset_pin(&db, 9999, "4242", "owner", "owner").is_err());
-        assert!(super::user_reset_pin(&db, id, "4242", "owner", "owner").is_ok());
+        assert!(super::user_reset_pin(&db, id, "4242", "manager", "m", "").is_err());
+        assert!(super::user_reset_pin(&db, 1, "4242", "owner", "owner", "").is_err());
+        assert!(super::user_reset_pin(&db, id, "12", "owner", "owner", "").is_err());
+        assert!(super::user_reset_pin(&db, 9999, "4242", "owner", "owner", "").is_err());
+        assert!(super::user_reset_pin(&db, id, "4242", "owner", "owner", "").is_ok());
         assert_eq!(
             super::user_verify(&db, "sara", "5678").unwrap()["ok"],
             false
@@ -710,5 +748,32 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cleared_flag, 0);
+        // §3 completion: expiry — bad shape / past refused; future armed and
+        // enforced at verify; self-change clears the deadline.
+        assert!(super::user_reset_pin(&db, id, "5151", "owner", "owner", "not-a-date").is_err());
+        assert!(
+            super::user_reset_pin(&db, id, "5151", "owner", "owner", "2000-01-01T00:00:00")
+                .is_err()
+        );
+        let future = "2099-12-31T23:59:59";
+        assert!(super::user_reset_pin(&db, id, "5151", "owner", "owner", future).is_ok());
+        let tv2 = super::user_verify(&db, "sara", "5151").unwrap();
+        assert_eq!(tv2["ok"], true);
+        db.execute(
+            "UPDATE users SET pin_expires_at = '2000-01-01T00:00:00' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+        let dead = super::user_verify(&db, "sara", "5151").unwrap();
+        assert_eq!(dead["ok"], false);
+        assert_eq!(dead["locked"], false);
+        let exp_audit: String = db
+            .query_row(
+                "SELECT detail FROM audit_log WHERE action = 'login.fail' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(exp_audit, "temp-expired");
     }
 }

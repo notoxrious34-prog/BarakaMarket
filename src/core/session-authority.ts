@@ -14,6 +14,8 @@ export interface SessionUser {
   must_change_pin: number; active: number;
   /** v1.5.1 §1: set on deactivate, cleared on reactivate. */
   freeze_reason?: string | null; freeze_note?: string | null;
+  /** v1.5.1 §3: temp-PIN deadline (`YYYY-MM-DDTHH:MM:SS`), NULL = none. */
+  pin_expires_at?: string | null;
 }
 
 export type VerifyOut = { ok: true; user: SessionUser } | { ok: false; locked: boolean };
@@ -212,14 +214,17 @@ export async function setSessionUserActive(
 /** v1.5.1 §3: owner-issued temporary PIN (invoke-first, loopback fallback).
  *  False on any refusal — read `lastUserLaneError()` for the reason
  *  (owner-gate, owner immunity, PIN shape, offline). The lane flags
- *  must_change_pin=1: the PIN dies at first login. Never throws. */
+ *  must_change_pin=1: the PIN dies at first login. `opts.expiresAt`
+ *  (`YYYY-MM-DDTHH:MM:SS`, UTC, future) arms auto-expiry. Never throws. */
 export async function resetSessionUserPin(
   id: number, pin: string, requesterRole: Role, actor: string,
+  opts?: { expiresAt?: string | null },
 ): Promise<boolean> {
   userLaneError = null;
   if (isTauriRuntime()) {
     const n = await invokeUserNative<{ ok?: boolean }>('reset_pin', {
       userId: id, newPin: pin, requesterRole, actor,
+      expiresAt: opts?.expiresAt ?? '',
     });
     if (n.ok && n.value && n.value.ok === true) return true;
     userLaneError = (n.ok ? '' : n.error) || 'native lane refused';
@@ -227,6 +232,7 @@ export async function resetSessionUserPin(
   }
   const l = await postUserLoopback<{ ok?: boolean }>('/api/users/reset-pin', {
     userId: id, newPin: pin, requesterRole, actor,
+    expiresAt: opts?.expiresAt ?? null,
   });
   if (l.ok && l.value && l.value.ok === true) return true;
   userLaneError = (l.ok ? '' : l.error) || 'server refused';

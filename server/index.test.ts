@@ -440,6 +440,15 @@ test('api: v1.5.1 §3 reset-pin — owner-only temp PIN with forced change', asy
   const live = (await (await post('/api/users/verify', { username: 'rim', pin: '4242' })).json()) as { ok: boolean; user: { must_change_pin: number } };
   assert.equal(live.ok, true);
   assert.equal(live.user.must_change_pin, 1);
+  // §3 completion: future expiry arms the deadline; past is refused.
+  const past = await post('/api/users/reset-pin', { userId: rim.id, newPin: '5151', requesterRole: 'owner', actor: 'owner', expiresAt: '2000-01-01T00:00:00' });
+  assert.equal(past.status, 400);
+  const fut = await post('/api/users/reset-pin', { userId: rim.id, newPin: '5151', requesterRole: 'owner', actor: 'owner', expiresAt: '2099-12-31T23:59:59' });
+  assert.equal(fut.status, 200);
+  const users = await (await fetch(`${base}/api/users`)).json() as { id: number; pin_expires_at: string | null }[];
+  assert.equal(users.find(u => u.id === rim.id)?.pin_expires_at, '2099-12-31T23:59:59');
+  const live2 = (await (await post('/api/users/verify', { username: 'rim', pin: '5151' })).json()) as { ok: boolean };
+  assert.equal(live2.ok, true);
   const audit = await (await fetch(`${base}/api/audit?limit=50`)).json() as { action: string; detail: string }[];
   const reset = audit.find(a => a.action === 'pin.reset');
   assert.ok(reset, 'audit has pin.reset');

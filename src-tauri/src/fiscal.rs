@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 10;
+pub const LATEST_SCHEMA_VERSION: i64 = 11;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -287,6 +287,25 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         conn.execute_batch("PRAGMA user_version = 10;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v10 → v11 (USERS-PLUS §3+§4, v1.5.1): temp-PIN expiry + rotation clock.
+    // Fresh files get both from schema.sql; legacy files climb here with the
+    // rotation clock backfilled to `now` so upgrades never force-change live.
+    if v < 11 {
+        if !has_col("users", "pin_expires_at")? {
+            conn.execute_batch("ALTER TABLE users ADD COLUMN pin_expires_at TEXT;")
+                .map_err(|e| e.to_string())?;
+        }
+        if !has_col("users", "pin_changed_at")? {
+            conn.execute_batch("ALTER TABLE users ADD COLUMN pin_changed_at TEXT;")
+                .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch(
+            "UPDATE users SET pin_changed_at = replace(datetime('now'),' ','T') WHERE pin_changed_at IS NULL;",
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA user_version = 11;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -2212,7 +2231,7 @@ pub fn factory_reset(conn: &Connection, archive_ref: &str, actor: &str) -> Resul
 // Views call invoke-first, loopback second; legacy files get the tables
 // idempotently here (same DDL as db/schema.sql).
 
-fn now_iso() -> String {
+pub(crate) fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

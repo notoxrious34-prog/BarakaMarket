@@ -55,6 +55,8 @@ export const UsersManagerView: React.FC = () => {
   const [resetId, setResetId] = useState<number | null>(null);
   const [resetPin, setResetPin] = useState('');
   const [resetConfirm, setResetConfirm] = useState('');
+  // §3 completion: temp-PIN lifespan (PLAN binds expiry — auto-dies).
+  const [resetHours, setResetHours] = useState<'8' | '24' | '48'>('24');
 
   // The shop survives reloads with a persisted session while this tab mounts
   // on demand — fetch on every visit so the list is never a stale empty.
@@ -243,7 +245,8 @@ export const UsersManagerView: React.FC = () => {
     setPendingId(id);
     setMsg(null);
     try {
-      const done = await resetSessionUserPin(id, resetPin, session.role, session.username);
+      const expiresAt = new Date(Date.now() + Number(resetHours) * 3600_000).toISOString().slice(0, 19);
+      const done = await resetSessionUserPin(id, resetPin, session.role, session.username, { expiresAt });
       if (!done) {
         setMsg({ kind: 'err', text: mapLaneError(lastUserLaneError()) });
         return;
@@ -255,8 +258,8 @@ export const UsersManagerView: React.FC = () => {
       setMsg({
         kind: 'ok',
         text: ar
-          ? `تم إصدار رمز مؤقت لـ ${username} — سيُطلب منه التغيير عند أول دخول`
-          : `Code temporaire émis pour ${username} — changement requis à la première connexion`,
+          ? `تم إصدار رمز مؤقت لـ ${username} (صالح ${resetHours} سا، يُطلب تغييره عند الدخول)`
+          : `Code temporaire émis pour ${username} (valide ${resetHours}h, changement requis à la connexion)`,
       });
     } finally {
       setPendingId(null);
@@ -307,6 +310,7 @@ export const UsersManagerView: React.FC = () => {
                 {u.must_change_pin === 1 && (
                   <span className="ml-1 text-[10px] text-orange-400" title={ar ? 'سيُطلب منه تغيير الرمز عند أول دخول' : 'Changement de code requis à la première connexion'}>
                     {ar ? 'تغيير الرمز مطلوب' : 'Changement requis'}
+                    {u.pin_expires_at ? ` ${ar ? 'حتى' : "jusqu'au"} ${u.pin_expires_at.slice(0, 16).replace('T', ' ')}` : ''}
                   </span>
                 )}
                 {u.active === 0 && (
@@ -400,6 +404,16 @@ export const UsersManagerView: React.FC = () => {
               {ar ? `رمز مؤقت لـ ${target.username} — 4-8 أرقام، يُطلب تغييره عند أول دخول` : `Code temporaire pour ${target.username} — 4-8 chiffres, changement requis à la connexion`}
             </p>
             <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                value={resetHours}
+                onChange={e => setResetHours(e.target.value as '8' | '24' | '48')}
+                title={ar ? 'مدة الصلاحية' : 'Durée de validité'}
+                className="rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-sky-400/60"
+              >
+                <option value="8">{ar ? 'صالح 8 ساعات' : 'Valide 8h'}</option>
+                <option value="24">{ar ? 'صالح 24 ساعة' : 'Valide 24h'}</option>
+                <option value="48">{ar ? 'صالح 48 ساعة' : 'Valide 48h'}</option>
+              </select>
               <input
                 value={resetPin}
                 onChange={e => setResetPin(e.target.value.replace(/\D/g, '').slice(0, 8))}

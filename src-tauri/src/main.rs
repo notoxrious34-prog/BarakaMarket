@@ -440,10 +440,18 @@ fn reset_pin(
     new_pin: String,
     requester_role: String,
     actor: String,
+    expires_at: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    auth::user_reset_pin(&conn, user_id, &new_pin, &requester_role, &actor)
+    auth::user_reset_pin(
+        &conn,
+        user_id,
+        &new_pin,
+        &requester_role,
+        &actor,
+        &expires_at,
+    )
 }
 
 /// T8: native audit read for the manager lane.

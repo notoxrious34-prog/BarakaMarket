@@ -153,7 +153,8 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       if (typeof userId !== 'number' || typeof newPin !== 'string') {
         res.status(400).json({ error: 'body must be {userId, newPin}' }); return;
       }
-      baraka.resetUserPin(userId, newPin, typeof actor === 'string' ? actor : 'local');
+      const exp = (req.body as { expiresAt?: string | null }).expiresAt ?? null;
+      baraka.resetUserPin(userId, newPin, typeof actor === 'string' ? actor : 'local', { expiresAt: exp });
       res.json({ ok: true });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });

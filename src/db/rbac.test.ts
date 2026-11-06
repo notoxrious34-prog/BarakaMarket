@@ -23,11 +23,11 @@ const cleanup = (p: string) => {
   }
 };
 
-test('T8/T11: fresh DB seeds the owner at latest schema (v10)', () => {
+test('T8/T11: fresh DB seeds the owner at latest schema (v11)', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
-    assert.equal(LATEST_SCHEMA_VERSION, 10);
+    assert.equal(LATEST_SCHEMA_VERSION, 11);
     const users = b.listUsers();
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
@@ -114,6 +114,21 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
     const resetAudit = b.listAudit(50).filter(a => a.action === 'pin.reset');
     assert.equal(resetAudit.length, 1);
     assert.ok(!/\d{4}/.test(resetAudit[0].detail), 'no PIN digits in audit');
+    // §3 completion: expiry — bad shape / past refused; future armed and
+    // enforced at verify; self-change clears the deadline.
+    assert.throws(() => b.resetUserPin(m.id, '5151', 'owner', { expiresAt: 'not-a-date' }), /expiresAt/);
+    assert.throws(() => b.resetUserPin(m.id, '5151', 'owner', { expiresAt: '2000-01-01T00:00:00' }), /future/);
+    b.resetUserPin(m.id, '5151', 'owner', { expiresAt: '2099-12-31T23:59:59' });
+    assert.equal(b.listUsers().find(u => u.id === m.id)!.pin_expires_at, '2099-12-31T23:59:59');
+    assert.equal(b.verifyUser('sara', '5151').ok, true);
+    b.db.prepare("UPDATE users SET pin_expires_at = '2000-01-01T00:00:00' WHERE id = ?").run(m.id);
+    assert.equal(b.verifyUser('sara', '5151').ok, false);
+    const expAudit = b.listAudit(50);
+    assert.ok(expAudit.some(a => a.action === 'login.fail' && a.detail === 'temp-expired'), 'audit marks temp-expired');
+    b.resetUserPin(m.id, '5151', 'owner', { expiresAt: '2099-12-31T23:59:59' });
+    b.changePin(m.id, '5151', '0000');
+    assert.equal(b.listUsers().find(u => u.id === m.id)!.pin_expires_at, null);
+    assert.equal(b.listUsers().find(u => u.id === m.id)!.must_change_pin, 0);
     const audit = b.listAudit(50).map(a => a.action);
     for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change', 'pin.reset'] as const) {
       assert.ok(audit.includes(a), `audit must contain ${a}`);
@@ -139,7 +154,7 @@ test('T8b: provisioned accounts start forced-change, blank names fall back', () 
   }
 });
 
-test('T8/T11: legacy v3 file climbs to v10 and reseeds the owner', () => {
+test('T8/T11: legacy v3 file climbs to v11 and reseeds the owner', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
@@ -154,7 +169,7 @@ test('T8/T11: legacy v3 file climbs to v10 and reseeds the owner', () => {
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
     assert.equal(c.verifyUser('owner', '1234').ok, true);
-    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 11);
     c.close();
   } finally {
     cleanup(p);
