@@ -210,6 +210,15 @@ fn return_get(id: String) -> Result<serde_json::Value, String> {
     fiscal::return_get(&conn, &id)
 }
 
+/// v1.5.0 (RETURNS lookup): sale head + returnable lines by UUID id OR FACT
+/// number (read-only; null JSON when unknown).
+#[tauri::command]
+fn sale_for_return(key: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::sale_for_return(&conn, &key)
+}
+
 /// v1.5.0 (RETURNS): list returns, optionally filtered by status.
 #[tauri::command]
 fn return_list(status: Option<String>) -> Result<serde_json::Value, String> {
@@ -506,6 +515,7 @@ fn main() {
             return_approve,
             return_reject,
             return_get,
+            sale_for_return,
             return_list
         ])
         .run(tauri::generate_context!())

@@ -251,6 +251,13 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     res.json(row);
   });
 
+  // v1.5.0 — return-draft lookup by UUID id OR FACT number (read-only).
+  app.get('/api/sales/lookup/:key', (req, res) => {
+    const found = baraka.getSaleForReturn(String(req.params.key ?? ''));
+    if (!found) { res.status(404).json({ error: 'sale not found' }); return; }
+    res.json(found);
+  });
+
   app.post('/api/sales/:id/void', (req, res) => {
     try {
       const { reason, by } = req.body as { reason: string; by?: string };

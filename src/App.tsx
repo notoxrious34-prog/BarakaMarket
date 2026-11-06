@@ -16,6 +16,7 @@ import { AccountingJournalView } from './components/Accounting/AccountingJournal
 import { TicketThermal80mm } from './components/Receipts/TicketThermal80mm';
 import { FactureReglementaireA4 } from './components/Receipts/FactureReglementaireA4';
 import { SettlementQuittanceTicket } from './components/Receipts/SettlementQuittanceTicket';
+import { ReturnsView } from './components/Returns/ReturnsView';
 import { StoreProfileSetupModal } from './components/Settings/StoreProfileSetupModal';
 
 const MainLayout: React.FC = () => {
@@ -70,6 +71,7 @@ const MainLayout: React.FC = () => {
         {activeView === 'accounting' && <AccountingJournalView />}
         {activeView === 'reports' && <DailyZReportView />}
         {activeView === 'shifts' && <CashSessionsView />}
+        {activeView === 'returns' && <ReturnsView />}
         {activeView === 'license' && <LicenseManagerView />}
         {activeView === 'settings' && <SettingsView />}
       </main>

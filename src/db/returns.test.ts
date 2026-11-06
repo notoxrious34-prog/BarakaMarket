@@ -287,3 +287,36 @@ test('v1.5.0: day aggregates net approved returns; Z cross-check holds the net',
     for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
   }
 });
+
+test('v1.5.0: sale lookup by FACT or id feeds the draft screen (remaining math)', () => {
+  const p = tmpFile('lookup');
+  try {
+    const b = openBarakaDb(p);
+    b.upsertProduct(PROD);
+    b.openCashSession('Amine', 1000000);
+    const sale = recordTodaySale(b, 'ESPECES');
+    // by FACT number and by UUID id alike
+    for (const key of [sale.invoice_number, sale.id]) {
+      const f = b.getSaleForReturn(key);
+      assert.ok(f, `found by ${key.slice(0, 8)}…`);
+      assert.equal(f!.sale.invoice_number, sale.invoice_number);
+      assert.equal(f!.sale.status, 'COMPLETED');
+      assert.equal(f!.items.length, 2);
+      assert.equal(f!.items[0].remaining_milli, 2000);
+      assert.equal(f!.items[0].returned_milli, 0);
+    }
+    assert.equal(b.getSaleForReturn('FACT-2099-999999'), null);
+    assert.equal(b.getSaleForReturn('   '), null);
+    // after a full approval the line shows consumed
+    const [la] = saleItemIds(b, sale.id);
+    const d = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 2000 }], reason: 'DEFECT', actor: 'lina' });
+    b.approveReturn(d.id, 'karim', 'manager');
+    const f2 = b.getSaleForReturn(sale.invoice_number);
+    assert.equal(f2!.items[0].returned_milli, 2000);
+    assert.equal(f2!.items[0].remaining_milli, 0);
+    assert.equal(f2!.items[1].remaining_milli, 3000);
+    b.close();
+  } finally {
+    for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
+  }
+});

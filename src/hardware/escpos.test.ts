@@ -149,3 +149,35 @@ test('escpos: Z report surplus and perfect verdicts', async () => {
   const perfect = Buffer.from(buildThermalZReport(base)).toString('utf8');
   assert.ok(perfect.includes('0.00 DZD PARFAIT'), 'perfect verdict');
 });
+
+test('escpos: BON DE RETOUR carries RET + source FACT + reason + signatures, no kick', async () => {
+  const { buildReturnReceipt } = await import('./escpos.js');
+  const buf = buildReturnReceipt({
+    storeName: 'BARAKA MARKET',
+    returnNumber: 'RET-2026-000001',
+    sourceInvoice: 'FACT-2026-000123',
+    postingDay: '2026-11-07',
+    reason: 'DEFECT',
+    creator: 'lina',
+    approver: 'karim',
+    items: [{ name: 'LAIT CONDENSE', qty: '2x', lineTtc: 360 }],
+    refundTotal: 360,
+    paymentMethod: 'ESPECES',
+  });
+  assert.ok(buf instanceof Uint8Array, 'buffer');
+  assert.equal(buf[0], 0x1b, 'ESC @ init');
+  assert.equal(buf[1], 0x40, 'ESC @ init');
+  const text = Buffer.from(buf).toString('utf8');
+  assert.ok(text.includes('BON DE RETOUR'), 'title');
+  assert.ok(text.includes('RET-2026-000001'), 'ret number');
+  assert.ok(text.includes('FACT-2026-000123'), 'source fact');
+  assert.ok(text.includes('DEFECT'), 'reason');
+  assert.ok(text.includes('lina'), 'creator');
+  assert.ok(text.includes('karim'), 'approver');
+  assert.ok(text.includes('360.00 DZD'), 'refund total');
+  assert.ok(text.includes('Signature Client:'), 'client signature line');
+  assert.ok(text.includes('Signature Caissier:'), 'cashier signature line');
+  assert.ok(text.includes('Timbre non remboursable'), 'timbre memo');
+  assert.ok(containsBytes(buf, ESCPOS_PAPER_CUT), 'auto-cut');
+  assert.ok(!containsBytes(buf, ESCPOS_DRAWER_KICK), 'no drawer kick on a refund');
+});

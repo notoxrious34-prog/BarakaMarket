@@ -1487,6 +1487,76 @@ pub fn return_list(conn: &Connection, status: Option<String>) -> Result<Value, S
     Ok(Value::Array(arr))
 }
 
+/// v1.5.0 (RETURNS lookup): sale head + lines with APPROVED-returned and
+/// remaining qty, found by UUID id OR FACT number. Null when unknown.
+/// Read-only twin of the TS `getSaleForReturn` (same shape, same guard math).
+pub fn sale_for_return(conn: &Connection, key: &str) -> Result<Value, String> {
+    let k = key.trim();
+    if k.is_empty() {
+        return Ok(Value::Null);
+    }
+    let head: Option<Value> = conn
+        .query_row(
+            "SELECT id, invoice_number, status, created_at, payment_method,
+              client_name, total_ttc_ct
+             FROM sales WHERE id = ?1 OR invoice_number = ?1",
+            [k],
+            |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, String>(0)?,
+                    "invoice_number": r.get::<_, String>(1)?,
+                    "status": r.get::<_, String>(2)?,
+                    "created_at": r.get::<_, String>(3)?,
+                    "payment_method": r.get::<_, String>(4)?,
+                    "client_name": r.get::<_, Option<String>>(5)?,
+                    "total_ttc_ct": r.get::<_, i64>(6)?,
+                }))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(h) = head else {
+        return Ok(Value::Null);
+    };
+    let sale_id = h["id"].as_str().unwrap_or_default().to_string();
+    let mut st = conn
+        .prepare(
+            "SELECT si.id, si.product_id, si.barcode, si.name_fr, si.name_ar,
+              si.unit_price_ct, si.qty_milli, si.unit, si.tva_rate, si.line_ttc_ct,
+              COALESCE((SELECT SUM(ri.qty_milli) FROM return_items ri
+                JOIN returns r ON r.id = ri.return_id
+                WHERE r.sale_id = si.sale_id AND ri.sale_item_id = si.id
+                  AND r.status = 'APPROVED'), 0) AS returned_milli
+             FROM sale_items si WHERE si.sale_id = ?1 ORDER BY si.id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let lines = st
+        .query_map([sale_id], |r| {
+            let qty: i64 = r.get(6)?;
+            let returned: i64 = r.get(10)?;
+            Ok(serde_json::json!({
+                "sale_item_id": r.get::<_, i64>(0)?,
+                "product_id": r.get::<_, Option<i64>>(1)?,
+                "barcode": r.get::<_, String>(2)?,
+                "name_fr": r.get::<_, String>(3)?,
+                "name_ar": r.get::<_, String>(4)?,
+                "unit_price_ct": r.get::<_, i64>(5)?,
+                "qty_milli": qty,
+                "unit": r.get::<_, String>(7)?,
+                "tva_rate": r.get::<_, i64>(8)?,
+                "line_ttc_ct": r.get::<_, i64>(9)?,
+                "returned_milli": returned,
+                "remaining_milli": qty - returned,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut arr = Vec::new();
+    for line in lines {
+        arr.push(line.map_err(|e| e.to_string())?);
+    }
+    Ok(serde_json::json!({ "sale": h, "items": Value::Array(arr) }))
+}
+
 /// #004 (Phase A): legal day close — recompute from the ledger, lock the
 /// day, chain the hash. Native twin of TS finalizeZReport (which additionally
 /// verifies caller-supplied totals against the same ledger query).
@@ -3245,6 +3315,51 @@ mod tests {
         assert_eq!(got["status"], "REJECTED");
         // Unknown id reads as null JSON, never a throw.
         assert!(return_get(&db, "does-not-exist").unwrap().is_null());
+    }
+
+    #[test]
+    fn sale_for_return_finds_by_fact_or_id_with_remaining_math() {
+        // v1.5.0 lookup twin: FACT number and UUID id resolve the same head,
+        // lines carry APPROVED-returned vs remaining; unknown/blank → Null.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("R-3")), &sale_items()).unwrap();
+        for key in ["s1", "FACT-2026-000001"] {
+            let f = sale_for_return(&db, key).unwrap();
+            assert_eq!(f["sale"]["invoice_number"], "FACT-2026-000001");
+            assert_eq!(f["sale"]["status"], "COMPLETED");
+            assert_eq!(f["items"].as_array().unwrap().len(), 4);
+            assert_eq!(f["items"][0]["remaining_milli"], 2000);
+            assert_eq!(f["items"][0]["returned_milli"], 0);
+        }
+        assert!(sale_for_return(&db, "FACT-2099-999999").unwrap().is_null());
+        assert!(sale_for_return(&db, "   ").unwrap().is_null());
+        // After a full approval the consumed line reads zero remaining.
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        cash_open(&db, "sess-lkp", "Amine", 1_000_000).unwrap();
+        let d = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            Some("k-lkp-1".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        return_approve(&mut db, &id, "karim", "manager", "2026-11-01").unwrap();
+        let f2 = sale_for_return(&db, "FACT-2026-000001").unwrap();
+        assert_eq!(f2["items"][0]["returned_milli"], 2000);
+        assert_eq!(f2["items"][0]["remaining_milli"], 0);
+        assert_eq!(f2["items"][1]["remaining_milli"], 1000);
     }
 
     #[test]

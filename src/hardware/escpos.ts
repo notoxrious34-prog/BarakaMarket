@@ -128,6 +128,72 @@ export function buildReceipt(s: EscPosSale, opts: { kickDrawer?: boolean } = {})
   return new Uint8Array(out);
 }
 
+export interface EscPosReturnItem {
+  name: string;
+  qty: string;
+  lineTtc: number;
+}
+
+export interface EscPosReturn {
+  storeName: string;
+  rc?: string;
+  nif?: string;
+  /** RET-YYYY-XXXXXX — minted at approval; drafts never print. */
+  returnNumber: string;
+  /** Source fiscal document the stock came back from. */
+  sourceInvoice: string;
+  postingDay: string;
+  reason: string;
+  reasonNote?: string;
+  creator: string;
+  approver: string;
+  items: EscPosReturnItem[];
+  /** Full TTC refunded (timbre never refunded — accountant to confirm). */
+  refundTotal: number;
+  paymentMethod: string;
+}
+
+/**
+ * Compile a BON DE RETOUR buffer (v1.5.0): the inverse fiscal row on paper.
+ * Source FACT + RET number + reason + refund + two signature lines
+ * (Client / Caissier). No drawer kick — cash leaves through the audited
+ * WITHDRAWAL movement, never through a kick side-effect. Cut always.
+ */
+export function buildReturnReceipt(r: EscPosReturn): Uint8Array {
+  const out: number[] = [];
+  out.push(...ESC_INIT, ...ESC_ALIGN_CENTER, ...ESC_BOLD_ON);
+  out.push(...line(r.storeName));
+  out.push(...line('BON DE RETOUR'));
+  out.push(...ESC_BOLD_OFF);
+  if (r.rc) out.push(...line(`RC:${r.rc}`));
+  if (r.nif) out.push(...line(`NIF:${r.nif}`));
+  out.push(...line(sep32));
+  out.push(...ESC_ALIGN_LEFT);
+  out.push(...line(r.returnNumber));
+  out.push(...line(`Source: ${r.sourceInvoice}`.slice(0, 32)));
+  out.push(...line(`Jour: ${r.postingDay} ${r.paymentMethod}`.slice(0, 32)));
+  out.push(...line(`Motif: ${r.reason}`.slice(0, 32)));
+  if (r.reasonNote) out.push(...line(`Note: ${r.reasonNote}`.slice(0, 32)));
+  out.push(...line(sep32));
+  for (const it of r.items) {
+    out.push(...line(`${it.qty} ${it.name}`.slice(0, 32)));
+    out.push(...line(`  ${money(it.lineTtc)}`.padStart(32)));
+  }
+  out.push(...line(sep32));
+  out.push(...ESC_BOLD_ON);
+  out.push(...line(`REMBOURSE: ${money(r.refundTotal)}`.padStart(32)));
+  out.push(...ESC_BOLD_OFF);
+  out.push(...line(`Cree par: ${r.creator}`.slice(0, 32)));
+  out.push(...line(`Approuve par: ${r.approver}`.slice(0, 32)));
+  out.push(...line(sep32));
+  out.push(...line('Signature Client: ............'));
+  out.push(...line('Signature Caissier: ..........'));
+  out.push(...line('Timbre non remboursable'));
+  out.push(...feed(3));
+  out.push(...ESCPOS_PAPER_CUT);
+  return new Uint8Array(out);
+}
+
 export interface EscPosQuittance {
   storeName: string;
   receipt: string;

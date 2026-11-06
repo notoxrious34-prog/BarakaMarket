@@ -18,7 +18,8 @@ export type Permission =
   | 'products.edit' | 'clients.edit' | 'cash.manage'
   | 'z.close' | 'accounting.view'
   | 'expense.record' | 'worker.manage' | 'payroll.settle'
-  | 'settings.edit' | 'users.manage' | 'audit.view';
+  | 'settings.edit' | 'users.manage' | 'audit.view'
+  | 'returns.create' | 'returns.approve';
 
 const RANK: Record<Role, number> = { cashier: 0, manager: 1, owner: 2 };
 
@@ -29,6 +30,9 @@ const MIN_RANK: Record<Permission, number> = {
   'z.close': 1, 'accounting.view': 1,
   'expense.record': 0, 'worker.manage': 1, 'payroll.settle': 1,
   'settings.edit': 2, 'users.manage': 2, 'audit.view': 1,
+  // v1.5.0 (RETURNS): every cashier drafts, manager+ decides (two-person
+  // rule above 5000 DZD enforced lane-side, never in the view).
+  'returns.create': 0, 'returns.approve': 1,
 };
 
 export function can(role: Role, perm: Permission): boolean {

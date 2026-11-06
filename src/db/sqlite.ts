@@ -495,6 +495,12 @@ export interface BarakaDb {
   recordSale(header: SaleHeaderInput, items: SaleItemInput[]): { id: string; invoice_number: string; ticket_number: string };
   getSale(id: string): Record<string, unknown>;
   getSaleOrNull(id: string): Record<string, unknown> | null;
+  /** v1.5.0 (RETURNS lookup): sale head + lines with APPROVED-returned and
+   * remaining qty, found by UUID id OR FACT number. Null when unknown. */
+  getSaleForReturn(key: string): {
+    sale: { id: string; invoice_number: string; status: string; created_at: string; payment_method: string; client_name: string | null; total_ttc_ct: number };
+    items: { sale_item_id: number; product_id: number | null; barcode: string; name_fr: string; name_ar: string; unit_price_ct: number; qty_milli: number; unit: string; tva_rate: number; line_ttc_ct: number; returned_milli: number; remaining_milli: number }[];
+  } | null;
   activeSalesCount(): number;
   voidSale(saleId: string, reason: string, voidedBy: string): void;
   /** v1.5.0 (RETURNS): inverse fiscal rows — draft, two-person approval, reject. */
@@ -1903,6 +1909,34 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     getSaleOrNull(id: string): Record<string, unknown> | null {
       const row = db.prepare('SELECT * FROM sales WHERE id = ?').get(id) as Record<string, unknown> | undefined;
       return row ?? null;
+    },
+
+    getSaleForReturn(key: string) {
+      const k = key.trim();
+      if (!k) return null;
+      const sale = db.prepare(
+        `SELECT id, invoice_number, status, created_at, payment_method, client_name, total_ttc_ct
+         FROM sales WHERE id = ? OR invoice_number = ?`,
+      ).get(k, k) as
+        | { id: string; invoice_number: string; status: string; created_at: string; payment_method: string; client_name: string | null; total_ttc_ct: number }
+        | undefined;
+      if (!sale) return null;
+      const items = db.prepare(
+        `SELECT si.id AS sale_item_id, si.product_id, si.barcode, si.name_fr, si.name_ar,
+           si.unit_price_ct, si.qty_milli, si.unit, si.tva_rate, si.line_ttc_ct,
+           COALESCE((SELECT SUM(ri.qty_milli) FROM return_items ri
+             JOIN returns r ON r.id = ri.return_id
+             WHERE r.sale_id = si.sale_id AND ri.sale_item_id = si.id AND r.status = 'APPROVED'), 0) AS returned_milli
+         FROM sale_items si WHERE si.sale_id = ? ORDER BY si.id ASC`,
+      ).all(sale.id) as {
+        sale_item_id: number; product_id: number | null; barcode: string; name_fr: string; name_ar: string;
+        unit_price_ct: number; qty_milli: number; unit: string; tva_rate: number; line_ttc_ct: number;
+        returned_milli: number;
+      }[];
+      return {
+        sale,
+        items: items.map(it => ({ ...it, remaining_milli: it.qty_milli - it.returned_milli })),
+      };
     },
 
     activeSalesCount(): number {
