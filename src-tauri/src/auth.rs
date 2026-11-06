@@ -277,6 +277,51 @@ pub fn user_change_pin(
     Ok(json!({ "ok": true }))
 }
 
+/// v1.5.1 §3: owner-issued temporary PIN. Flags `must_change_pin = 1` so the
+/// new PIN dies at first login; owner accounts are immune (self-change with
+/// the old PIN). The audit carries the target only — verifiers never leave.
+pub fn user_reset_pin(
+    conn: &Connection,
+    user_id: i64,
+    new_pin: &str,
+    requester_role: &str,
+    actor: &str,
+) -> Result<Value, String> {
+    if requester_role != "owner" {
+        return Err("[auth] owner role required".to_string());
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT username, role FROM users WHERE id = ?1",
+            [user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((uname, role)) = row else {
+        return Err(format!("[auth] unknown user: {user_id}"));
+    };
+    if role == "owner" {
+        return Err("[auth] owner accounts are never reset — use self-change".to_string());
+    }
+    if !verify_pin_format(new_pin) {
+        return Err("[auth] PIN must be 4-8 numeric digits".to_string());
+    }
+    let v = mint_verifier(new_pin)?;
+    conn.execute(
+        "UPDATE users SET pin_verifier = ?1, must_change_pin = 1 WHERE id = ?2",
+        rusqlite::params![v, user_id],
+    )
+    .map_err(|e| e.to_string())?;
+    audit(
+        conn,
+        actor,
+        "pin.reset",
+        &format!("users:{uname} temporary — change enforced at login"),
+    );
+    Ok(json!({ "ok": true }))
+}
+
 /// T8: client-side security events (logout, session lock/unlock) — both
 /// lanes audit verify server-side already; this covers the local-only ones.
 pub fn audit_log(
@@ -626,5 +671,44 @@ mod tests {
         assert!(super::user_set_active(&db, 1, false, "owner", "owner", "LEAVE", "").is_err());
         assert!(super::user_set_active(&db, id, false, "manager", "m", "LEAVE", "").is_err());
         assert!(super::user_set_active(&db, 9999, false, "owner", "owner", "LEAVE", "").is_err());
+        // v1.5.1 §3: temporary PIN — owner-gated, owner immune, shape
+        // checked, flag set, old PIN dead, audit carries no PIN digits.
+        assert!(super::user_reset_pin(&db, id, "4242", "manager", "m").is_err());
+        assert!(super::user_reset_pin(&db, 1, "4242", "owner", "owner").is_err());
+        assert!(super::user_reset_pin(&db, id, "12", "owner", "owner").is_err());
+        assert!(super::user_reset_pin(&db, 9999, "4242", "owner", "owner").is_err());
+        assert!(super::user_reset_pin(&db, id, "4242", "owner", "owner").is_ok());
+        assert_eq!(
+            super::user_verify(&db, "sara", "5678").unwrap()["ok"],
+            false
+        );
+        let tv = super::user_verify(&db, "sara", "4242").unwrap();
+        assert_eq!(tv["ok"], true);
+        assert_eq!(tv["user"]["must_change_pin"], 1);
+        let flag: i64 = db
+            .query_row(
+                "SELECT must_change_pin FROM users WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flag, 1);
+        let reset_audit: String = db
+            .query_row(
+                "SELECT detail FROM audit_log WHERE action = 'pin.reset' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!reset_audit.contains("4242"), "no PIN digits in audit");
+        assert!(super::user_change_pin(&db, id, "4242", "9999").is_ok());
+        let cleared_flag: i64 = db
+            .query_row(
+                "SELECT must_change_pin FROM users WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cleared_flag, 0);
     }
 }

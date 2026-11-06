@@ -2,10 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import {
-  createSessionUser,
-  lastUserLaneError,
   listSessionUsers,
+  createSessionUser,
   setSessionUserActive,
+  resetSessionUserPin,
+  lastUserLaneError,
 } from '../../core/session-authority';
 import { isValidPinFormat } from '../../core/security';
 import type { Role } from '../../core/rbac';
@@ -50,6 +51,10 @@ export const UsersManagerView: React.FC = () => {
   const [freezeId, setFreezeId] = useState<number | null>(null);
   const [freezeReason, setFreezeReason] = useState<FreezeReasonCode>('RESIGNED');
   const [freezeNote, setFreezeNote] = useState('');
+  // v1.5.1 §3: inline temporary-PIN panel — issued PIN dies at first login.
+  const [resetId, setResetId] = useState<number | null>(null);
+  const [resetPin, setResetPin] = useState('');
+  const [resetConfirm, setResetConfirm] = useState('');
 
   // The shop survives reloads with a persisted session while this tab mounts
   // on demand — fetch on every visit so the list is never a stale empty.
@@ -85,6 +90,9 @@ export const UsersManagerView: React.FC = () => {
     }
     if (e.includes('cannot be deactivated')) {
       return ar ? 'حساب المالك لا يُعطَّل أبداً.' : 'Le compte gérant ne se désactive jamais.';
+    }
+    if (e.includes('never reset')) {
+      return ar ? 'حساب المالك لا يُصفَّر أبداً — غيّر رمزك بالرمز الحالي.' : 'Le code gérant ne se réinitialise jamais — changez-le avec l’ancien code.';
     }
     if (e.includes('taken')) return ar ? 'الاسم محجوز — اختر اسماً آخر.' : 'Nom déjà pris — choisissez un autre nom.';
     if (e.includes('bad username') || e.includes('username')) {
@@ -220,6 +228,41 @@ export const UsersManagerView: React.FC = () => {
     }
   };
 
+  // v1.5.1 §3: issue a temporary PIN — the lane flags must_change so the
+  // PIN dies at first login. PIN shape + match are checked lane-side too.
+  const confirmReset = async (id: number, username: string) => {
+    if (pendingId !== null || !session) return;
+    if (!isValidPinFormat(resetPin)) {
+      setMsg({ kind: 'err', text: ar ? 'الرمز: 4-8 أرقام' : 'Code : 4-8 chiffres' });
+      return;
+    }
+    if (resetPin !== resetConfirm) {
+      setMsg({ kind: 'err', text: ar ? 'التأكيد لا يطابق الرمز — أعد الإدخال' : 'La confirmation ne correspond pas — recommencez' });
+      return;
+    }
+    setPendingId(id);
+    setMsg(null);
+    try {
+      const done = await resetSessionUserPin(id, resetPin, session.role, session.username);
+      if (!done) {
+        setMsg({ kind: 'err', text: mapLaneError(lastUserLaneError()) });
+        return;
+      }
+      setResetId(null);
+      setResetPin('');
+      setResetConfirm('');
+      await refreshSessionUsers();
+      setMsg({
+        kind: 'ok',
+        text: ar
+          ? `تم إصدار رمز مؤقت لـ ${username} — سيُطلب منه التغيير عند أول دخول`
+          : `Code temporaire émis pour ${username} — changement requis à la première connexion`,
+      });
+    } finally {
+      setPendingId(null);
+    }
+  };
+
   return (
     <div className="rounded-2xl border border-slate-700/60 bg-[#0e141f] p-4">
       <div className="mb-1 flex items-center justify-between gap-2">
@@ -278,14 +321,24 @@ export const UsersManagerView: React.FC = () => {
                   {ar ? 'محمي' : 'Protégé'}
                 </span>
               ) : (
-                <button
-                  onClick={() => void toggle(u.id, u.active === 1, u.username)}
-                  disabled={busy}
-                  title={u.active === 1 ? (ar ? 'تجميد الدخول (سبب إجباري)' : 'Geler l’accès (motif requis)') : (ar ? 'إعادة التفعيل' : 'Réactiver')}
-                  className="text-[11px] px-2 py-1 rounded-lg border border-slate-700 hover:border-amber-400/50 text-slate-300 disabled:opacity-50"
-                >
-                  {busy ? '…' : u.active === 1 ? (ar ? 'تجميد' : 'Geler') : (ar ? 'تفعيل' : 'Activer')}
-                </button>
+                <span className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => { setResetId(resetId === u.id ? null : u.id); setResetPin(''); setResetConfirm(''); }}
+                    disabled={busy}
+                    title={ar ? 'إصدار رمز مؤقت (تغيير إجباري عند الدخول)' : 'Émettre un code temporaire (changement requis à la connexion)'}
+                    className="text-[11px] px-2 py-1 rounded-lg border border-slate-700 hover:border-sky-400/50 text-slate-300 disabled:opacity-50"
+                  >
+                    {ar ? 'رمز مؤقت' : 'Code temp.'}
+                  </button>
+                  <button
+                    onClick={() => void toggle(u.id, u.active === 1, u.username)}
+                    disabled={busy}
+                    title={u.active === 1 ? (ar ? 'تجميد الدخول (سبب إجباري)' : 'Geler l’accès (motif requis)') : (ar ? 'إعادة التفعيل' : 'Réactiver')}
+                    className="text-[11px] px-2 py-1 rounded-lg border border-slate-700 hover:border-amber-400/50 text-slate-300 disabled:opacity-50"
+                  >
+                    {busy ? '…' : u.active === 1 ? (ar ? 'تجميد' : 'Geler') : (ar ? 'تفعيل' : 'Activer')}
+                  </button>
+                </span>
               )}
             </div>
           );
@@ -328,6 +381,57 @@ export const UsersManagerView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => { setFreezeId(null); setFreezeNote(''); }}
+                  className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400"
+                >
+                  {ar ? 'إلغاء' : 'Annuler'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+      {/* v1.5.1 §3: inline temporary-PIN panel — issued PIN dies at login. */}
+      {resetId !== null && (() => {
+        const target = sessionUsers.find(x => x.id === resetId);
+        if (!target || target.role === 'owner') return null;
+        return (
+          <div className="mb-4 rounded-xl border border-sky-400/40 bg-sky-500/5 px-3 py-2.5" role="dialog" aria-label={ar ? 'رمز مؤقت' : 'Code temporaire'}>
+            <p className="mb-2 text-xs font-bold text-sky-200">
+              {ar ? `رمز مؤقت لـ ${target.username} — 4-8 أرقام، يُطلب تغييره عند أول دخول` : `Code temporaire pour ${target.username} — 4-8 chiffres, changement requis à la connexion`}
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                value={resetPin}
+                onChange={e => setResetPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                placeholder={ar ? 'الرمز المؤقت' : 'Code temporaire'}
+                dir="ltr"
+                inputMode="numeric"
+                autoComplete="off"
+                type={showPin ? 'text' : 'password'}
+                className="rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-sky-400/60 placeholder:text-slate-600"
+              />
+              <input
+                value={resetConfirm}
+                onChange={e => setResetConfirm(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                placeholder={ar ? 'تأكيد الرمز' : 'Confirmer le code'}
+                dir="ltr"
+                inputMode="numeric"
+                autoComplete="off"
+                type={showPin ? 'text' : 'password'}
+                className="rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-sky-400/60 placeholder:text-slate-600"
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void confirmReset(target.id, target.username)}
+                  disabled={pendingId !== null}
+                  className="rounded-lg bg-sky-600/90 hover:bg-sky-500 text-white text-xs font-bold px-3 py-1.5 disabled:opacity-50"
+                >
+                  {ar ? 'إصدار الرمز' : 'Émettre'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setResetId(null); setResetPin(''); setResetConfirm(''); }}
                   className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400"
                 >
                   {ar ? 'إلغاء' : 'Annuler'}

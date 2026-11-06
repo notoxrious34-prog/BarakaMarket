@@ -433,6 +433,19 @@ fn user_set_active(
     )
 }
 
+/// v1.5.1 §3: native temporary-PIN reset (owner-gated, owners immune).
+#[tauri::command(rename_all = "camelCase")]
+fn reset_pin(
+    user_id: i64,
+    new_pin: String,
+    requester_role: String,
+    actor: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::user_reset_pin(&conn, user_id, &new_pin, &requester_role, &actor)
+}
+
 /// T8: native audit read for the manager lane.
 #[tauri::command]
 fn audit_list(limit: u32) -> Result<serde_json::Value, String> {
@@ -510,6 +523,7 @@ fn main() {
             user_list,
             user_create,
             user_set_active,
+            reset_pin,
             audit_list,
             audit_log,
             cash_open,

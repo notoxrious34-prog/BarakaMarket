@@ -99,8 +99,23 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
     assert.throws(() => b.setUserActive(1, false, 'owner', { reason: 'LEAVE' }), /owner/);
     b.changePin(m.id, '5678', '8765');
     assert.throws(() => b.changePin(m.id, '0000', '1111'), /wrong/);
+    // v1.5.1 §3: temporary PIN — old dies, new verifies with forced-change,
+    // owner immune, bad shape refused, audit carries no PIN digits.
+    b.resetUserPin(m.id, '4242', 'owner');
+    assert.equal(b.verifyUser('sara', '8765').ok, false);
+    const tv = b.verifyUser('sara', '4242');
+    assert.equal(tv.ok, true);
+    if (tv.ok) assert.equal(tv.user.must_change_pin, 1);
+    assert.equal(b.listUsers().find(u => u.id === m.id)!.must_change_pin, 1);
+    b.changePin(m.id, '4242', '9999');
+    assert.equal(b.listUsers().find(u => u.id === m.id)!.must_change_pin, 0);
+    assert.throws(() => b.resetUserPin(1, '4242', 'owner'), /never reset/);
+    assert.throws(() => b.resetUserPin(m.id, '12', 'owner'), /PIN/);
+    const resetAudit = b.listAudit(50).filter(a => a.action === 'pin.reset');
+    assert.equal(resetAudit.length, 1);
+    assert.ok(!/\d{4}/.test(resetAudit[0].detail), 'no PIN digits in audit');
     const audit = b.listAudit(50).map(a => a.action);
-    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change'] as const) {
+    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change', 'pin.reset'] as const) {
       assert.ok(audit.includes(a), `audit must contain ${a}`);
     }
     b.close();

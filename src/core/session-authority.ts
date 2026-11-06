@@ -209,6 +209,30 @@ export async function setSessionUserActive(
   return false;
 }
 
+/** v1.5.1 §3: owner-issued temporary PIN (invoke-first, loopback fallback).
+ *  False on any refusal — read `lastUserLaneError()` for the reason
+ *  (owner-gate, owner immunity, PIN shape, offline). The lane flags
+ *  must_change_pin=1: the PIN dies at first login. Never throws. */
+export async function resetSessionUserPin(
+  id: number, pin: string, requesterRole: Role, actor: string,
+): Promise<boolean> {
+  userLaneError = null;
+  if (isTauriRuntime()) {
+    const n = await invokeUserNative<{ ok?: boolean }>('reset_pin', {
+      userId: id, newPin: pin, requesterRole, actor,
+    });
+    if (n.ok && n.value && n.value.ok === true) return true;
+    userLaneError = (n.ok ? '' : n.error) || 'native lane refused';
+    return false;
+  }
+  const l = await postUserLoopback<{ ok?: boolean }>('/api/users/reset-pin', {
+    userId: id, newPin: pin, requesterRole, actor,
+  });
+  if (l.ok && l.value && l.value.ok === true) return true;
+  userLaneError = (l.ok ? '' : l.error) || 'server refused';
+  return false;
+}
+
 export interface AuditListRow {
   id: number; ts: string; actor: string; action: string;
   entity: string; entity_id: string; detail: string;

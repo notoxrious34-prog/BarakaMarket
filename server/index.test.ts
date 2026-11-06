@@ -416,6 +416,36 @@ test('api: T8 users lane — verify, owner-only create, lockout, audit', async (
   for (const a of ['user.create', 'login.ok', 'login.fail', 'login.locked']) assert.ok(actions.includes(a), `audit has ${a}`);
 });
 
+test('api: v1.5.1 §3 reset-pin — owner-only temp PIN with forced change', async () => {
+  const post = async (p: string, body: unknown) =>
+    fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // Fresh cashier for the reset lane (sara is locked by the T8 test above).
+  const created = await post('/api/users', { username: 'rim', display_name: 'Rim', role: 'cashier', pin: '2222', requesterRole: 'owner', actor: 'owner' });
+  assert.equal(created.status, 201);
+  const rim = (await created.json()) as { id: number };
+  // Without the loopback token the admin action stays 401 (unlike self-auth /pin).
+  const bare = await _rawFetch(`${base}/api/users/reset-pin`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ userId: rim.id, newPin: '4242', requesterRole: 'owner', actor: 'owner' }),
+  });
+  assert.equal(bare.status, 401);
+  // Non-owner role is refused even with a token.
+  const denied = await post('/api/users/reset-pin', { userId: rim.id, newPin: '4242', requesterRole: 'manager', actor: 'm' });
+  assert.equal(denied.status, 403);
+  // Owner reset: old PIN dies, new PIN verifies with forced-change.
+  const ok = await post('/api/users/reset-pin', { userId: rim.id, newPin: '4242', requesterRole: 'owner', actor: 'owner' });
+  assert.equal(ok.status, 200);
+  const dead = (await (await post('/api/users/verify', { username: 'rim', pin: '2222' })).json()) as { ok: boolean };
+  assert.equal(dead.ok, false);
+  const live = (await (await post('/api/users/verify', { username: 'rim', pin: '4242' })).json()) as { ok: boolean; user: { must_change_pin: number } };
+  assert.equal(live.ok, true);
+  assert.equal(live.user.must_change_pin, 1);
+  const audit = await (await fetch(`${base}/api/audit?limit=50`)).json() as { action: string; detail: string }[];
+  const reset = audit.find(a => a.action === 'pin.reset');
+  assert.ok(reset, 'audit has pin.reset');
+  assert.ok(!reset!.detail.includes('4242'), 'no PIN digits in audit');
+});
+
 test('api: T8 self-auth posts work WITHOUT the loopback token; the rest stay gated', async () => {
   // Negative path: _rawFetch bypasses the file's token-injecting fetch shim.
   const bare = (p: string, body: unknown) =>

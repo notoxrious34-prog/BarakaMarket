@@ -564,6 +564,9 @@ export interface BarakaDb {
   listUsers(): SafeUser[];
   setUserActive(id: number, active: boolean, actor: string, opts?: { reason?: string; note?: string | null }): void;
   changePin(userId: number, oldPin: string, newPin: string): void;
+  /** v1.5.1 §3: owner-issued temporary PIN. Sets `must_change_pin = 1` so the
+   *  new PIN dies at first login; owner accounts are immune (self-change). */
+  resetUserPin(userId: number, newPin: string, actor: string): void;
   listAudit(limit?: number): AuditRow[];
   logAudit(e: AuditEvent): void;
 }
@@ -2382,6 +2385,14 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         db.prepare('UPDATE users SET active = 1, freeze_reason = NULL, freeze_note = NULL WHERE id = ?').run(id);
         logAuditRow(db, { actor, action: 'user.deactivate', entity: 'users', entityId: row.username, detail: 'reactivated' });
       }
+    },
+    resetUserPin(userId: number, newPin: string, actor: string): void {
+      const row = userRow(db, userId);
+      if (row.role === 'owner') throw new Error('[db] owner accounts are never reset — use self-change');
+      if (!isValidP(newPin)) throw new Error('[db] PIN must be 4-8 numeric digits');
+      db.prepare('UPDATE users SET pin_verifier = ?, must_change_pin = 1 WHERE id = ?').run(createPinHash(newPin), userId);
+      // The verifier is a salted hash — the audit carries the target only.
+      logAuditRow(db, { actor, action: 'pin.reset', entity: 'users', entityId: row.username, detail: 'temporary — change enforced at login' });
     },
     changePin(userId: number, oldPin: string, newPin: string): void {
       const row = userRow(db, userId);

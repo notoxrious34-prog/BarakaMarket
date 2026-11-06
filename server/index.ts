@@ -141,6 +141,25 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     }
   });
 
+  // v1.5.1 §3: owner-issued temporary PIN. Admin action (NOT self-auth):
+  // the loopback token middleware gates it; the handler re-checks owner.
+  // The DAL flags must_change_pin=1 — the PIN dies at first login.
+  app.post('/api/users/reset-pin', (req, res) => {
+    try {
+      const { userId, newPin, requesterRole, actor } = req.body as {
+        userId?: number; newPin?: string; requesterRole?: Role; actor?: string;
+      };
+      if (requesterRole !== 'owner') { res.status(403).json({ error: 'owner role required' }); return; }
+      if (typeof userId !== 'number' || typeof newPin !== 'string') {
+        res.status(400).json({ error: 'body must be {userId, newPin}' }); return;
+      }
+      baraka.resetUserPin(userId, newPin, typeof actor === 'string' ? actor : 'local');
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   // T8: client-side security events the DAL cannot see (logout, session lock).
   app.post('/api/audit', (req, res) => {
     try {
