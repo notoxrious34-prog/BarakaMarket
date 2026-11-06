@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildStockCsv, stockCsvFilename, STOCK_CSV_HEADERS } from './csv-exporter.js';
+import { buildStockCsv, stockCsvFilename, STOCK_CSV_HEADERS, buildAuditCsv, auditCsvFilename, AUDIT_CSV_HEADERS } from './csv-exporter.js';
 import { preflightCsv } from './csv-importer.js';
 import type { Product } from '../types/index.js';
 
@@ -30,4 +30,18 @@ test('csv-export: header + BOM + one line round-trips through the importer', () 
 
 test('csv-export: filename stamps date', () => {
   assert.equal(stockCsvFilename(new Date('2026-11-03T10:05:00')), 'baraka-stock-20261103-1005.csv');
+});
+
+test('csv-export: audit timeline — BOM + quoting + actor filename', () => {
+  const csv = buildAuditCsv([
+    { id: 7, ts: '2026-11-07T10:00:00', actor: 'owner', action: 'user.deactivate', entity: 'users', entity_id: 'lina', detail: 'deactivated [LEAVE] sick; "soon"' },
+    { id: 8, ts: '2026-11-07T10:05:00', actor: 'lina', action: 'login.ok', entity: '', entity_id: '', detail: '' },
+  ]);
+  assert.ok(csv.startsWith('﻿'), 'BOM first');
+  const lines = csv.split('\n');
+  assert.equal(lines[0].replace('﻿', ''), AUDIT_CSV_HEADERS);
+  assert.ok(lines[1].includes('"deactivated [LEAVE] sick; ""soon"""'), 'semicolon+quote escaped');
+  assert.ok(lines[2].endsWith(';;;'), 'empty tail cells kept');
+  assert.equal(auditCsvFilename('owner', new Date('2026-11-07T10:05:00')), 'baraka-audit-owner-20261107-1005.csv');
+  assert.equal(auditCsvFilename('', new Date('2026-11-07T10:05:00')), 'baraka-audit-all-20261107-1005.csv');
 });

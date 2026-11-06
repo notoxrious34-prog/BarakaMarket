@@ -6,11 +6,12 @@ import { StoreProfileView } from './StoreProfileView';
 import { ShortcutsSettingsView } from './ShortcutsSettingsView';
 import { UsersManagerView } from '../Session/UsersManagerView';
 import { AuditLogView } from '../Session/AuditLogView';
+import { UserTimelineView } from '../Session/UserTimelineView';
 import { BackupManagerView } from './BackupManagerView';
 import { UpdateManagerView } from './UpdateManagerView';
 import { Settings, Users, Database, FileSearch, AlertTriangle, Keyboard } from 'lucide-react';
 
-type Tab = 'fiscal' | 'users' | 'data' | 'audit' | 'shortcuts' | 'danger';
+type Tab = 'fiscal' | 'users' | 'data' | 'audit' | 'timeline' | 'shortcuts' | 'danger';
 
 // Local lane keys safe to purge (provisional cache). The sale outbox is
 // NEVER wiped here: pending fiscal operations must replay, not vanish.
@@ -197,6 +198,7 @@ export const SettingsView: React.FC = () => {
     { id: 'users', label: isAr ? 'المستخدمون' : 'Utilisateurs', icon: <Users className="w-3.5 h-3.5" /> },
     { id: 'data', label: isAr ? 'النسخ والتحديث' : 'Sauvegarde & MAJ', icon: <Database className="w-3.5 h-3.5" /> },
     { id: 'audit', label: isAr ? 'التدقيق' : 'Audit', icon: <FileSearch className="w-3.5 h-3.5" /> },
+    { id: 'timeline', label: isAr ? 'الخط الزمني' : 'Chronologie', icon: <FileSearch className="w-3.5 h-3.5" /> },
     { id: 'shortcuts', label: isAr ? 'الاختصارات' : 'Raccourcis', icon: <Keyboard className="w-3.5 h-3.5" /> },
     { id: 'danger', label: isAr ? 'خطر' : 'Danger', icon: <AlertTriangle className="w-3.5 h-3.5" /> },
   ];
@@ -223,6 +225,7 @@ export const SettingsView: React.FC = () => {
       {tab === 'users' && <UsersManagerView />}
       {tab === 'data' && (<div className="space-y-4"><BackupManagerView /><UpdateManagerView /></div>)}
       {tab === 'audit' && <AuditLogView />}
+      {tab === 'timeline' && <UserTimelineView />}
       {tab === 'shortcuts' && <ShortcutsSettingsView />}
       {tab === 'danger' && <DangerZone isAr={isAr} />}
     </div>

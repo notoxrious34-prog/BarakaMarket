@@ -58,6 +58,38 @@ export function stockCsvFilename(now = new Date()): string {
   return `baraka-stock-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}.csv`;
 }
 
+export interface AuditCsvRow {
+  id: number; ts: string; actor: string; action: string;
+  entity: string; entity_id: string; detail: string;
+}
+
+/** v1.5.1 §2 (user timeline): audit rows → `;` CSV with BOM (same Excel-safe
+ * convention as the stock exporter). Filtered set in, file text out. */
+export const AUDIT_CSV_HEADERS = 'id;ts;actor;action;entity;entity_id;detail';
+
+export function buildAuditCsv(rows: AuditCsvRow[]): string {
+  const lines = [AUDIT_CSV_HEADERS];
+  for (const r of rows) {
+    lines.push([
+      String(r.id),
+      cell(r.ts),
+      cell(r.actor),
+      cell(r.action),
+      cell(r.entity),
+      cell(r.entity_id),
+      cell(r.detail),
+    ].join(';'));
+  }
+  return `﻿${lines.join('\n')}\n`;
+}
+
+/** Default timeline filename: baraka-audit-<actor>-YYYYMMDD-HHmm.csv */
+export function auditCsvFilename(actor: string, now = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  const safe = (actor || 'all').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').slice(0, 24) || 'all';
+  return `baraka-audit-${safe}-${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}.csv`;
+}
+
 /** Trigger a browser download for in-memory text (USB hand-off = save to the key). */
 export function downloadTextFile(filename: string, text: string, mime = 'text/csv;charset=utf-8'): void {
   const blob = new Blob([text], { type: mime });
