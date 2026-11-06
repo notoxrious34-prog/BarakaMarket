@@ -9,6 +9,8 @@ import {
 } from '../../core/session-authority';
 import { isValidPinFormat } from '../../core/security';
 import type { Role } from '../../core/rbac';
+import { FREEZE_REASONS } from '../../types/index';
+import type { FreezeReasonCode } from '../../types/index';
 
 /**
  * T8 (ADR-031) + T8b — owner-only user management.
@@ -28,6 +30,12 @@ const ROLE_LABEL: Record<'ar' | 'fr', Record<Role, string>> = {
   fr: { owner: 'Gérant', manager: 'Manager', cashier: 'Caissier' },
 };
 
+/** v1.5.1 §1: freeze-reason labels (reason + note are both mandatory). */
+const FREEZE_LABEL: Record<'ar' | 'fr', Record<FreezeReasonCode, string>> = {
+  ar: { RESIGNED: 'استقالة', LEAVE: 'إجازة', MISUSE: 'سوء استخدام', OTHER: 'أخرى' },
+  fr: { RESIGNED: 'Démission', LEAVE: 'Congé', MISUSE: 'Abus', OTHER: 'Autre' },
+};
+
 export const UsersManagerView: React.FC = () => {
   const { language, session, sessionUsers, refreshSessionUsers } = useApp();
   const ar = language === 'ar';
@@ -38,6 +46,10 @@ export const UsersManagerView: React.FC = () => {
   const [creating, setCreating] = useState(false);
   const [pendingId, setPendingId] = useState<number | null>(null);
   const [lane, setLane] = useState<Lane>('loading');
+  // v1.5.1 §1: inline freeze panel — reason + note are both mandatory.
+  const [freezeId, setFreezeId] = useState<number | null>(null);
+  const [freezeReason, setFreezeReason] = useState<FreezeReasonCode>('RESIGNED');
+  const [freezeNote, setFreezeNote] = useState('');
 
   // The shop survives reloads with a persisted session while this tab mounts
   // on demand — fetch on every visit so the list is never a stale empty.
@@ -81,6 +93,7 @@ export const UsersManagerView: React.FC = () => {
     if (e.includes('bad role')) return ar ? 'دور غير معروف.' : 'Rôle inconnu.';
     if (e.includes('pin')) return ar ? 'الرمز: 4-8 أرقام.' : 'Code : 4-8 chiffres.';
     if (e.includes('unknown user')) return ar ? 'مستخدم غير معروف.' : 'Utilisateur inconnu.';
+    if (e.includes('freeze reason')) return ar ? 'سبب التجميد إجباري — اختر سبباً واكتب ملاحظة.' : 'Motif de gel requis — choisissez un motif et une note.';
     if (
       !e ||
       e.includes('unreachable') ||
@@ -148,31 +161,59 @@ export const UsersManagerView: React.FC = () => {
   const toggle = async (id: number, currentlyActive: boolean, username: string) => {
     if (pendingId !== null || !session) return;
     if (currentlyActive) {
-      const ok = window.confirm(
-        ar
-          ? `تعطيل ${username}؟ لن يتمكن من الدخول حتى إعادة التفعيل. يُسجَّل في التدقيق.`
-          : `Désactiver ${username} ? Plus d’accès jusqu’à réactivation. Tracé en audit.`,
-      );
-      if (!ok) return;
+      // v1.5.1 §1: no blind confirm — open the freeze panel (reason + note).
+      setFreezeId(freezeId === id ? null : id);
+      setFreezeReason('RESIGNED');
+      setFreezeNote('');
+      setMsg(null);
+      return;
     }
+    const ok = window.confirm(
+      ar
+        ? `إعادة تفعيل ${username}؟ سيستعيد الدخول فوراً. يُسجَّل في التدقيق.`
+        : `Réactiver ${username} ? Accès immédiat. Tracé en audit.`,
+    );
+    if (!ok) return;
     setPendingId(id);
     setMsg(null);
     try {
-      const done = await setSessionUserActive(id, !currentlyActive, session.role, session.username);
+      const done = await setSessionUserActive(id, true, session.role, session.username);
       if (!done) {
         setMsg({ kind: 'err', text: mapLaneError(lastUserLaneError()) });
         return;
       }
       await refreshSessionUsers();
+      setMsg({ kind: 'ok', text: ar ? `تمت إعادة تفعيل ${username}` : `${username} réactivé` });
+    } finally {
+      setPendingId(null);
+    }
+  };
+
+  const confirmFreeze = async (id: number, username: string) => {
+    if (pendingId !== null || !session) return;
+    const note = freezeNote.trim();
+    if (note === '') {
+      setMsg({ kind: 'err', text: ar ? 'الملاحظة إجبارية — سطر واحد يوثّق سبب التجميد.' : 'Note requise — une ligne qui documente le gel.' });
+      return;
+    }
+    setPendingId(id);
+    setMsg(null);
+    try {
+      const done = await setSessionUserActive(id, false, session.role, session.username, {
+        reason: freezeReason, note,
+      });
+      if (!done) {
+        setMsg({ kind: 'err', text: mapLaneError(lastUserLaneError()) });
+        return;
+      }
+      setFreezeId(null);
+      setFreezeNote('');
+      await refreshSessionUsers();
       setMsg({
         kind: 'ok',
         text: ar
-          ? currentlyActive
-            ? `تم تعطيل ${username}`
-            : `تمت إعادة تفعيل ${username}`
-          : currentlyActive
-            ? `${username} désactivé`
-            : `${username} réactivé`,
+          ? `تم تجميد ${username} [${FREEZE_LABEL.ar[freezeReason]}]`
+          : `${username} gelé [${FREEZE_LABEL.fr[freezeReason]}]`,
       });
     } finally {
       setPendingId(null);
@@ -189,8 +230,8 @@ export const UsersManagerView: React.FC = () => {
       </div>
       <p className="mb-3 text-[11px] text-slate-500">
         {ar
-          ? 'الإنشاء والتفعيل للمالك فقط، كل حركة مسجلة في التدقيق، والحسابات الجديدة تغيّر رمزها عند أول دخول.'
-          : 'Création/activation réservées au gérant, chaque mouvement est audité, les nouveaux comptes changent leur code à la première connexion.'}
+          ? 'الإنشاء والتجميد للمالك فقط؛ التجميد بسبب وملاحظة إجباريين، كل حركة مسجلة في التدقيق، والحسابات الجديدة تغيّر رمزها عند أول دخول.'
+          : 'Création/gel réservés au gérant ; gel à motif + note obligatoires, chaque mouvement est audité, les nouveaux comptes changent leur code à la première connexion.'}
       </p>
       {lane === 'offline' && (
         <p className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-200" role="alert">
@@ -225,7 +266,12 @@ export const UsersManagerView: React.FC = () => {
                     {ar ? 'تغيير الرمز مطلوب' : 'Changement requis'}
                   </span>
                 )}
-                {u.active === 0 && <span className="ml-1 text-[10px] text-red-400">{ar ? 'معطَّل' : 'Désactivé'}</span>}
+                {u.active === 0 && (
+                  <span className="ml-1 text-[10px] text-red-400" title={u.freeze_note ?? undefined}>
+                    {ar ? 'معطَّل' : 'Désactivé'}
+                    {u.freeze_reason ? ` [${FREEZE_LABEL[loc][u.freeze_reason as FreezeReasonCode] ?? u.freeze_reason}]` : ''}
+                  </span>
+                )}
               </span>
               {frozen ? (
                 <span className="text-[11px] px-2 py-1 text-slate-600" title={frozenTitle}>
@@ -235,16 +281,62 @@ export const UsersManagerView: React.FC = () => {
                 <button
                   onClick={() => void toggle(u.id, u.active === 1, u.username)}
                   disabled={busy}
-                  title={u.active === 1 ? (ar ? 'تعطيل الدخول' : 'Désactiver l’accès') : (ar ? 'إعادة التفعيل' : 'Réactiver')}
+                  title={u.active === 1 ? (ar ? 'تجميد الدخول (سبب إجباري)' : 'Geler l’accès (motif requis)') : (ar ? 'إعادة التفعيل' : 'Réactiver')}
                   className="text-[11px] px-2 py-1 rounded-lg border border-slate-700 hover:border-amber-400/50 text-slate-300 disabled:opacity-50"
                 >
-                  {busy ? '…' : u.active === 1 ? (ar ? 'تعطيل' : 'Désactiver') : (ar ? 'تفعيل' : 'Activer')}
+                  {busy ? '…' : u.active === 1 ? (ar ? 'تجميد' : 'Geler') : (ar ? 'تفعيل' : 'Activer')}
                 </button>
               )}
             </div>
           );
         })}
       </div>
+      {/* v1.5.1 §1: inline freeze panel — reason + note, both mandatory. */}
+      {freezeId !== null && (() => {
+        const target = sessionUsers.find(x => x.id === freezeId);
+        if (!target || target.active === 0) return null;
+        return (
+          <div className="mb-4 rounded-xl border border-amber-400/40 bg-amber-500/5 px-3 py-2.5" role="dialog" aria-label={ar ? 'تجميد مستخدم' : 'Gel utilisateur'}>
+            <p className="mb-2 text-xs font-bold text-amber-200">
+              {ar ? `تجميد ${target.username} — السبب والملاحظة إجباريان ويُسجَّلان في التدقيق` : `Geler ${target.username} — motif et note requis, tracés en audit`}
+            </p>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <select
+                value={freezeReason}
+                onChange={e => setFreezeReason(e.target.value as FreezeReasonCode)}
+                className="rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-amber-400/60"
+              >
+                {FREEZE_REASONS.map(r => (
+                  <option key={r} value={r}>{FREEZE_LABEL[loc][r]}</option>
+                ))}
+              </select>
+              <input
+                value={freezeNote}
+                onChange={e => setFreezeNote(e.target.value.slice(0, 140))}
+                placeholder={ar ? 'ملاحظة التوثيق (إجبارية، ≤140)' : 'Note de traçage (requise, ≤140)'}
+                className="flex-1 rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-amber-400/60 placeholder:text-slate-600"
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void confirmFreeze(target.id, target.username)}
+                  disabled={pendingId !== null}
+                  className="rounded-lg bg-red-600/90 hover:bg-red-500 text-white text-xs font-bold px-3 py-1.5 disabled:opacity-50"
+                >
+                  {ar ? 'تأكيد التجميد' : 'Confirmer le gel'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setFreezeId(null); setFreezeNote(''); }}
+                  className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-400"
+                >
+                  {ar ? 'إلغاء' : 'Annuler'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <form
         onSubmit={e => {

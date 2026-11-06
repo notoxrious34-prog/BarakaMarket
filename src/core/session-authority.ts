@@ -12,6 +12,8 @@ import type { Role, AuditAction } from './rbac.js';
 export interface SessionUser {
   id: number; username: string; display_name: string; role: Role;
   must_change_pin: number; active: number;
+  /** v1.5.1 §1: set on deactivate, cleared on reactivate. */
+  freeze_reason?: string | null; freeze_note?: string | null;
 }
 
 export type VerifyOut = { ok: true; user: SessionUser } | { ok: false; locked: boolean };
@@ -183,20 +185,25 @@ export async function createSessionUser(
 }
 
 /** Owner-gated activate/deactivate (invoke-first, loopback fallback). False
- *  on any refusal — read `lastUserLaneError()` for the reason. Never throws. */
+ *  on any refusal — read `lastUserLaneError()` for the reason. Never throws.
+ *  v1.5.1 §1: deactivation REQUIRES `{reason, note?}` (lane re-checks). */
 export async function setSessionUserActive(
   id: number, active: boolean, requesterRole: Role, actor: string,
+  opts?: { reason?: string; note?: string | null },
 ): Promise<boolean> {
   userLaneError = null;
   if (isTauriRuntime()) {
     const n = await invokeUserNative<{ ok?: boolean }>('user_set_active', {
       userId: id, active, requesterRole, actor,
+      reason: opts?.reason ?? '', note: opts?.note ?? '',
     });
     if (n.ok && n.value && n.value.ok === true) return true;
     userLaneError = (n.ok ? '' : n.error) || 'native lane refused';
     return false;
   }
-  const l = await postUserLoopback<{ ok?: boolean }>('/api/users/active', { id, active, requesterRole, actor });
+  const l = await postUserLoopback<{ ok?: boolean }>('/api/users/active', {
+    id, active, requesterRole, actor, reason: opts?.reason, note: opts?.note ?? null,
+  });
   if (l.ok && l.value && l.value.ok === true) return true;
   userLaneError = (l.ok ? '' : l.error) || 'server refused';
   return false;

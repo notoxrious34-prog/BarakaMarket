@@ -185,7 +185,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 9;
+export const LATEST_SCHEMA_VERSION = 10;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -225,6 +225,8 @@ export function logAuditRow(db: DatabaseSync, e: AuditEvent): void {
 export interface SafeUser {
   id: number; username: string; display_name: string; role: Role;
   must_change_pin: number; active: number;
+  /** v1.5.1 §1: set on deactivate, cleared on reactivate. */
+  freeze_reason: string | null; freeze_note: string | null;
 }
 
 export interface AuditRow {
@@ -247,6 +249,7 @@ function userRow(db: DatabaseSync, id: number): UserRow {
 const safeUser = (r: UserRow): SafeUser => ({
   id: r.id, username: r.username, display_name: r.display_name,
   role: r.role, must_change_pin: r.must_change_pin, active: r.active,
+  freeze_reason: r.freeze_reason, freeze_note: r.freeze_note,
 });
 
 /** T11 (ADR-034): append-only + terminal-state guards. Mirrors schema.sql tail;
@@ -429,6 +432,20 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 9');
     v = 9;
   }
+  // v9 → v10 (USERS-PLUS §1, v1.5.1): mandatory freeze reason + note on
+  // users. Fresh files get them from schema.sql; legacy files climb here.
+  if (v < 10) {
+    const ucols = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
+    if (!ucols.some(c => c.name === 'freeze_reason')) {
+      db.exec(`ALTER TABLE users ADD COLUMN freeze_reason TEXT
+        CHECK (freeze_reason IN ('RESIGNED', 'LEAVE', 'MISUSE', 'OTHER'))`);
+    }
+    if (!ucols.some(c => c.name === 'freeze_note')) {
+      db.exec('ALTER TABLE users ADD COLUMN freeze_note TEXT');
+    }
+    db.exec('PRAGMA user_version = 10');
+    v = 10;
+  }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -545,7 +562,7 @@ export interface BarakaDb {
   createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string): SafeUser;
   verifyUser(username: string, pin: string): { ok: true; user: SafeUser } | { ok: false; locked: boolean };
   listUsers(): SafeUser[];
-  setUserActive(id: number, active: boolean, actor: string): void;
+  setUserActive(id: number, active: boolean, actor: string, opts?: { reason?: string; note?: string | null }): void;
   changePin(userId: number, oldPin: string, newPin: string): void;
   listAudit(limit?: number): AuditRow[];
   logAudit(e: AuditEvent): void;
@@ -2345,13 +2362,26 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       return { ok: true as const, user: safeUser(row) };
     },
     listUsers(): SafeUser[] {
-      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active FROM users ORDER BY id').all() as unknown as SafeUser[]);
+      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note FROM users ORDER BY id').all() as unknown as SafeUser[]);
     },
-    setUserActive(id: number, active: boolean, actor: string): void {
+    /** v1.5.1 §1: deactivation REQUIRES a freeze reason (+ optional note ≤140);
+     * reactivation clears both. Reason travels into the audit detail. */
+    setUserActive(id: number, active: boolean, actor: string, opts?: { reason?: string; note?: string | null }): void {
       const row = userRow(db, id); // throws when missing
       if (row.role === 'owner') throw new Error('[db] the owner account cannot be deactivated');
-      db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, id);
-      logAuditRow(db, { actor, action: 'user.deactivate', entity: 'users', entityId: row.username, detail: active ? 'reactivated' : 'deactivated' });
+      if (!active) {
+        const reason = (opts?.reason ?? '').toUpperCase();
+        if (reason !== 'RESIGNED' && reason !== 'LEAVE' && reason !== 'MISUSE' && reason !== 'OTHER') {
+          throw new Error('[db] freeze reason required (RESIGNED|LEAVE|MISUSE|OTHER)');
+        }
+        const note = (opts?.note ?? '').trim().slice(0, 140);
+        db.prepare('UPDATE users SET active = 0, freeze_reason = ?, freeze_note = ? WHERE id = ?')
+          .run(reason, note === '' ? null : note, id);
+        logAuditRow(db, { actor, action: 'user.deactivate', entity: 'users', entityId: row.username, detail: `deactivated [${reason}]${note === '' ? '' : ' ' + note}` });
+      } else {
+        db.prepare('UPDATE users SET active = 1, freeze_reason = NULL, freeze_note = NULL WHERE id = ?').run(id);
+        logAuditRow(db, { actor, action: 'user.deactivate', entity: 'users', entityId: row.username, detail: 'reactivated' });
+      }
     },
     changePin(userId: number, oldPin: string, newPin: string): void {
       const row = userRow(db, userId);

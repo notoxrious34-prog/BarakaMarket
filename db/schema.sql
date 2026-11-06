@@ -429,6 +429,10 @@ CREATE TABLE IF NOT EXISTS users (
   pin_verifier      TEXT    NOT NULL,
   active            INTEGER NOT NULL DEFAULT 1,
   must_change_pin   INTEGER NOT NULL DEFAULT 0,
+  -- v1.5.1 (USERS-PLUS §1): mandatory freeze reason + note. Set on
+  -- deactivate, cleared on reactivate; never edited in place.
+  freeze_reason     TEXT    CHECK (freeze_reason IN ('RESIGNED', 'LEAVE', 'MISUSE', 'OTHER')),
+  freeze_note       TEXT,
   failed_attempts   INTEGER NOT NULL DEFAULT 0,
   locked_until_ms   INTEGER NOT NULL DEFAULT 0,
   lock_cycles       INTEGER NOT NULL DEFAULT 0,

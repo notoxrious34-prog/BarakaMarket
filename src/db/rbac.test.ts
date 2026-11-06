@@ -23,11 +23,11 @@ const cleanup = (p: string) => {
   }
 };
 
-test('T8/T11: fresh DB seeds the owner at latest schema (v9)', () => {
+test('T8/T11: fresh DB seeds the owner at latest schema (v10)', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
-    assert.equal(LATEST_SCHEMA_VERSION, 9);
+    assert.equal(LATEST_SCHEMA_VERSION, 10);
     const users = b.listUsers();
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
@@ -80,9 +80,23 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
     assert.throws(() => b.createUser({ username: 'bob', role: 'cashier', pin: '12' }, 'owner'), /PIN/);
     const v = b.verifyUser('sara', '5678');
     assert.equal(v.ok, true);
-    b.setUserActive(m.id, false, 'owner');
+    // v1.5.1 §1: freeze reason is mandatory — missing/unknown refused.
+    assert.throws(() => b.setUserActive(m.id, false, 'owner'), /freeze reason/);
+    assert.throws(() => b.setUserActive(m.id, false, 'owner', { reason: 'VACATION' }), /freeze reason/);
+    b.setUserActive(m.id, false, 'owner', { reason: 'leave', note: 'sick leave, back soon' });
+    const frozen = b.listUsers().find(u => u.id === m.id)!;
+    assert.equal(frozen.active, 0);
+    assert.equal(frozen.freeze_reason, 'LEAVE');
+    assert.equal(frozen.freeze_note, 'sick leave, back soon');
     assert.equal(b.verifyUser('sara', '5678').ok, false);
-    assert.throws(() => b.setUserActive(1, false, 'owner'), /owner/);
+    const auditTrail = b.listAudit(50);
+    assert.ok(auditTrail.some(a => a.action === 'user.deactivate' && a.detail.includes('[LEAVE]')), 'audit carries the freeze reason');
+    b.setUserActive(m.id, true, 'owner');
+    const back = b.listUsers().find(u => u.id === m.id)!;
+    assert.equal(back.active, 1);
+    assert.equal(back.freeze_reason, null);
+    assert.equal(back.freeze_note, null);
+    assert.throws(() => b.setUserActive(1, false, 'owner', { reason: 'LEAVE' }), /owner/);
     b.changePin(m.id, '5678', '8765');
     assert.throws(() => b.changePin(m.id, '0000', '1111'), /wrong/);
     const audit = b.listAudit(50).map(a => a.action);
@@ -110,7 +124,7 @@ test('T8b: provisioned accounts start forced-change, blank names fall back', () 
   }
 });
 
-test('T8/T11: legacy v3 file climbs to v9 and reseeds the owner', () => {
+test('T8/T11: legacy v3 file climbs to v10 and reseeds the owner', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
@@ -125,7 +139,7 @@ test('T8/T11: legacy v3 file climbs to v9 and reseeds the owner', () => {
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
     assert.equal(c.verifyUser('owner', '1234').ok, true);
-    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 9);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 10);
     c.close();
   } finally {
     cleanup(p);

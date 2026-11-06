@@ -113,12 +113,15 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
 
   app.post('/api/users/active', (req, res) => {
     try {
-      const { id, active, requesterRole, actor } = req.body as {
+      const { id, active, requesterRole, actor, reason, note } = req.body as {
         id?: number; active?: boolean; requesterRole?: Role; actor?: string;
+        reason?: string; note?: string | null;
       };
       if (requesterRole !== 'owner') { res.status(403).json({ error: 'owner role required' }); return; }
       if (typeof id !== 'number' || typeof active !== 'boolean') { res.status(400).json({ error: 'body must be {id, active}' }); return; }
-      baraka.setUserActive(id, active, typeof actor === 'string' ? actor : 'local');
+      // v1.5.1 §1: freeze reason is mandatory on deactivate (lane re-checks).
+      if (!active && typeof reason !== 'string') { res.status(400).json({ error: 'body must be {id, active, reason, note?} when deactivating' }); return; }
+      baraka.setUserActive(id, active, typeof actor === 'string' ? actor : 'local', { reason, note });
       res.json({ ok: true });
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });

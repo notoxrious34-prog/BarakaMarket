@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+pub const LATEST_SCHEMA_VERSION: i64 = 10;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -270,6 +270,23 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
         conn.execute_batch("PRAGMA user_version = 9;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v9 → v10 (USERS-PLUS §1, v1.5.1): mandatory freeze reason + note on
+    // users. Fresh files get them from schema.sql; legacy files climb here.
+    if v < 10 {
+        if !has_col("users", "freeze_reason")? {
+            conn.execute_batch(
+                "ALTER TABLE users ADD COLUMN freeze_reason TEXT
+                   CHECK (freeze_reason IN ('RESIGNED','LEAVE','MISUSE','OTHER'));",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !has_col("users", "freeze_note")? {
+            conn.execute_batch("ALTER TABLE users ADD COLUMN freeze_note TEXT;")
+                .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 10;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())

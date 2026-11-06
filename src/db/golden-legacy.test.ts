@@ -24,7 +24,7 @@ function craftLegacyShape(p: string): void {
 }
 
 describe('A2 golden-legacy boot', () => {
-  it('opens the oldest shop shape: climbs to v9, indexes restored, owner seeded', () => {
+  it('opens the oldest shop shape: climbs to latest, indexes restored, owner seeded', () => {
     const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'baraka-legacy-')), 'legacy.db');
     craftLegacyShape(p);
     const { db, close } = openBarakaDb(p); // must NOT throw

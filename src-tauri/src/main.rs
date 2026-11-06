@@ -410,16 +410,27 @@ fn user_create(
 }
 
 /// T8b: native activate/deactivate (owner-gated, owners immune).
+/// v1.5.1 §1: freeze reason mandatory on deactivate (lane re-checks).
 #[tauri::command(rename_all = "camelCase")]
 fn user_set_active(
     user_id: i64,
     active: bool,
     requester_role: String,
     actor: String,
+    reason: String,
+    note: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    auth::user_set_active(&conn, user_id, active, &requester_role, &actor)
+    auth::user_set_active(
+        &conn,
+        user_id,
+        active,
+        &requester_role,
+        &actor,
+        &reason,
+        &note,
+    )
 }
 
 /// T8: native audit read for the manager lane.

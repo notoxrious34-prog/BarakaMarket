@@ -110,6 +110,11 @@ export const RETURN_REASONS = ['DEFECT', 'WRONG_ITEM', 'SIZE_FIT', 'EXPIRED', 'C
 export type ReturnReasonCode = (typeof RETURN_REASONS)[number];
 export type ReturnStatus = 'DRAFT' | 'APPROVED' | 'REJECTED';
 
+/** v1.5.1 (USERS-PLUS §1): mandatory freeze-reason taxonomy — a deactivation
+ * without one is refused lane-side. Note (≤140) travels beside the code. */
+export const FREEZE_REASONS = ['RESIGNED', 'LEAVE', 'MISUSE', 'OTHER'] as const;
+export type FreezeReasonCode = (typeof FREEZE_REASONS)[number];
+
 export interface ReturnLineInput {
   /** sale_items.id of the source line — amounts are recomputed server-side, never trusted. */
   saleItemId: number;

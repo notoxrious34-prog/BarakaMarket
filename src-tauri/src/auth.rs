@@ -291,7 +291,7 @@ pub fn audit_log(
 
 pub fn user_list(conn: &Connection) -> Result<Value, String> {
     let mut st = conn
-        .prepare("SELECT id, username, display_name, role, must_change_pin, active FROM users ORDER BY id")
+        .prepare("SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note FROM users ORDER BY id")
         .map_err(|e| e.to_string())?;
     let rows = st
         .query_map([], |r| {
@@ -299,6 +299,8 @@ pub fn user_list(conn: &Connection) -> Result<Value, String> {
                 "id": r.get::<_, i64>(0)?, "username": r.get::<_, String>(1)?,
                 "display_name": r.get::<_, String>(2)?, "role": r.get::<_, String>(3)?,
                 "must_change_pin": r.get::<_, i64>(4)?, "active": r.get::<_, i64>(5)?,
+                "freeze_reason": r.get::<_, Option<String>>(6)?,
+                "freeze_note": r.get::<_, Option<String>>(7)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -383,12 +385,16 @@ fn valid_username(name: &str) -> bool {
 
 /// T8b: native activate/deactivate (owner-gated). Owner accounts are immune —
 /// operators deactivate instead of deleting, and owners never deactivate.
+/// v1.5.1 §1: deactivation REQUIRES a freeze reason (+ note ≤140 chars);
+/// reactivation clears both. Reason travels into the audit detail.
 pub fn user_set_active(
     conn: &Connection,
     user_id: i64,
     active: bool,
     requester_role: &str,
     actor: &str,
+    reason: &str,
+    note: &str,
 ) -> Result<Value, String> {
     if requester_role != "owner" {
         return Err("[auth] owner role required".to_string());
@@ -407,20 +413,48 @@ pub fn user_set_active(
     if role == "owner" {
         return Err("[auth] the owner account cannot be deactivated".to_string());
     }
-    conn.execute(
-        "UPDATE users SET active = ?1 WHERE id = ?2",
-        rusqlite::params![if active { 1 } else { 0 }, user_id],
-    )
-    .map_err(|e| e.to_string())?;
-    audit(
-        conn,
-        actor,
-        "user.deactivate",
-        &format!(
-            "users:{uname}: {}",
-            if active { "reactivated" } else { "deactivated" }
-        ),
-    );
+    if !active {
+        let rc = reason.trim().to_uppercase();
+        if !["RESIGNED", "LEAVE", "MISUSE", "OTHER"].contains(&rc.as_str()) {
+            return Err("[auth] freeze reason required (RESIGNED|LEAVE|MISUSE|OTHER)".to_string());
+        }
+        let nt: String = note.trim().chars().take(140).collect();
+        let note_val: Option<String> = if nt.is_empty() {
+            None
+        } else {
+            Some(nt.clone())
+        };
+        conn.execute(
+            "UPDATE users SET active = 0, freeze_reason = ?1, freeze_note = ?2 WHERE id = ?3",
+            rusqlite::params![rc, note_val, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        audit(
+            conn,
+            actor,
+            "user.deactivate",
+            &format!(
+                "users:{uname}: deactivated [{rc}]{}",
+                if nt.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {nt}")
+                }
+            ),
+        );
+    } else {
+        conn.execute(
+            "UPDATE users SET active = 1, freeze_reason = NULL, freeze_note = NULL WHERE id = ?1",
+            [user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        audit(
+            conn,
+            actor,
+            "user.deactivate",
+            &format!("users:{uname}: reactivated"),
+        );
+    }
     Ok(json!({ "ok": true }))
 }
 
@@ -548,13 +582,49 @@ mod tests {
         assert!(super::user_create(&db, "sara", "S", "cashier", "1111", "owner", "owner").is_err());
         let id = u["id"].as_i64().unwrap();
         assert_eq!(super::user_verify(&db, "sara", "5678").unwrap()["ok"], true);
-        assert!(super::user_set_active(&db, id, false, "owner", "owner").is_ok());
+        // v1.5.1 §1: freeze reason mandatory — empty/unknown refused.
+        assert!(super::user_set_active(&db, id, false, "owner", "owner", "", "").is_err());
+        assert!(super::user_set_active(&db, id, false, "owner", "owner", "VACATION", "").is_err());
+        assert!(super::user_set_active(
+            &db,
+            id,
+            false,
+            "owner",
+            "owner",
+            "LEAVE",
+            "sick leave, back soon"
+        )
+        .is_ok());
+        let row: (i64, Option<String>, Option<String>) = db
+            .query_row(
+                "SELECT active, freeze_reason, freeze_note FROM users WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                0,
+                Some("LEAVE".to_string()),
+                Some("sick leave, back soon".to_string())
+            )
+        );
         let locked_out = super::user_verify(&db, "sara", "5678").unwrap();
         assert_eq!(locked_out["ok"], false);
-        assert!(super::user_set_active(&db, id, true, "owner", "owner").is_ok());
+        assert!(super::user_set_active(&db, id, true, "owner", "owner", "", "").is_ok());
+        let cleared: (i64, Option<String>, Option<String>) = db
+            .query_row(
+                "SELECT active, freeze_reason, freeze_note FROM users WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(cleared, (1, None, None));
         assert_eq!(super::user_verify(&db, "sara", "5678").unwrap()["ok"], true);
-        assert!(super::user_set_active(&db, 1, false, "owner", "owner").is_err());
-        assert!(super::user_set_active(&db, id, false, "manager", "m").is_err());
-        assert!(super::user_set_active(&db, 9999, false, "owner", "owner").is_err());
+        // Owner immune, requester gated, unknown refused (reason valid).
+        assert!(super::user_set_active(&db, 1, false, "owner", "owner", "LEAVE", "").is_err());
+        assert!(super::user_set_active(&db, id, false, "manager", "m", "LEAVE", "").is_err());
+        assert!(super::user_set_active(&db, 9999, false, "owner", "owner", "LEAVE", "").is_err());
     }
 }
