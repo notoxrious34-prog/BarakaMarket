@@ -105,6 +105,31 @@ export interface CreditEligibility {
   reason?: string;
 }
 
+/** v1.5.0 (RETURNS): structured reason taxonomy — analytics-ready, never free text alone. */
+export const RETURN_REASONS = ['DEFECT', 'WRONG_ITEM', 'SIZE_FIT', 'EXPIRED', 'CHANGED_MIND', 'OTHER'] as const;
+export type ReturnReasonCode = (typeof RETURN_REASONS)[number];
+export type ReturnStatus = 'DRAFT' | 'APPROVED' | 'REJECTED';
+
+export interface ReturnLineInput {
+  /** sale_items.id of the source line — amounts are recomputed server-side, never trusted. */
+  saleItemId: number;
+  qty_milli: number;
+}
+
+export interface ReturnDraftInput {
+  sale_id: string;
+  lines: ReturnLineInput[];
+  reason: ReturnReasonCode;
+  reason_note?: string | null;
+  actor: string;
+  client_return_key?: string | null;
+}
+
+/** v1.5.0 (RETURNS): two-person rule — drafts above this refund need approver ≠ actor. */
+export const RETURN_TWO_PERSON_THRESHOLD_CT = 500000; // 5000 DZD, owner decision 2026-11-05
+/** v1.5.0 (RETURNS): a sale older than this (fiscal days) can no longer be returned. */
+export const RETURN_WINDOW_DAYS = 7; // owner decision 2026-11-05
+
 /** ADR-014-MKT: manager override PIN gate + void audit trail. */
 export type ProtectedActionType = 'LINE_VOID' | 'CART_CLEAR' | 'MANUAL_DISCOUNT' | 'DRAWER_KICK';
 

@@ -25,7 +25,9 @@ import type {
   CashMovementType, CashSessionRecord, CashSessionLiveStatus, ZClosureResult, CashMovementRecord,
   ProtectedActionType, VoidLogEntry, VoidLogRecord, VoidSummary,
   BackupMetadata, BackupValidationReport, RestoreResult,
+  ReturnReasonCode, ReturnLineInput, ReturnDraftInput, ReturnStatus,
 } from '../types';
+import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_WINDOW_DAYS } from '../types';
 import { createPinHash, verifyPin, MANAGER_PIN_META_KEY, isValidPinFormat as isValidP } from '../core/security.js';
 import { APP_VERSION } from '../core/version.js';
 import {
@@ -183,7 +185,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 8;
+export const LATEST_SCHEMA_VERSION = 9;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -280,6 +282,19 @@ const APPEND_ONLY_TRIGGERS: string[] = [
    BEFORE UPDATE ON audit_log BEGIN
      SELECT RAISE(ABORT, 'append-only: audit_log rows are never modified');
    END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_returns_no_delete
+   BEFORE DELETE ON returns BEGIN
+     SELECT RAISE(ABORT, 'append-only: returns are never deleted (reject instead)');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_return_items_no_delete
+   BEFORE DELETE ON return_items BEGIN
+     SELECT RAISE(ABORT, 'append-only: return_items are never deleted');
+   END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_returns_terminal
+   BEFORE UPDATE OF status ON returns
+   WHEN OLD.status <> 'DRAFT' AND NEW.status <> OLD.status BEGIN
+     SELECT RAISE(ABORT, 'terminal: a decided return can never go back to DRAFT');
+   END`,
 ];
 
 /** First-boot owner (PIN 1234, forced change). Idempotent, never rewrites. */
@@ -368,10 +383,57 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 8');
     v = 8;
   }
-  // Always-ensured: partial unique index lives here (not schema.sql) so
+  // v8 → v9 (RETURNS, v1.5.0): inverse fiscal rows + Z memo columns.
+  // Fresh files get them from schema.sql; legacy files climb here.
+  if (v < 9) {
+    db.exec(`CREATE TABLE IF NOT EXISTS returns (
+      id TEXT PRIMARY KEY, return_number TEXT UNIQUE,
+      sale_id TEXT NOT NULL REFERENCES sales (id) ON DELETE RESTRICT,
+      invoice_number TEXT NOT NULL,
+      client_id INTEGER REFERENCES clients (id), client_name TEXT,
+      payment_method TEXT NOT NULL CHECK (payment_method IN ('ESPECES', 'CIB', 'DAHABIYA', 'CREDIT')),
+      reason TEXT NOT NULL CHECK (reason IN ('DEFECT', 'WRONG_ITEM', 'SIZE_FIT', 'EXPIRED', 'CHANGED_MIND', 'OTHER')),
+      reason_note TEXT, refund_ct INTEGER NOT NULL CHECK (refund_ct > 0),
+      status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'APPROVED', 'REJECTED')),
+      actor TEXT NOT NULL DEFAULT '', approver TEXT NOT NULL DEFAULT '',
+      sale_day TEXT NOT NULL, posting_day TEXT, decided_at TEXT,
+      created_at TEXT NOT NULL, client_return_key TEXT)`);
+    db.exec(`CREATE TABLE IF NOT EXISTS return_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      return_id TEXT NOT NULL REFERENCES returns (id) ON DELETE RESTRICT,
+      sale_item_id INTEGER NOT NULL REFERENCES sale_items (id) ON DELETE RESTRICT,
+      product_id INTEGER REFERENCES products (id),
+      barcode TEXT NOT NULL DEFAULT '', name_fr TEXT NOT NULL DEFAULT '',
+      name_ar TEXT NOT NULL DEFAULT '', unit_price_ct INTEGER NOT NULL,
+      qty_milli INTEGER NOT NULL CHECK (qty_milli > 0),
+      unit TEXT NOT NULL CHECK (unit IN ('PIECE', 'KG', 'LITRE')),
+      tva_rate INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
+      line_ht_ct INTEGER NOT NULL, line_tva_ct INTEGER NOT NULL, line_ttc_ct INTEGER NOT NULL)`);
+    const zcols = db.prepare('PRAGMA table_info(z_reports)').all() as { name: string }[];
+    if (!zcols.some(c => c.name === 'returns_count')) {
+      db.exec('ALTER TABLE z_reports ADD COLUMN returns_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!zcols.some(c => c.name === 'returns_total_ttc_ct')) {
+      db.exec('ALTER TABLE z_reports ADD COLUMN returns_total_ttc_ct INTEGER NOT NULL DEFAULT 0');
+    }
+    for (const t of APPEND_ONLY_TRIGGERS.slice(-3)) db.exec(t);
+    // The seq CHECK lists the lanes explicitly — rebuild it to admit 'RET',
+    // preserving every counter (never reseeds numbering).
+    db.exec(`CREATE TABLE seq_new (
+      kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET')),
+      year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (kind, year))`);
+    db.exec('INSERT INTO seq_new (kind, year, last_n) SELECT kind, year, last_n FROM seq');
+    db.exec('DROP TABLE seq');
+    db.exec('ALTER TABLE seq_new RENAME TO seq');
+    db.exec('PRAGMA user_version = 9');
+    v = 9;
+  }
+  // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_settlements_client_key ON client_settlements(client_settlement_key) WHERE client_settlement_key IS NOT NULL');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_returns_client_key ON returns(client_return_key) WHERE client_return_key IS NOT NULL');
 }
 
 export interface BarakaDb {
@@ -435,6 +497,13 @@ export interface BarakaDb {
   getSaleOrNull(id: string): Record<string, unknown> | null;
   activeSalesCount(): number;
   voidSale(saleId: string, reason: string, voidedBy: string): void;
+  /** v1.5.0 (RETURNS): inverse fiscal rows — draft, two-person approval, reject. */
+  nextReturnNumber(year: number): string;
+  createReturnDraft(input: ReturnDraftInput): { id: string; refund_ct: number };
+  approveReturn(id: string, approver: string, approverRole: string): { return_number: string; refund_ct: number; posting_day: string };
+  rejectReturn(id: string, approver: string, note?: string | null): void;
+  getReturnOrNull(id: string): Record<string, unknown> | null;
+  listReturns(status?: ReturnStatus, limit?: number): Record<string, unknown>[];
   backupTo(destPath: string): void;
   /** TASK 4 — ACID ephemeral cart draft (power-cut resilience). */
   saveCartDraft(sessionId: string, payloadJson: string, itemCount: number, totalTtcCt: number): void;
@@ -458,6 +527,7 @@ export interface BarakaDb {
       totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
       dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
       firstInvoice: string; lastInvoice: string;
+      returnsCount: number; returnsTotalTtcCt: number;
     };
   }): { report_number: string; hash: string; prev_hash: string };
   getLatestZHash(): string;
@@ -475,7 +545,7 @@ export interface BarakaDb {
   logAudit(e: AuditEvent): void;
 }
 
-function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z', year: number): number {
+function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z' | 'RET', year: number): number {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error(`[db] invalid seq year: ${year}`);
   }
@@ -497,6 +567,18 @@ export function isDayLocked(db: DatabaseSync, day: string): boolean {
   return !!r;
 }
 
+/** v1.5.0 (RETURNS): the 7-day window is measured in fiscal days, never UTC instants. */
+function assertReturnWindow(saleDay: string): void {
+  const today = fiscalDayISO(new Date());
+  const days = Math.round(
+    (Date.parse(`${today}T00:00:00Z`) - Date.parse(`${saleDay}T00:00:00Z`)) / 86400000,
+  );
+  if (days < 0) throw new Error('[db] sale is dated in the future — return refused');
+  if (days > RETURN_WINDOW_DAYS) {
+    throw new Error(`[db] return window is ${RETURN_WINDOW_DAYS} days (sale day ${saleDay}) — refused`);
+  }
+}
+
 /** #004: ledger-truth aggregates for one business day (COMPLETED sales + ESPECES settlements). */
 export interface DayAggregatesCt {
   salesCount: number; totalHtCt: number; tva0BaseCt: number; tva9BaseCt: number;
@@ -504,6 +586,8 @@ export interface DayAggregatesCt {
   totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
   dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
   firstInvoice: string; lastInvoice: string;
+  /** v1.5.0 (RETURNS memo): approved returns posted this day; money columns above are NET. */
+  returnsCount: number; returnsTotalTtcCt: number;
 }
 
 export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregatesCt {
@@ -535,12 +619,35 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
     `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
      WHERE payment_method = 'ESPECES' AND date >= ? AND date < ?`,
   ).get(start, end) as { t: number };
+  // v1.5.0 (RETURNS): approved returns posted this day net the sales down.
+  // Timbre is NOT netted (stamp duty on the original document, non-refundable).
+  const ret = db.prepare(
+    `SELECT COUNT(*) AS n,
+       COALESCE(SUM(ri.line_ht_ct), 0) AS ht,
+       COALESCE(SUM(CASE WHEN ri.tva_rate = 0 THEN ri.line_ht_ct ELSE 0 END), 0) AS b0,
+       COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_ht_ct ELSE 0 END), 0) AS b9,
+       COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_tva_ct ELSE 0 END), 0) AS a9,
+       COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_ht_ct ELSE 0 END), 0) AS b19,
+       COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_tva_ct ELSE 0 END), 0) AS a19,
+       COALESCE(SUM(ri.line_tva_ct), 0) AS tva,
+       COALESCE(SUM(ri.line_ttc_ct), 0) AS ttc,
+       COALESCE(SUM(CASE WHEN r.payment_method = 'ESPECES' THEN ri.line_ttc_ct ELSE 0 END), 0) AS cash,
+       COALESCE(SUM(CASE WHEN r.payment_method = 'CIB' THEN ri.line_ttc_ct ELSE 0 END), 0) AS cib,
+       COALESCE(SUM(CASE WHEN r.payment_method = 'DAHABIYA' THEN ri.line_ttc_ct ELSE 0 END), 0) AS dah,
+       COALESCE(SUM(CASE WHEN r.payment_method = 'CREDIT' THEN ri.line_ttc_ct ELSE 0 END), 0) AS cred
+     FROM return_items ri JOIN returns r ON r.id = ri.return_id
+     WHERE r.status = 'APPROVED' AND r.posting_day = ?`,
+  ).get(day) as {
+    n: number; ht: number; b0: number; b9: number; a9: number; b19: number; a19: number;
+    tva: number; ttc: number; cash: number; cib: number; dah: number; cred: number;
+  };
   return {
-    salesCount: agg.n, totalHtCt: agg.ht, tva0BaseCt: agg.b0, tva9BaseCt: agg.b9,
-    tva9AmtCt: agg.a9, tva19BaseCt: agg.b19, tva19AmtCt: agg.a19, totalTvaCt: agg.tva,
-    totalTimbreCt: agg.timbre, totalTtcCt: agg.ttc, especesGrossCt: agg.cash,
-    cibTotalCt: agg.cib, dahabiyaTotalCt: agg.dah, creditGrantedCt: agg.cred,
+    salesCount: agg.n, totalHtCt: agg.ht - ret.ht, tva0BaseCt: agg.b0 - ret.b0, tva9BaseCt: agg.b9 - ret.b9,
+    tva9AmtCt: agg.a9 - ret.a9, tva19BaseCt: agg.b19 - ret.b19, tva19AmtCt: agg.a19 - ret.a19, totalTvaCt: agg.tva - ret.tva,
+    totalTimbreCt: agg.timbre, totalTtcCt: agg.ttc - ret.ttc, especesGrossCt: agg.cash - ret.cash,
+    cibTotalCt: agg.cib - ret.cib, dahabiyaTotalCt: agg.dah - ret.dah, creditGrantedCt: agg.cred - ret.cred,
     creditCollectedCt: settled.t, firstInvoice: agg.first ?? '', lastInvoice: agg.last ?? '',
+    returnsCount: ret.n, returnsTotalTtcCt: ret.ttc,
   };
 }
 
@@ -1052,7 +1159,13 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const creditSales = db.prepare(
         "SELECT * FROM sales WHERE client_id = ? AND payment_method = 'CREDIT' ORDER BY created_at DESC, id DESC",
       ).all(clientId) as unknown as Record<string, unknown>[];
-      return { client, settlements, creditSales };
+      // v1.5.0 (RETURNS): approved credit returns shrink the granted debt.
+      const creditReturns = db.prepare(
+        `SELECT r.* FROM returns r JOIN sales s ON s.id = r.sale_id
+         WHERE s.client_id = ? AND s.payment_method = 'CREDIT' AND r.status = 'APPROVED'
+         ORDER BY r.decided_at DESC, r.id DESC`,
+      ).all(clientId) as unknown as Record<string, unknown>[];
+      return { client, settlements, creditSales, creditReturns };
     },
 
     openCashSession(cashierName: string, openingFloatCt: number): CashSessionRecord {
@@ -1820,6 +1933,229 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       }
     },
 
+    nextReturnNumber(year: number): string {
+      return `RET-${year}-${pad6(bumpSeq(db, 'RET', year))}`;
+    },
+
+    createReturnDraft(input: ReturnDraftInput): { id: string; refund_ct: number } {
+      const lines = input.lines ?? [];
+      if (lines.length === 0) throw new Error('[db] return draft needs at least one line');
+      if (!(RETURN_REASONS as readonly string[]).includes(input.reason)) {
+        throw new Error(`[db] bad return reason: ${input.reason}`);
+      }
+      const actor = input.actor?.trim();
+      if (!actor) throw new Error('[db] return actor is required');
+      const key = input.client_return_key ?? null;
+      if (key) {
+        const prior = db.prepare('SELECT id, refund_ct FROM returns WHERE client_return_key = ?').get(key) as
+          | { id: string; refund_ct: number } | undefined;
+        if (prior) return { id: prior.id, refund_ct: prior.refund_ct };
+      }
+      const sale = db.prepare(
+        'SELECT id, invoice_number, status, created_at, payment_method, client_id, client_name FROM sales WHERE id = ?',
+      ).get(input.sale_id) as
+        | {
+          id: string; invoice_number: string; status: string; created_at: string;
+          payment_method: string; client_id: number | null; client_name: string | null;
+        } | undefined;
+      if (!sale) throw new Error(`[db] sale not found: ${input.sale_id}`);
+      if (sale.status !== 'COMPLETED') throw new Error('[db] only COMPLETED sales can be returned (void instead)');
+      assertReturnWindow(fiscalDayISO(new Date(sale.created_at)));
+      let refund = 0;
+      const built: {
+        saleItemId: number; product_id: number | null; barcode: string; name_fr: string;
+        name_ar: string; unit_price_ct: number; qty: number; unit: string;
+        tva_rate: 0 | 9 | 19; ht: number; tva: number; ttc: number;
+      }[] = [];
+      for (const ln of lines) {
+        if (!Number.isInteger(ln.qty_milli) || ln.qty_milli <= 0) {
+          throw new Error('[db] return qty_milli must be a positive integer');
+        }
+        const src = db.prepare(
+          `SELECT id, product_id, barcode, name_fr, name_ar, unit_price_ct,
+            qty_milli, unit, tva_rate, line_ht_ct, line_tva_ct, line_ttc_ct
+           FROM sale_items WHERE id = ? AND sale_id = ?`,
+        ).get(ln.saleItemId, sale.id) as
+          | {
+            id: number; product_id: number | null; barcode: string; name_fr: string;
+            name_ar: string; unit_price_ct: number; qty_milli: number; unit: string;
+            tva_rate: number; line_ht_ct: number; line_tva_ct: number; line_ttc_ct: number;
+          } | undefined;
+        if (!src) throw new Error(`[db] sale line ${ln.saleItemId} is not part of ${sale.invoice_number}`);
+        const already = (db.prepare(
+          `SELECT COALESCE(SUM(ri.qty_milli), 0) AS q FROM return_items ri
+           JOIN returns r ON r.id = ri.return_id
+           WHERE r.sale_id = ? AND ri.sale_item_id = ? AND r.status = 'APPROVED'`,
+        ).get(sale.id, src.id) as { q: number }).q;
+        if (ln.qty_milli > src.qty_milli - already) {
+          throw new Error(`[db] return qty exceeds remaining sold qty on line ${src.id}`);
+        }
+        // Prorata, half-up (same rounding family as the TVA-9 rule); TVA is
+        // derived (ttc − ht) so the line invariant can never drift by 1ct.
+        const share = ln.qty_milli / src.qty_milli;
+        const ht = Math.round(src.line_ht_ct * share);
+        const ttc = Math.round(src.line_ttc_ct * share);
+        assertTvaRate(src.tva_rate);
+        built.push({
+          saleItemId: src.id, product_id: src.product_id, barcode: src.barcode,
+          name_fr: src.name_fr, name_ar: src.name_ar, unit_price_ct: src.unit_price_ct,
+          qty: ln.qty_milli, unit: src.unit, tva_rate: src.tva_rate as 0 | 9 | 19,
+          ht, tva: ttc - ht, ttc,
+        });
+        refund += ttc;
+      }
+      if (refund <= 0) throw new Error('[db] return refund must be > 0');
+      const id = randomUUID();
+      const now = new Date().toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.prepare(
+          `INSERT INTO returns (id, sale_id, invoice_number, client_id, client_name,
+            payment_method, reason, reason_note, refund_ct, status, actor,
+            sale_day, created_at, client_return_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?)`,
+        ).run(
+          id, sale.id, sale.invoice_number, sale.client_id, sale.client_name,
+          sale.payment_method, input.reason, input.reason_note ?? null, refund,
+          actor, fiscalDayISO(new Date(sale.created_at)), now, key,
+        );
+        const ins = db.prepare(
+          `INSERT INTO return_items (return_id, sale_item_id, product_id, barcode,
+            name_fr, name_ar, unit_price_ct, qty_milli, unit, tva_rate,
+            line_ht_ct, line_tva_ct, line_ttc_ct)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        );
+        for (const b of built) {
+          ins.run(
+            id, b.saleItemId, b.product_id, b.barcode, b.name_fr, b.name_ar,
+            b.unit_price_ct, b.qty, b.unit, b.tva_rate, b.ht, b.tva, b.ttc,
+          );
+        }
+        logAuditRow(db, {
+          actor, action: 'return.create', entity: 'returns', entityId: id,
+          detail: `${sale.invoice_number} refund=${refund} reason=${input.reason}`,
+        });
+        db.exec('COMMIT');
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+      return { id, refund_ct: refund };
+    },
+
+    approveReturn(id: string, approver: string, approverRole: string): { return_number: string; refund_ct: number; posting_day: string } {
+      const who = approver?.trim();
+      if (!who) throw new Error('[db] approver is required');
+      // Hard fiscal gate (same family as the owner-gate on users): the lane
+      // also enforces, but the DAL never trusts the caller.
+      if (approverRole !== 'manager' && approverRole !== 'owner') {
+        throw new Error('[db] return approval requires manager or owner role');
+      }
+      const head = db.prepare(
+        `SELECT id, sale_id, invoice_number, payment_method, reason, refund_ct,
+          status, actor, sale_day FROM returns WHERE id = ?`,
+      ).get(id) as
+        | {
+          id: string; sale_id: string; invoice_number: string; payment_method: string;
+          reason: string; refund_ct: number; status: string; actor: string; sale_day: string;
+        } | undefined;
+      if (!head) throw new Error(`[db] return not found: ${id}`);
+      if (head.status !== 'DRAFT') throw new Error(`[db] return ${id} is already decided (${head.status})`);
+      const postingDay = fiscalDayISO(new Date());
+      if (isDayLocked(db, postingDay)) {
+        throw new Error(`[db] day ${postingDay} is already legally closed (Z FINALISÉ) — approve tomorrow's open day`);
+      }
+      assertReturnWindow(head.sale_day);
+      // Owner decision 2026-11-05: above 5000 DZD the approver must differ
+      // from the creator — compared by login name (PIN identity is lane-side).
+      if (head.refund_ct > RETURN_TWO_PERSON_THRESHOLD_CT && who === head.actor) {
+        throw new Error('[db] refunds above 5000 DZD need a second person (approver ≠ creator)');
+      }
+      const year = parseInt(postingDay.slice(0, 4), 10);
+      const now = new Date().toISOString();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        // Atomic recheck: a concurrent approval can never double-return a line.
+        const items = db.prepare(
+          `SELECT ri.sale_item_id, ri.qty_milli, ri.product_id, si.qty_milli AS sold_qty
+           FROM return_items ri JOIN sale_items si ON si.id = ri.sale_item_id
+           WHERE ri.return_id = ?`,
+        ).all(head.id) as { sale_item_id: number; qty_milli: number; product_id: number | null; sold_qty: number }[];
+        for (const it of items) {
+          const already = (db.prepare(
+            `SELECT COALESCE(SUM(ri.qty_milli), 0) AS q FROM return_items ri
+             JOIN returns r ON r.id = ri.return_id
+             WHERE r.sale_id = ? AND ri.sale_item_id = ? AND r.status = 'APPROVED'`,
+          ).get(head.sale_id, it.sale_item_id) as { q: number }).q;
+          if (already + it.qty_milli > it.sold_qty) {
+            throw new Error(`[db] line ${it.sale_item_id} was already returned by a concurrent approval`);
+          }
+        }
+        const number = `RET-${year}-${pad6(bumpSeq(db, 'RET', year))}`;
+        if (head.payment_method === 'ESPECES') {
+          // Cash leaves the drawer through the movement journal, so the cash
+          // session lane (F8/K9) stays balanced with zero special-casing.
+          const open = db.prepare("SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1").get() as
+            | { id: string } | undefined;
+          if (!open) throw new Error('[db] cash refund needs an OPEN cash session — open one first');
+          db.prepare(
+            `INSERT INTO cash_movements (id, session_id, movement_type, amount_ct, reason, created_at)
+             VALUES (?, ?, 'WITHDRAWAL', ?, ?, ?)`,
+          ).run(randomUUID(), open.id, head.refund_ct, `Retour ${number} (${head.invoice_number})`, now);
+        }
+        // Stock flows back in (null product = ad-hoc line, nothing to restock).
+        const restock = db.prepare('UPDATE products SET stock_milli = stock_milli + ? WHERE id = ?');
+        for (const it of items) {
+          if (it.product_id !== null) restock.run(it.qty_milli, it.product_id);
+        }
+        db.prepare(
+          `UPDATE returns SET status = 'APPROVED', approver = ?, posting_day = ?,
+           decided_at = ?, return_number = ? WHERE id = ?`,
+        ).run(who, postingDay, now, number, head.id);
+        logAuditRow(db, {
+          actor: who, action: 'return.approve', entity: 'returns', entityId: head.id,
+          detail: `${number} ${head.invoice_number} refund=${head.refund_ct} creator=${head.actor}`,
+        });
+        db.exec('COMMIT');
+        return { return_number: number, refund_ct: head.refund_ct, posting_day: postingDay };
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    rejectReturn(id: string, approver: string, note?: string | null): void {
+      const who = approver?.trim();
+      if (!who) throw new Error('[db] approver is required');
+      const head = db.prepare('SELECT id, status, invoice_number FROM returns WHERE id = ?').get(id) as
+        | { id: string; status: string; invoice_number: string } | undefined;
+      if (!head) throw new Error(`[db] return not found: ${id}`);
+      if (head.status !== 'DRAFT') throw new Error(`[db] return ${id} is already decided (${head.status})`);
+      db.prepare(`UPDATE returns SET status = 'REJECTED', approver = ?, decided_at = ? WHERE id = ?`).run(
+        who, new Date().toISOString(), head.id,
+      );
+      logAuditRow(db, {
+        actor: who, action: 'return.reject', entity: 'returns', entityId: head.id,
+        detail: `${head.invoice_number} note=${(note ?? '').slice(0, 140)}`,
+      });
+    },
+
+    getReturnOrNull(id: string): Record<string, unknown> | null {
+      const head = db.prepare('SELECT * FROM returns WHERE id = ?').get(id) as
+        | Record<string, unknown> | undefined;
+      if (!head) return null;
+      const items = db.prepare('SELECT * FROM return_items WHERE return_id = ? ORDER BY id ASC').all(id);
+      return { ...head, items };
+    },
+
+    listReturns(status?: ReturnStatus, limit = 100): Record<string, unknown>[] {
+      const n = Math.max(1, Math.min(500, Math.floor(limit)));
+      if (status) {
+        return db.prepare('SELECT * FROM returns WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ?').all(status, n) as Record<string, unknown>[];
+      }
+      return db.prepare('SELECT * FROM returns ORDER BY created_at DESC, id DESC LIMIT ?').all(n) as Record<string, unknown>[];
+    },
+
     backupTo(destPath: string) {
       if (!destPath.endsWith('.db')) throw new Error('[db] backup destination must end with .db');
       fs.mkdirSync(path.dirname(path.resolve(destPath)), { recursive: true });
@@ -2012,6 +2348,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
         dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
         firstInvoice: string; lastInvoice: string;
+        returnsCount: number; returnsTotalTtcCt: number;
       };
     }) {
       const t = input.totals;
@@ -2047,6 +2384,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       num('bankSplitCt', t.cibTotalCt + t.dahabiyaTotalCt, ledger.cibTotalCt + ledger.dahabiyaTotalCt);
       num('creditGrantedCt', t.creditGrantedCt, ledger.creditGrantedCt);
       num('creditCollectedCt', t.creditCollectedCt, ledger.creditCollectedCt);
+      num('returnsCount', t.returnsCount, ledger.returnsCount);
+      num('returnsTotalTtcCt', t.returnsTotalTtcCt, ledger.returnsTotalTtcCt);
       if (t.firstInvoice !== ledger.firstInvoice) bad.push(`firstInvoice: caller=${t.firstInvoice} ledger=${ledger.firstInvoice}`);
       if (t.lastInvoice !== ledger.lastInvoice) bad.push(`lastInvoice: caller=${t.lastInvoice} ledger=${ledger.lastInvoice}`);
       if (bad.length > 0) {
@@ -2063,15 +2402,17 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
           tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
-          credit_collected_ct, first_invoice_number, last_invoice_number,
+          credit_collected_ct, returns_count, returns_total_ttc_ct,
+          first_invoice_number, last_invoice_number,
           prev_hash, hash, finalized, close_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
       ).run(
         number, input.day, input.openingTime, input.closingTime,
         t.salesCount, t.totalHtCt, t.tva0BaseCt, t.tva9BaseCt, t.tva9AmtCt,
         t.tva19BaseCt, t.tva19AmtCt, t.totalTvaCt, t.totalTimbreCt, t.totalTtcCt,
         t.especesGrossCt, t.cibTotalCt, t.dahabiyaTotalCt, t.creditGrantedCt,
-        t.creditCollectedCt, t.firstInvoice, t.lastInvoice, prev, hash,
+        t.creditCollectedCt, t.returnsCount, t.returnsTotalTtcCt,
+        t.firstInvoice, t.lastInvoice, prev, hash,
       );
       return { report_number: number, hash, prev_hash: prev };
     },

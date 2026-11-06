@@ -115,7 +115,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
 
 -- Atomic invoice/ticket/quittance counters. Bump via single UPDATE..RETURNING (one statement = atomic).
 CREATE TABLE IF NOT EXISTS seq (
-  kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z')),
+  kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET')),
   year   INTEGER NOT NULL,
   last_n INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (kind, year)
@@ -172,6 +172,49 @@ CREATE TABLE IF NOT EXISTS sale_items (
   unit          TEXT    NOT NULL CHECK (unit IN ('PIECE', 'KG', 'LITRE')),
   tva_rate      INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
   discount_bp   INTEGER NOT NULL DEFAULT 0,
+  line_ht_ct    INTEGER NOT NULL,
+  line_tva_ct   INTEGER NOT NULL,
+  line_ttc_ct   INTEGER NOT NULL
+);
+
+-- v1.5.0 (RETURNS): customer returns are inverse fiscal rows, never edits.
+-- A return mirrors the sale lines it reverses; approval posts it to the
+-- open day (even when the sale day is long closed). Draft -> APPROVED /
+-- REJECTED is terminal; rows are never deleted (triggers, ADR-034 family).
+CREATE TABLE IF NOT EXISTS returns (
+  id                TEXT    PRIMARY KEY,
+  return_number     TEXT    UNIQUE, -- RET-YYYY-XXXXXX, minted at APPROVAL (posted docs only; drafts carry the id)
+  sale_id           TEXT    NOT NULL REFERENCES sales (id) ON DELETE RESTRICT,
+  invoice_number    TEXT    NOT NULL,        -- source FACT (human trace)
+  client_id         INTEGER REFERENCES clients (id),
+  client_name       TEXT,
+  payment_method    TEXT    NOT NULL CHECK (payment_method IN ('ESPECES', 'CIB', 'DAHABIYA', 'CREDIT')),
+  reason            TEXT    NOT NULL CHECK (reason IN ('DEFECT', 'WRONG_ITEM', 'SIZE_FIT', 'EXPIRED', 'CHANGED_MIND', 'OTHER')),
+  reason_note       TEXT,
+  refund_ct         INTEGER NOT NULL CHECK (refund_ct > 0), -- full TTC of lines, timbre excluded (non-refundable, accountant to confirm)
+  status            TEXT    NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'APPROVED', 'REJECTED')),
+  actor             TEXT    NOT NULL DEFAULT '',   -- draft creator
+  approver          TEXT    NOT NULL DEFAULT '',   -- set at decision time
+  sale_day          TEXT    NOT NULL,              -- fiscal day of the source sale
+  posting_day       TEXT,                          -- fiscal day of approval (open day)
+  decided_at        TEXT,
+  created_at        TEXT    NOT NULL,
+  -- T1/T2b family: idempotency key minted by the checkout at draft time.
+  client_return_key TEXT
+);
+
+CREATE TABLE IF NOT EXISTS return_items (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_id     TEXT    NOT NULL REFERENCES returns (id) ON DELETE RESTRICT,
+  sale_item_id  INTEGER NOT NULL REFERENCES sale_items (id) ON DELETE RESTRICT,
+  product_id    INTEGER REFERENCES products (id),
+  barcode       TEXT    NOT NULL DEFAULT '',
+  name_fr       TEXT    NOT NULL DEFAULT '',
+  name_ar       TEXT    NOT NULL DEFAULT '',
+  unit_price_ct INTEGER NOT NULL,
+  qty_milli     INTEGER NOT NULL CHECK (qty_milli > 0),
+  unit          TEXT    NOT NULL CHECK (unit IN ('PIECE', 'KG', 'LITRE')),
+  tva_rate      INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
   line_ht_ct    INTEGER NOT NULL,
   line_tva_ct   INTEGER NOT NULL,
   line_ttc_ct   INTEGER NOT NULL
@@ -264,6 +307,10 @@ CREATE TABLE IF NOT EXISTS z_reports (
   dahabiya_total_ct  INTEGER NOT NULL DEFAULT 0,
   credit_granted_ct  INTEGER NOT NULL DEFAULT 0,
   credit_collected_ct INTEGER NOT NULL DEFAULT 0,
+  -- v1.5.0 (RETURNS memo): money columns above are NET of approved returns;
+  -- these two memoize the return flow for the ticket and the audit.
+  returns_count      INTEGER NOT NULL DEFAULT 0,
+  returns_total_ttc_ct INTEGER NOT NULL DEFAULT 0,
   first_invoice_number TEXT  NOT NULL DEFAULT '',
   last_invoice_number  TEXT  NOT NULL DEFAULT '',
   prev_hash          TEXT    NOT NULL DEFAULT '',

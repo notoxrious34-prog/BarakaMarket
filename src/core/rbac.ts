@@ -90,6 +90,7 @@ export type AuditAction =
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
+  | 'return.create' | 'return.approve' | 'return.reject'
   | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'
   | 'supplier.pay' | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
 

@@ -70,6 +70,7 @@ const totalsDay1 = () => ({
   totalTimbreCt: 1000, totalTtcCt: 71400, especesGrossCt: 11900,
   cibTotalCt: 59500, dahabiyaTotalCt: 0, creditGrantedCt: 0,
   creditCollectedCt: 21000, firstInvoice: 'FACT-2026-000001', lastInvoice: 'FACT-2026-000002',
+  returnsCount: 0, returnsTotalTtcCt: 0,
 });
 
 const seedDay1 = (b: ReturnType<typeof openBarakaDb>) => {
@@ -186,6 +187,7 @@ test('zclose: locked day freezes voids, late sales and shift closes', () => {
       totalTimbreCt: 0, totalTtcCt: 1000, especesGrossCt: 0,
       cibTotalCt: 1000, dahabiyaTotalCt: 0, creditGrantedCt: 0,
       creditCollectedCt: 0, firstInvoice: 'FACT-2026-000003', lastInvoice: 'FACT-2026-000003',
+      returnsCount: 0, returnsTotalTtcCt: 0,
     },
   });
   assert.throws(() => b.closeCashSessionAndGenerateZ(s.id, 100000), /legally closed/);
@@ -199,6 +201,7 @@ test('zclose: locked day freezes voids, late sales and shift closes', () => {
       totalTimbreCt: 0, totalTtcCt: 1000, especesGrossCt: 0,
       cibTotalCt: 1000, dahabiyaTotalCt: 0, creditGrantedCt: 0,
       creditCollectedCt: 0, firstInvoice: 'FACT-2026-000004', lastInvoice: 'FACT-2026-000004',
+      returnsCount: 0, returnsTotalTtcCt: 0,
     },
   });
   assert.equal(z2.report_number, 'Z-2026-000003');
