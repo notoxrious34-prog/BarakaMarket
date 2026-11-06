@@ -151,6 +151,73 @@ fn z_close(
     fiscal::z_close(&mut conn, &day, &opening_time, &closing_time)
 }
 
+/// v1.5.0 (RETURNS): draft a return (no RET number yet — minted at approve).
+#[tauri::command(rename_all = "camelCase")]
+fn return_create(
+    sale_id: String,
+    items_json: String,
+    reason: String,
+    reason_note: Option<String>,
+    actor: String,
+    client_key: Option<String>,
+    today: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::return_create(
+        &mut conn,
+        &sale_id,
+        &items_json,
+        &reason,
+        reason_note,
+        &actor,
+        client_key,
+        &today,
+    )
+}
+
+/// v1.5.0 (RETURNS): approve a draft — mints RET-YYYY-XXXXXX, restocks,
+/// posts the cash WITHDRAWAL, audits.
+#[tauri::command(rename_all = "camelCase")]
+fn return_approve(
+    id: String,
+    approver: String,
+    approver_role: String,
+    today: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::return_approve(&mut conn, &id, &approver, &approver_role, &today)
+}
+
+/// v1.5.0 (RETURNS): reject a draft (terminal, audited).
+#[tauri::command]
+fn return_reject(
+    id: String,
+    actor: String,
+    note: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::return_reject(&mut conn, &id, &actor, note)
+}
+
+/// v1.5.0 (RETURNS): read one return with its lines (null JSON when unknown).
+#[tauri::command]
+fn return_get(id: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::return_get(&conn, &id)
+}
+
+/// v1.5.0 (RETURNS): list returns, optionally filtered by status.
+#[tauri::command]
+fn return_list(status: Option<String>) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::return_list(&conn, status)
+}
+
 /// #003 (Phase A): day summary for the Z lane (read-only; lock lives in #004).
 #[tauri::command]
 fn daily_z(day: String) -> Result<serde_json::Value, String> {
@@ -434,7 +501,12 @@ fn main() {
             record_loss,
             backup_create,
             backup_list,
-            z_list
+            z_list,
+            return_create,
+            return_approve,
+            return_reject,
+            return_get,
+            return_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");

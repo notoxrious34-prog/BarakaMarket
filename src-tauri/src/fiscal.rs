@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 8;
+pub const LATEST_SCHEMA_VERSION: i64 = 9;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -57,6 +57,16 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             }
         }
         Ok(false)
+    };
+    let has_table = |table: &str| -> Result<bool, String> {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(n > 0)
     };
     if v < 2 && !has_col("sales", "client_sale_id")? {
         conn.execute_batch(
@@ -165,6 +175,101 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         conn.execute_batch("PRAGMA user_version = 8;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v8 → v9 (v1.5.0 RETURNS): inverse fiscal rows — draft → approve/reject.
+    // Fresh files get them from schema.sql; legacy files climb here.
+    // Canonical DDL mirrors db/schema.sql + the TS v8→v9 step in
+    // src/db/sqlite.ts exactly (TEXT-UUID heads, full sale snapshot columns,
+    // same triggers, seq rebuilt to admit 'RET' with counters preserved).
+    if v < 9 {
+        if !has_table("returns")? {
+            conn.execute_batch(
+                "CREATE TABLE returns (
+                   id              TEXT PRIMARY KEY,
+                   return_number   TEXT UNIQUE,
+                   sale_id         TEXT NOT NULL REFERENCES sales(id) ON DELETE RESTRICT,
+                   invoice_number  TEXT NOT NULL,
+                   client_id       INTEGER REFERENCES clients(id),
+                   client_name     TEXT,
+                   payment_method  TEXT NOT NULL
+                     CHECK (payment_method IN ('ESPECES','CIB','DAHABIYA','CREDIT')),
+                   reason          TEXT NOT NULL
+                     CHECK (reason IN ('DEFECT','WRONG_ITEM','SIZE_FIT','EXPIRED','CHANGED_MIND','OTHER')),
+                   reason_note     TEXT,
+                   refund_ct       INTEGER NOT NULL CHECK (refund_ct > 0),
+                   status          TEXT NOT NULL DEFAULT 'DRAFT'
+                     CHECK (status IN ('DRAFT','APPROVED','REJECTED')),
+                   actor           TEXT NOT NULL DEFAULT '',
+                   approver        TEXT NOT NULL DEFAULT '',
+                   sale_day        TEXT NOT NULL,
+                   posting_day     TEXT,
+                   decided_at      TEXT,
+                   created_at      TEXT NOT NULL,
+                   client_return_key TEXT
+                 );
+                 CREATE TABLE return_items (
+                   id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                   return_id        TEXT NOT NULL REFERENCES returns(id) ON DELETE RESTRICT,
+                   sale_item_id     INTEGER NOT NULL REFERENCES sale_items(id) ON DELETE RESTRICT,
+                   product_id       INTEGER REFERENCES products(id),
+                   barcode          TEXT NOT NULL DEFAULT '',
+                   name_fr          TEXT NOT NULL DEFAULT '',
+                   name_ar          TEXT NOT NULL DEFAULT '',
+                   unit_price_ct    INTEGER NOT NULL,
+                   qty_milli        INTEGER NOT NULL CHECK (qty_milli > 0),
+                   unit             TEXT NOT NULL CHECK (unit IN ('PIECE','KG','LITRE')),
+                   tva_rate         INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
+                   line_ht_ct       INTEGER NOT NULL,
+                   line_tva_ct      INTEGER NOT NULL,
+                   line_ttc_ct      INTEGER NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_return_items_return ON return_items(return_id);
+                 CREATE INDEX IF NOT EXISTS idx_returns_status ON returns(status, posting_day);
+                 CREATE UNIQUE INDEX IF NOT EXISTS idx_returns_client_key
+                   ON returns(client_return_key) WHERE client_return_key IS NOT NULL;
+                 CREATE TRIGGER IF NOT EXISTS trg_returns_no_delete
+                 BEFORE DELETE ON returns BEGIN
+                   SELECT RAISE(ABORT, 'append-only: returns are never deleted (reject instead)');
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS trg_return_items_no_delete
+                 BEFORE DELETE ON return_items BEGIN
+                   SELECT RAISE(ABORT, 'append-only: return_items are never deleted');
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS trg_returns_terminal
+                 BEFORE UPDATE OF status ON returns
+                 WHEN OLD.status <> 'DRAFT' AND NEW.status <> OLD.status BEGIN
+                   SELECT RAISE(ABORT, 'terminal: a decided return can never go back to DRAFT');
+                 END;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !has_col("z_reports", "returns_count")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN returns_count INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !has_col("z_reports", "returns_total_ttc_ct")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN returns_total_ttc_ct INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        // The seq CHECK lists the lanes explicitly — rebuild it to admit
+        // 'RET', preserving every counter (never reseeds numbering).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS seq_new (
+               kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET')),
+               year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
+               PRIMARY KEY (kind, year));
+             INSERT OR IGNORE INTO seq_new (kind, year, last_n)
+               SELECT kind, year, last_n FROM seq;
+             DROP TABLE IF EXISTS seq;
+             ALTER TABLE seq_new RENAME TO seq;",
+        )
+        .map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA user_version = 9;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -746,6 +851,642 @@ pub fn void_sale(
     Ok(serde_json::json!({ "id": sale_id, "invoice_number": invoice, "status": "CANCELLED" }))
 }
 
+/// v1.5.0 (RETURNS): inverse fiscal rows — draft → approve / reject.
+/// Native twin of the TS returns lane (same guards, same prorata math):
+/// COMPLETED sales only, 7-day fiscal window, cumulative cap, cash refunds
+/// need an OPEN session, two-person rule above 5000 DZD.
+const RETURN_REASONS: [&str; 6] = [
+    "DEFECT",
+    "WRONG_ITEM",
+    "SIZE_FIT",
+    "EXPIRED",
+    "CHANGED_MIND",
+    "OTHER",
+];
+const RETURN_WINDOW_DAYS: i64 = 7;
+const RETURN_TWO_PERSON_CT: i64 = 500_000;
+
+/// Civil-day distance sale_day → today, both YYYY-MM-DD. The caller passes
+/// its fiscal day explicitly, so the native lane never needs a clock.
+fn return_window_ok(sale_day: &str, today: &str) -> Result<(), String> {
+    let (sy, sm, sd) = parse_day(sale_day)?;
+    let (ty, tm, td) = parse_day(today)?;
+    let gap = days_from_civil(ty, tm, td) - days_from_civil(sy, sm, sd);
+    if !(0..=RETURN_WINDOW_DAYS).contains(&gap) {
+        return Err(format!(
+            "[fiscal] return window is {RETURN_WINDOW_DAYS} days (sale {sale_day}, today {today})"
+        ));
+    }
+    Ok(())
+}
+
+/// Half-up integer prorata: round(num / den) for non-negative operands.
+fn half_up(num: i64, den: i64) -> i64 {
+    (num * 2 + den) / (den * 2)
+}
+
+fn audit_return(
+    tx: &rusqlite::Transaction,
+    actor: &str,
+    action: &str,
+    entity_id: &str,
+    detail: String,
+) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO audit_log (ts, actor, action, entity, entity_id, detail)
+         VALUES (datetime('now'), ?1, ?2, 'returns', ?3, ?4)",
+        rusqlite::params![actor, action, entity_id, detail],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn return_create(
+    conn: &mut Connection,
+    sale_id: &str,
+    items_json: &str,
+    reason: &str,
+    reason_note: Option<String>,
+    actor: &str,
+    client_key: Option<String>,
+    today: &str,
+) -> Result<Value, String> {
+    if !RETURN_REASONS.contains(&reason) {
+        return Err(format!("[fiscal] bad return reason: {reason}"));
+    }
+    if actor.trim().is_empty() {
+        return Err("[fiscal] return actor is required".to_string());
+    }
+    if !valid_day(today) {
+        return Err("[fiscal] today must be YYYY-MM-DD".to_string());
+    }
+    let items: Vec<Value> = serde_json::from_str(items_json)
+        .map_err(|_| "[fiscal] items must be a JSON array".to_string())?;
+    if items.is_empty() {
+        return Err("[fiscal] return needs at least one line".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    // Idempotency inside the lock: same key returns the original draft.
+    if let Some(k) = client_key.as_deref().filter(|k| !k.trim().is_empty()) {
+        let hit: Option<(String, i64)> = tx
+            .query_row(
+                "SELECT id, refund_ct FROM returns WHERE client_return_key = ?1",
+                [k],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if let Some((id, refund_ct)) = hit {
+            tx.commit().map_err(|e| e.to_string())?;
+            return Ok(serde_json::json!({ "id": id, "refund_ct": refund_ct }));
+        }
+    }
+    let (status, invoice_number, created_at, payment, client_id, client_name): (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+    ) = tx
+        .query_row(
+            "SELECT status, invoice_number, created_at, payment_method, client_id, client_name
+             FROM sales WHERE id = ?1",
+            [sale_id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("[fiscal] sale not found: {sale_id}"))?;
+    if status != "COMPLETED" {
+        return Err(format!(
+            "[fiscal] only COMPLETED sales can be returned (sale {sale_id} is {status})"
+        ));
+    }
+    let sale_day = algiers_day(&created_at)?;
+    return_window_ok(&sale_day, today)?;
+    let mut refund_ct: i64 = 0;
+    // Canonical snapshot columns (mirrors the TS DAL): the return carries the
+    // sale's identity so the ticket and the audit never re-join the sale.
+    let mut rows: Vec<(
+        i64,
+        Option<i64>,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        i64,
+        i64,
+        i64,
+    )> = Vec::new();
+    for it in &items {
+        let sid = it
+            .get("saleItemId")
+            .and_then(|v| v.as_i64())
+            .ok_or("[fiscal] each line needs {saleItemId, qty_milli}".to_string())?;
+        let qty = it
+            .get("qty_milli")
+            .and_then(|v| v.as_i64())
+            .ok_or("[fiscal] each line needs {saleItemId, qty_milli}".to_string())?;
+        if qty <= 0 {
+            return Err("[fiscal] return qty must be > 0".to_string());
+        }
+        let (
+            owner,
+            product_id,
+            barcode,
+            name_fr,
+            name_ar,
+            unit_price,
+            sale_qty,
+            unit,
+            tva_rate,
+            line_ht,
+            line_ttc,
+        ): (
+            String,
+            Option<i64>,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            i64,
+            i64,
+            i64,
+        ) = tx
+            .query_row(
+                "SELECT sale_id, product_id, barcode, name_fr, name_ar, unit_price_ct,
+                        qty_milli, unit, tva_rate, line_ht_ct, line_ttc_ct
+                 FROM sale_items WHERE id = ?1",
+                [sid],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                    ))
+                },
+            )
+            .map_err(|_| format!("[fiscal] sale item {sid} is not part of sale {sale_id}"))?;
+        if owner != sale_id {
+            return Err(format!(
+                "[fiscal] sale item {sid} is not part of sale {sale_id}"
+            ));
+        }
+        if ![0, 9, 19].contains(&tva_rate) {
+            return Err(format!(
+                "[fiscal] bad TVA rate on sale item {sid}: {tva_rate}"
+            ));
+        }
+        // Canonical cumulative guard (TS DAL): only APPROVED returns consume
+        // the sold quantity — DRAFTs are provisional until a manager signs.
+        // The atomic recheck at approve closes the double-draft race.
+        let used: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(ri.qty_milli), 0) FROM return_items ri
+                 JOIN returns r ON r.id = ri.return_id
+                 WHERE r.sale_id = ?1 AND ri.sale_item_id = ?2 AND r.status = 'APPROVED'",
+                rusqlite::params![sale_id, sid],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if used + qty > sale_qty {
+            return Err(format!(
+                "[fiscal] return qty exceeds remaining (item {sid}: sold {sale_qty}, already returned {used})"
+            ));
+        }
+        let lht = half_up(line_ht * qty, sale_qty);
+        let lttc = half_up(line_ttc * qty, sale_qty);
+        refund_ct += lttc;
+        rows.push((
+            sid, product_id, barcode, name_fr, name_ar, unit_price, qty, unit, tva_rate, lht, lttc,
+        ));
+    }
+    if refund_ct <= 0 {
+        return Err("[fiscal] return refund must be > 0".to_string());
+    }
+    let rid = uuid::Uuid::new_v4().to_string();
+    let now = now_iso();
+    tx.execute(
+        "INSERT INTO returns (id, sale_id, invoice_number, client_id, client_name,
+          payment_method, reason, reason_note, refund_ct, status, actor,
+          sale_day, created_at, client_return_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'DRAFT', ?10, ?11, ?12, ?13)",
+        rusqlite::params![
+            rid,
+            sale_id,
+            invoice_number,
+            client_id,
+            client_name,
+            payment,
+            reason,
+            reason_note.filter(|n| !n.trim().is_empty()),
+            refund_ct,
+            actor,
+            sale_day,
+            now,
+            client_key.filter(|k| !k.trim().is_empty())
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    for (sid, product_id, barcode, name_fr, name_ar, unit_price, qty, unit, tva_rate, lht, lttc) in
+        &rows
+    {
+        let ltva = lttc - lht;
+        tx.execute(
+            "INSERT INTO return_items (return_id, sale_item_id, product_id, barcode,
+              name_fr, name_ar, unit_price_ct, qty_milli, unit, tva_rate,
+              line_ht_ct, line_tva_ct, line_ttc_ct)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                rid, sid, product_id, barcode, name_fr, name_ar, unit_price, qty, unit, tva_rate,
+                lht, ltva, lttc
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    audit_return(
+        &tx,
+        actor,
+        "return.create",
+        &rid,
+        format!("draft for sale {sale_id}: {refund_ct}ct ({reason})"),
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "id": rid, "refund_ct": refund_ct }))
+}
+
+pub fn return_approve(
+    conn: &mut Connection,
+    id: &str,
+    approver: &str,
+    approver_role: &str,
+    today: &str,
+) -> Result<Value, String> {
+    if !["manager", "owner"].contains(&approver_role) {
+        return Err("[fiscal] returns need a manager or owner to approve".to_string());
+    }
+    let who = approver.trim();
+    if who.is_empty() {
+        return Err("[fiscal] approver is required".to_string());
+    }
+    if !valid_day(today) {
+        return Err("[fiscal] today must be YYYY-MM-DD".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let (status, sale_id, invoice_number, payment, refund_ct, actor, sale_day): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+    ) = tx
+        .query_row(
+            "SELECT status, sale_id, invoice_number, payment_method, refund_ct, actor, sale_day
+             FROM returns WHERE id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            },
+        )
+        .map_err(|_| format!("[fiscal] return not found: {id}"))?;
+    if status != "DRAFT" {
+        return Err(format!(
+            "[fiscal] return {id} is already decided ({status})"
+        ));
+    }
+    let sale_status: String = tx
+        .query_row("SELECT status FROM sales WHERE id = ?1", [&sale_id], |r| {
+            r.get(0)
+        })
+        .map_err(|_| format!("[fiscal] sale not found: {sale_id}"))?;
+    if sale_status != "COMPLETED" {
+        return Err("[fiscal] the original sale is no longer COMPLETED".to_string());
+    }
+    return_window_ok(&sale_day, today)?;
+    // Canonical posting day (TS DAL): the approval lands on the OPEN day,
+    // never backdated — even when the source sale day is long closed.
+    let posting_day = today.to_string();
+    if day_locked(&tx, &posting_day)? {
+        return Err(format!(
+            "[fiscal] day {posting_day} is already legally closed (Z FINALISÉ) — approve refused"
+        ));
+    }
+    // Owner decision 2026-11-05: above 5000 DZD the approver must differ from
+    // the creator — compared by login name (PIN identity is lane-side).
+    if refund_ct > RETURN_TWO_PERSON_CT && who == actor {
+        return Err("[fiscal] refunds above 5000 DZD need a second person to approve".to_string());
+    }
+    // Atomic recheck (TS DAL): a concurrent approval can never double-return.
+    let items: Vec<(i64, i64, Option<i64>)> = {
+        let mut st = tx
+            .prepare(
+                "SELECT ri.sale_item_id, ri.qty_milli, ri.product_id FROM return_items ri
+                 JOIN sale_items si ON si.id = ri.sale_item_id
+                 WHERE ri.return_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let lines = st
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for line in lines {
+            out.push(line.map_err(|e| e.to_string())?);
+        }
+        out
+    };
+    for (sale_item_id, qty, _) in &items {
+        let sold_qty: i64 = tx
+            .query_row(
+                "SELECT qty_milli FROM sale_items WHERE id = ?1",
+                [sale_item_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let already: i64 = tx
+            .query_row(
+                "SELECT COALESCE(SUM(ri.qty_milli), 0) FROM return_items ri
+                 JOIN returns r ON r.id = ri.return_id
+                 WHERE r.sale_id = ?1 AND ri.sale_item_id = ?2 AND r.status = 'APPROVED'",
+                rusqlite::params![sale_id, sale_item_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if already + qty > sold_qty {
+            return Err(format!(
+                "[fiscal] line {sale_item_id} was already returned by a concurrent approval"
+            ));
+        }
+    }
+    let session: Option<String> = tx
+        .query_row(
+            "SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if payment == "ESPECES" && session.is_none() {
+        return Err("[fiscal] cash refunds need an OPEN cash session".to_string());
+    }
+    let year: i64 = posting_day
+        .get(0..4)
+        .ok_or("[fiscal] bad posting day")?
+        .parse()
+        .map_err(|_| "[fiscal] bad posting day year")?;
+    let number = format!("RET-{year}-{n:06}", n = bump_seq(&tx, "RET", year)?);
+    let now = now_iso();
+    tx.execute(
+        "UPDATE returns SET status = 'APPROVED', return_number = ?1,
+          approver = ?2, posting_day = ?3, decided_at = ?4 WHERE id = ?5",
+        rusqlite::params![number, who, posting_day, now, id],
+    )
+    .map_err(|e| e.to_string())?;
+    // Stock flows back in (null product = ad-hoc line, nothing to restock).
+    for (_, qty, product_id) in &items {
+        if let Some(pid) = product_id {
+            tx.execute(
+                "UPDATE products SET stock_milli = stock_milli + ?1 WHERE id = ?2",
+                rusqlite::params![qty, pid],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    if payment == "ESPECES" {
+        let sid = session.clone().unwrap_or_default();
+        tx.execute(
+            "INSERT INTO cash_movements (id, session_id, movement_type, amount_ct, reason, created_at)
+             VALUES (?1, ?2, 'WITHDRAWAL', ?3, ?4, ?5)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                sid,
+                refund_ct,
+                format!("Retour {number} ({invoice_number})"),
+                now,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    audit_return(
+        &tx,
+        who,
+        "return.approve",
+        id,
+        format!("{number} {invoice_number} refund={refund_ct} creator={actor}"),
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "return_number": number, "refund_ct": refund_ct, "posting_day": posting_day,
+    }))
+}
+
+pub fn return_reject(
+    conn: &mut Connection,
+    id: &str,
+    actor: &str,
+    note: Option<String>,
+) -> Result<Value, String> {
+    let who = actor.trim();
+    if who.is_empty() {
+        return Err("[fiscal] reject actor is required".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let (status, invoice_number): (String, String) = tx
+        .query_row(
+            "SELECT status, invoice_number FROM returns WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| format!("[fiscal] return not found: {id}"))?;
+    if status != "DRAFT" {
+        return Err(format!(
+            "[fiscal] return {id} is already decided ({status})"
+        ));
+    }
+    let now = now_iso();
+    let note_txt = note.unwrap_or_default();
+    tx.execute(
+        "UPDATE returns SET status = 'REJECTED', approver = ?1, decided_at = ?2,
+          reason_note = COALESCE(NULLIF(?3, ''), reason_note)
+         WHERE id = ?4",
+        rusqlite::params![who, now, note_txt, id],
+    )
+    .map_err(|e| e.to_string())?;
+    audit_return(
+        &tx,
+        who,
+        "return.reject",
+        id,
+        format!(
+            "{invoice_number} note={}",
+            note_txt.chars().take(140).collect::<String>()
+        ),
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "id": id, "status": "REJECTED" }))
+}
+
+pub fn return_get(conn: &Connection, id: &str) -> Result<Value, String> {
+    let head: Option<Value> = conn
+        .query_row(
+            "SELECT id, return_number, sale_id, invoice_number, client_id, client_name,
+              payment_method, reason, reason_note, refund_ct, status, actor, approver,
+              sale_day, posting_day, decided_at, created_at, client_return_key
+             FROM returns WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, String>(0)?,
+                    "return_number": r.get::<_, Option<String>>(1)?,
+                    "sale_id": r.get::<_, String>(2)?,
+                    "invoice_number": r.get::<_, String>(3)?,
+                    "client_id": r.get::<_, Option<i64>>(4)?,
+                    "client_name": r.get::<_, Option<String>>(5)?,
+                    "payment_method": r.get::<_, String>(6)?,
+                    "reason": r.get::<_, String>(7)?,
+                    "reason_note": r.get::<_, Option<String>>(8)?,
+                    "refund_ct": r.get::<_, i64>(9)?,
+                    "status": r.get::<_, String>(10)?,
+                    "actor": r.get::<_, String>(11)?,
+                    "approver": r.get::<_, String>(12)?,
+                    "sale_day": r.get::<_, String>(13)?,
+                    "posting_day": r.get::<_, Option<String>>(14)?,
+                    "decided_at": r.get::<_, Option<String>>(15)?,
+                    "created_at": r.get::<_, String>(16)?,
+                    "client_return_key": r.get::<_, Option<String>>(17)?,
+                }))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some(mut h) = head else {
+        return Ok(Value::Null);
+    };
+    let mut st = conn
+        .prepare(
+            "SELECT id, sale_item_id, product_id, barcode, name_fr, name_ar,
+              unit_price_ct, qty_milli, unit, tva_rate,
+              line_ht_ct, line_tva_ct, line_ttc_ct
+             FROM return_items WHERE return_id = ?1 ORDER BY id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let lines = st
+        .query_map([id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?,
+                "sale_item_id": r.get::<_, i64>(1)?,
+                "product_id": r.get::<_, Option<i64>>(2)?,
+                "barcode": r.get::<_, String>(3)?,
+                "name_fr": r.get::<_, String>(4)?,
+                "name_ar": r.get::<_, String>(5)?,
+                "unit_price_ct": r.get::<_, i64>(6)?,
+                "qty_milli": r.get::<_, i64>(7)?,
+                "unit": r.get::<_, String>(8)?,
+                "tva_rate": r.get::<_, i64>(9)?,
+                "line_ht_ct": r.get::<_, i64>(10)?,
+                "line_tva_ct": r.get::<_, i64>(11)?,
+                "line_ttc_ct": r.get::<_, i64>(12)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut arr = Vec::new();
+    for line in lines {
+        arr.push(line.map_err(|e| e.to_string())?);
+    }
+    h["items"] = Value::Array(arr);
+    Ok(h)
+}
+
+fn return_head_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
+    Ok(serde_json::json!({
+        "id": r.get::<_, String>(0)?,
+        "return_number": r.get::<_, Option<String>>(1)?,
+        "sale_id": r.get::<_, String>(2)?,
+        "invoice_number": r.get::<_, String>(3)?,
+        "payment_method": r.get::<_, String>(4)?,
+        "status": r.get::<_, String>(5)?,
+        "reason": r.get::<_, String>(6)?,
+        "actor": r.get::<_, String>(7)?,
+        "approver": r.get::<_, String>(8)?,
+        "sale_day": r.get::<_, String>(9)?,
+        "posting_day": r.get::<_, Option<String>>(10)?,
+        "refund_ct": r.get::<_, i64>(11)?,
+        "created_at": r.get::<_, String>(12)?,
+    }))
+}
+
+pub fn return_list(conn: &Connection, status: Option<String>) -> Result<Value, String> {
+    const BASE: &str = "SELECT id, return_number, sale_id, invoice_number, payment_method,
+          status, reason, actor, approver, sale_day, posting_day, refund_ct, created_at
+         FROM returns";
+    let mut arr = Vec::new();
+    match status.as_deref() {
+        Some(s) if ["DRAFT", "APPROVED", "REJECTED"].contains(&s) => {
+            let mut st = conn
+                .prepare(&format!(
+                    "{BASE} WHERE status = ?1 ORDER BY created_at DESC, id DESC LIMIT 200"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = st
+                .query_map([s], return_head_json)
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                arr.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+        _ => {
+            let mut st = conn
+                .prepare(&format!(
+                    "{BASE} ORDER BY created_at DESC, id DESC LIMIT 200"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = st
+                .query_map([], return_head_json)
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                arr.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+    }
+    Ok(Value::Array(arr))
+}
+
 /// #004 (Phase A): legal day close — recompute from the ledger, lock the
 /// day, chain the hash. Native twin of TS finalizeZReport (which additionally
 /// verifies caller-supplied totals against the same ledger query).
@@ -776,7 +1517,7 @@ pub fn z_close(
     }
     // F2: aggregate the LOCAL day's UTC window, never the UTC prefix.
     let (wstart, wend) = day_bounds_utc(day)?;
-    let (n, ht, b0, b9, a9, b19, a19, tva, timbre, ttc, cash, cib, dah, cred, first, last): (
+    let (n, ht, _b0, b9, a9, b19, a19, tva, timbre, ttc, cash, cib, dah, cred, first, last): (
         i64,
         i64,
         i64,
@@ -838,6 +1579,73 @@ pub fn z_close(
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    // v1.5.0 (RETURNS): approved returns posted this day net the sales down.
+    // Timbre is NOT netted (stamp duty on the original document, non-refundable).
+    // Mirrors the TS computeDayAggregates return leg exactly (posting_day = day).
+    let (rn, rht, rb9, ra9, rb19, ra19, rtva, rttc, rcash, rcib, rdah, rcred): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = tx
+        .query_row(
+            "SELECT COUNT(*),
+               COALESCE(SUM(ri.line_ht_ct), 0),
+               COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_ht_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_tva_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_ht_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_tva_ct ELSE 0 END), 0),
+               COALESCE(SUM(ri.line_tva_ct), 0),
+               COALESCE(SUM(ri.line_ttc_ct), 0),
+               COALESCE(SUM(CASE WHEN r.payment_method = 'ESPECES' THEN ri.line_ttc_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN r.payment_method = 'CIB' THEN ri.line_ttc_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN r.payment_method = 'DAHABIYA' THEN ri.line_ttc_ct ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN r.payment_method = 'CREDIT' THEN ri.line_ttc_ct ELSE 0 END), 0)
+             FROM return_items ri JOIN returns r ON r.id = ri.return_id
+             WHERE r.status = 'APPROVED' AND r.posting_day = ?1",
+            [day],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                ))
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    // TVA-0 base is derived (HT minus the 9/19 bases) so the tier invariant
+    // can never drift; every money column below is NET of approved returns.
+    let (nht, nb9, na9, nb19, na19, ntva, nttc, ncash, ncib, ndah, ncred) = (
+        ht - rht,
+        b9 - rb9,
+        a9 - ra9,
+        b19 - rb19,
+        a19 - ra19,
+        tva - rtva,
+        ttc - rttc,
+        cash - rcash,
+        cib - rcib,
+        dah - rdah,
+        cred - rcred,
+    );
+    let nb0 = nht - nb9 - nb19;
     let prev: String = match tx.query_row(
         "SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1",
         [],
@@ -847,20 +1655,22 @@ pub fn z_close(
         Err(rusqlite::Error::QueryReturnedNoRows) => "0".repeat(64),
         Err(e) => return Err(e.to_string()),
     };
-    let number = format!("Z-{year}-{:06}", bump_seq(&tx, "Z", year)?);
-    let hash = z_hash(&prev, &number, day, ttc, timbre);
+    let number = format!("Z-{year}-{n:06}", n = bump_seq(&tx, "Z", year)?);
+    // The fiscal hash chains the NET day totals (same inputs as the TS lane).
+    let hash = z_hash(&prev, &number, day, nttc, timbre);
     tx.execute(
         "INSERT INTO z_reports (report_number, day, opening_time, closing_time,
           total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
           tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
-          credit_collected_ct, first_invoice_number, last_invoice_number,
+          credit_collected_ct, returns_count, returns_total_ttc_ct,
+          first_invoice_number, last_invoice_number,
           prev_hash, hash, finalized, close_kind)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,1,'DAY')",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,1,'DAY')",
         rusqlite::params![
             number, day, opening_time, closing_time,
-            n, ht, b0, b9, a9, b19, a19, tva, timbre, ttc,
-            cash, cib, dah, cred, coll,
+            n, nht, nb0, nb9, na9, nb19, na19, ntva, timbre, nttc,
+            ncash, ncib, ndah, ncred, coll, rn, rttc,
             first.unwrap_or_default(), last.unwrap_or_default(),
             prev, hash,
         ],
@@ -870,14 +1680,17 @@ pub fn z_close(
     Ok(serde_json::json!({
         "report_number": number, "day": day,
         "opening_time": opening_time, "closing_time": closing_time,
-        "sales_count": n, "total_ht_ct": ht, "total_tva_ct": tva,
-        "total_timbre_ct": timbre, "total_ttc_ct": ttc,
+        "sales_count": n, "total_ht_ct": nht, "total_tva_ct": ntva,
+        "total_timbre_ct": timbre, "total_ttc_ct": nttc,
+        "returns_count": rn, "returns_total_ttc_ct": rttc,
         "hash": hash, "prev_hash": prev,
     }))
 }
 
 /// #003 (Phase A): day summary for the Z lane — read-only. COMPLETED sales
 /// only; voids counted separately. The legal day-LOCK lives in #004.
+/// v1.5.0: money is NET of approved returns posted this day (same ledger as
+/// z_close); timbre stays gross (non-refundable, accountant to confirm).
 pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
     if day.len() != 10 || day.as_bytes()[4] != b'-' || day.as_bytes()[7] != b'-' {
         return Err("[fiscal] day must be YYYY-MM-DD".to_string());
@@ -899,14 +1712,25 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    let (returns_count, returns_total): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(ri.line_ttc_ct), 0)
+             FROM return_items ri JOIN returns r ON r.id = ri.return_id
+             WHERE r.status = 'APPROVED' AND r.posting_day = ?1",
+            [day],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
     // #004: the UI locks the void surface (and shows JOUR VERROUILLÉ) when
     // a legal DAY close already freezes the day.
     let locked = day_locked(conn, day)?;
     Ok(serde_json::json!({
         "day": day,
         "sales_count": count,
-        "total_ttc_ct": total.unwrap_or(0),
+        "total_ttc_ct": total.unwrap_or(0) - returns_total,
         "voids_count": voids,
+        "returns_count": returns_count,
+        "returns_total_ttc_ct": returns_total,
         "closed": locked,
     }))
 }
@@ -2198,6 +3022,229 @@ mod tests {
         assert!(void_sale(&mut db, "s1", "again", "owner").is_err()); // already voided
         assert!(void_sale(&mut db, "s1", "   ", "owner").is_err()); // reason required
         assert!(void_sale(&mut db, "nope", "reason", "owner").is_err()); // unknown id
+    }
+
+    #[test]
+    fn returns_happy_path_mints_ret_restocks_and_withdraws() {
+        // v1.5.0: draft (no number) → approve (RET-YYYY-XXXXXX, stock back,
+        // WITHDRAWAL, audit). Mirrors the TS returns.test.ts happy path.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("R-1")), &sale_items()).unwrap();
+        cash_open(&db, "sess-ret", "Amine", 1_000_000).unwrap();
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        let d = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            Some("k-ret-1".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        assert_eq!(d["refund_ct"], 36000);
+        let id = d["id"].as_str().unwrap().to_string();
+        // Idempotent retry: same key returns the same draft, no second row.
+        let d2 = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            Some("k-ret-1".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        assert_eq!(d2["id"].as_str().unwrap(), id);
+        let got = return_get(&db, &id).unwrap();
+        assert_eq!(got["status"], "DRAFT");
+        assert!(got["return_number"].is_null());
+        assert_eq!(got["items"].as_array().unwrap().len(), 1);
+        let a = return_approve(&mut db, &id, "karim", "manager", "2026-11-01").unwrap();
+        assert_eq!(a["return_number"], "RET-2026-000001");
+        assert_eq!(a["refund_ct"], 36000);
+        // Stock flowed back (2000 milli of LAIT returned to 48000).
+        let stock: i64 = db
+            .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stock, 48000);
+        // The refund rode the cash journal as a WITHDRAWAL.
+        let w: i64 = db
+            .query_row(
+                "SELECT amount_ct FROM cash_movements
+                 WHERE session_id = 'sess-ret' AND movement_type = 'WITHDRAWAL'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(w, 36000);
+        // Both lane actions are audited.
+        for action in ["return.create", "return.approve"] {
+            let n: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_log WHERE action = ?1",
+                    [action],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "missing audit {action}");
+        }
+        // Decided returns are terminal.
+        assert!(return_approve(&mut db, &id, "owner2", "owner", "2026-11-01").is_err());
+        assert!(return_reject(&mut db, &id, "owner2", None).is_err());
+    }
+
+    #[test]
+    fn returns_guards_hold_window_roles_session_and_reject() {
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("R-2")), &sale_items()).unwrap();
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        // Bad reason, unknown sale, over-qty, empty actor.
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "NOPE",
+            None,
+            "lina",
+            None,
+            "2026-11-01"
+        )
+        .is_err());
+        assert!(return_create(
+            &mut db,
+            "nope",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            None,
+            "2026-11-01"
+        )
+        .is_err());
+        let over = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2001 }]).to_string();
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &over,
+            "DEFECT",
+            None,
+            "lina",
+            None,
+            "2026-11-01"
+        )
+        .is_err());
+        // Window: sale day is 2026-11-01 — day 7 passes, day 8 and the past refuse.
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            Some("k-w7".to_string()),
+            "2026-11-08"
+        )
+        .is_ok());
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            None,
+            "2026-11-09"
+        )
+        .is_err());
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            None,
+            "2026-10-31"
+        )
+        .is_err());
+        // Cashier can never approve; ESPECES needs an OPEN session.
+        let d = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "WRONG_ITEM",
+            None,
+            "lina",
+            Some("k-g1".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        assert!(return_approve(&mut db, &id, "lina", "cashier", "2026-11-01").is_err());
+        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01").is_err()); // no session
+        cash_open(&db, "sess-g", "Amine", 1_000_000).unwrap();
+        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01").is_ok());
+        // Reject path on a second draft. The first line is fully consumed by
+        // the approval above, so the reject draft targets the second line
+        // (HUILE, 1000 milli) — a full-qty retry on the first line must now
+        // fail the cumulative guard instead.
+        let item2_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1 OFFSET 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items2 = serde_json::json!([{ "saleItemId": item2_id, "qty_milli": 1000 }]).to_string();
+        // The consumed line is now fenced: any further full-qty draft fails.
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            None,
+            "2026-11-01"
+        )
+        .is_err());
+        let d2 = return_create(
+            &mut db,
+            "s1",
+            &items2,
+            "CHANGED_MIND",
+            None,
+            "lina",
+            Some("k-g2".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        let id2 = d2["id"].as_str().unwrap().to_string();
+        let r = return_reject(&mut db, &id2, "karim", Some("client kept it".to_string())).unwrap();
+        assert_eq!(r["status"], "REJECTED");
+        let got = return_get(&db, &id2).unwrap();
+        assert_eq!(got["status"], "REJECTED");
+        // Unknown id reads as null JSON, never a throw.
+        assert!(return_get(&db, "does-not-exist").unwrap().is_null());
     }
 
     #[test]
