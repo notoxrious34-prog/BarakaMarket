@@ -16,6 +16,7 @@ import type {
 import { buildThermalSettlementQuittance, buildThermalZReport } from '../src/hardware/escpos.js';
 import { isValidPinFormat } from '../src/core/security.js';
 import { can, type Role } from '../src/core/rbac.js';
+import type { ReturnReasonCode, ReturnStatus } from '../src/types/index.js';
 import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
@@ -146,6 +147,68 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       }
       baraka.logAudit({ actor, action: action as never, detail });
       res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // v1.5.0 — returns (draft → approve/reject). POSTs need the loopback
+  // token (writes); both GETs stay open like the rest of the read lane.
+  app.post('/api/returns', (req, res) => {
+    try {
+      const { sale_id, lines, reason, reason_note, actor, client_return_key } = req.body as {
+        sale_id?: string; lines?: { saleItemId?: number; qty_milli?: number }[];
+        reason?: ReturnReasonCode; reason_note?: string; actor?: string; client_return_key?: string;
+      };
+      if (!sale_id || !Array.isArray(lines)) {
+        res.status(400).json({ error: 'body must be {sale_id, lines: [{saleItemId, qty_milli}], reason, actor}' });
+        return;
+      }
+      res.status(201).json(baraka.createReturnDraft({
+        sale_id, lines: lines as never, reason: reason as never,
+        reason_note, actor: actor ?? 'local', client_return_key,
+      }));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/returns', (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status as ReturnStatus : undefined;
+    res.json(baraka.listReturns(status));
+  });
+
+  app.get('/api/returns/:id', (req, res) => {
+    const id = String(req.params.id ?? '');
+    if (!id) { res.status(400).json({ error: 'bad id' }); return; }
+    const got = baraka.getReturnOrNull(id);
+    if (!got) { res.status(404).json({ error: 'return not found' }); return; }
+    res.json(got);
+  });
+
+  app.post('/api/returns/:id/approve', (req, res) => {
+    try {
+      const id = String(req.params.id ?? '');
+      const { approver, approver_role } = req.body as { approver?: string; approver_role?: Role };
+      if (!id || !approver || !approver_role) {
+        res.status(400).json({ error: 'body must be {approver, approver_role}' });
+        return;
+      }
+      res.json(baraka.approveReturn(id, approver, approver_role));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.post('/api/returns/:id/reject', (req, res) => {
+    try {
+      const id = String(req.params.id ?? '');
+      const { actor, note } = req.body as { actor?: string; note?: string };
+      if (!id || !actor) {
+        res.status(400).json({ error: 'body must be {actor}' });
+        return;
+      }
+      res.json(baraka.rejectReturn(id, actor, note));
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

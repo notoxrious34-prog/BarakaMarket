@@ -443,6 +443,64 @@ test('api: CORS preflight passes on the loopback; token gate intact', async () =
   assert.equal(get.headers.get('access-control-allow-origin'), '*');
 });
 
+test('api: v1.5.0 returns round-trip — draft → approve → GET, 401 without token, RET numbered', async () => {
+  // A shift may already be open from an earlier test — either way we need
+  // one live session for the ESPECES refund movement.
+  const o = await fetch(`${base}/api/cash/open`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cashierName: 'RET-API', openingFloatCt: 1000000 }),
+  });
+  assert.ok(o.status === 201 || o.status === 400, `cash/open usable (got ${o.status})`);
+  let sessId: string | null = null;
+  if (o.status === 201) {
+    sessId = (await o.json() as { id: string }).id;
+  } else {
+    const live = await (await fetch(`${base}/api/cash/active`)).json() as { session: { id: string } } | null;
+    sessId = live?.session?.id ?? null;
+  }
+  const today = { ...header, created_at: new Date().toISOString() };
+  const s = await (await fetch(`${base}/api/sales`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ header: today, items, clientSaleKey: `RET-API-${Date.now().toString(36)}` }),
+  })).json() as { id: string };
+  const itemIds = (baraka.db.prepare('SELECT id FROM sale_items WHERE sale_id = ? ORDER BY id ASC').all(s.id) as { id: number }[]).map(r => r.id);
+  assert.equal(itemIds.length, 4);
+  // unauthenticated write refused
+  const denied = await _rawFetch(`${base}/api/returns`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sale_id: s.id, lines: [{ saleItemId: itemIds[0], qty_milli: 2000 }], reason: 'DEFECT', actor: 'lina' }),
+  });
+  assert.equal(denied.status, 401);
+  // draft (201, no RET number yet)
+  const d = await (await fetch(`${base}/api/returns`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sale_id: s.id, lines: [{ saleItemId: itemIds[0], qty_milli: 2000 }], reason: 'DEFECT', actor: 'lina' }),
+  })).json() as { id: string; refund_ct: number };
+  assert.equal(d.refund_ct, 36000);
+  const g0 = await (await fetch(`${base}/api/returns/${d.id}`)).json() as { status: string; return_number: null };
+  assert.equal(g0.status, 'DRAFT');
+  assert.equal(g0.return_number, null);
+  // approve mints RET
+  const a = await (await fetch(`${base}/api/returns/${d.id}/approve`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ approver: 'karim', approver_role: 'manager' }),
+  })).json() as { return_number: string; refund_ct: number };
+  assert.match(a.return_number, /^RET-\d{4}-\d{6}$/);
+  assert.equal(a.refund_ct, 36000);
+  // list + audit
+  const list = await (await fetch(`${base}/api/returns?status=APPROVED`)).json() as { id: string }[];
+  assert.ok(list.some(r => String(r.id) === String(d.id)), 'approved return listed');
+  const audit = await (await fetch(`${base}/api/audit?limit=100`)).json() as { action: string; actor: string }[];
+  assert.ok(audit.some(x => x.action === 'return.approve' && x.actor === 'karim'), 'return.approve audited');
+  // Leave the lane as we found it: close the shift we opened so the T10/B4
+  // close-and-z tests below still own a fresh session.
+  if (sessId) {
+    await fetch(`${base}/api/cash/close-and-z`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: sessId, countedCashCt: 1000000, actor: 'ret-api' }),
+    });
+  }
+});
 test('api: T10 void writes a sale.void audit row (actor + reason)', async () => {
   const s = await (await fetch(`${base}/api/sales`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
