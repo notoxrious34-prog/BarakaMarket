@@ -424,3 +424,30 @@ test('B-credit (supermarket): CREDIT sale posts debt; approved return reverses i
     for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
   }
 });
+
+test('V-credit: voiding a CREDIT sale gives the debt back; void after approved return refused', () => {
+  const p = tmpFile('vcredit');
+  try {
+    const b = openBarakaDb(p);
+    b.upsertProduct(PROD);
+    b.db.prepare('INSERT INTO clients (id, name, phone, credit_balance_ct, max_credit_limit_ct) VALUES (31, ?, ?, 0, 0)').run('CLIENT 31', '0550000000');
+    const bal = () => (b.db.prepare('SELECT credit_balance_ct FROM clients WHERE id = 31').get() as { credit_balance_ct: number }).credit_balance_ct;
+    const ttcOf = (id: string) => (b.getSale(id) as Record<string, unknown>).total_ttc_ct as number;
+    // Void returns the posted debt, exactly once.
+    const s1 = recordTodaySale(b, 'CREDIT', 31);
+    assert.equal(bal(), ttcOf(s1.id));
+    b.voidSale(s1.id, 'erreur de saisie', 'karim');
+    assert.equal(bal(), 0);
+    // A sale with an approved return can no longer be voided (no double refund).
+    const s2 = recordTodaySale(b, 'CREDIT', 31);
+    const ttc2 = ttcOf(s2.id);
+    const [la] = saleItemIds(b, s2.id);
+    const d = b.createReturnDraft({ sale_id: s2.id, lines: [{ saleItemId: la, qty_milli: 2000 }], reason: 'CHANGED_MIND', actor: 'lina' });
+    const ap = b.approveReturn(d.id, 'karim', 'manager');
+    assert.throws(() => b.voidSale(s2.id, 'trop tard', 'karim'), /approved returns/);
+    assert.equal(bal(), ttc2 - ap.refund_ct);
+    b.close();
+  } finally {
+    for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
+  }
+});

@@ -888,15 +888,47 @@ pub fn void_sale(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let (invoice, status, created_at): (String, String, String) = tx
+    let (invoice, status, created_at, payment, client_id, ttc): (
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+    ) = tx
         .query_row(
-            "SELECT invoice_number, status, created_at FROM sales WHERE id = ?1",
+            "SELECT invoice_number, status, created_at, payment_method, client_id, total_ttc_ct
+             FROM sales WHERE id = ?1",
             [sale_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .map_err(|_| format!("[fiscal] sale not found: {sale_id}"))?;
     if status == "CANCELLED" {
         return Err("[fiscal] sale already voided".to_string());
+    }
+    // V-credit: money already given back via an approved return must never
+    // be given back twice — return the remaining lines instead of voiding.
+    let decided: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM returns WHERE sale_id = ?1 AND status = 'APPROVED'",
+            [sale_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if decided > 0 {
+        return Err(
+            "[fiscal] sale has approved returns — return the remaining lines instead of voiding"
+                .to_string(),
+        );
     }
     // #004/F2: a legally closed LOCAL day is frozen — voids to it are refused.
     // (COUNT runs on the tx: same Immediate lock, no TOCTOU.)
@@ -924,6 +956,17 @@ pub fn void_sale(
         rusqlite::params![sale_id, invoice, reason, voided_by],
     )
     .map_err(|e| e.to_string())?;
+    // V-credit: voiding a CREDIT sale gives the posted debt back — same
+    // txn, exact mirror of the posting at record_sale (B-credit).
+    if payment == "CREDIT" {
+        if let Some(c) = client_id {
+            tx.execute(
+                "UPDATE clients SET credit_balance_ct = credit_balance_ct - ?1 WHERE id = ?2",
+                rusqlite::params![ttc, c],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "id": sale_id, "invoice_number": invoice, "status": "CANCELLED" }))
 }
@@ -4073,6 +4116,73 @@ mod tests {
             )
             .unwrap();
         assert!(detail.contains("cred-36000"), "detail: {detail}");
+    }
+
+    #[test]
+    fn v_credit_void_gives_debt_back_and_void_after_return_refused() {
+        // V-credit: voiding a CREDIT sale reverses the B-credit posting, but
+        // a sale with an approved return can no longer be voided (no double
+        // refund: the WITHDRAWAL + debt reversal already happened).
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO clients (id, name, credit_balance_ct) VALUES (8, 'Wac', 0)",
+            [],
+        )
+        .unwrap();
+        let credit_header = |tag: &str| {
+            let mut h = sale_header(Some(tag));
+            h["payment_method"] = serde_json::json!("CREDIT");
+            h["client_id"] = serde_json::json!(8);
+            h["totals"]["timbre_ct"] = serde_json::json!(0);
+            h["totals"]["total_ttc_ct"] = serde_json::json!(177600);
+            h["amount_paid_ct"] = serde_json::json!(177600);
+            h["amount_returned_ct"] = serde_json::json!(0);
+            h
+        };
+        let bal = |db: &mut Connection| -> i64 {
+            db.query_row(
+                "SELECT credit_balance_ct FROM clients WHERE id = 8",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        record_sale(&mut db, &credit_header("V-1"), &sale_items()).unwrap();
+        assert_eq!(bal(&mut db), 177600);
+        void_sale(&mut db, "s1", "erreur de saisie", "karim").unwrap();
+        assert_eq!(bal(&mut db), 0);
+
+        let mut db2 = memdb();
+        db2.execute(
+            "INSERT INTO clients (id, name, credit_balance_ct) VALUES (8, 'Wac', 0)",
+            [],
+        )
+        .unwrap();
+        record_sale(&mut db2, &credit_header("V-2"), &sale_items()).unwrap();
+        let item_id: i64 = db2
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        let d = return_create(
+            &mut db2,
+            "s1",
+            &items,
+            "CHANGED_MIND",
+            None,
+            "lina",
+            None,
+            "2026-11-01",
+        )
+        .unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        return_approve(&mut db2, &id, "karim", "manager", "2026-11-01", None).unwrap();
+        let err = void_sale(&mut db2, "s1", "trop tard", "karim").unwrap_err();
+        assert!(err.contains("approved returns"), "err: {err}");
+        assert_eq!(bal(&mut db2), 177600 - 36000);
     }
 
     #[test]

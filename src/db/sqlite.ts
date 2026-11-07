@@ -2107,10 +2107,14 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       if (!reason.trim()) throw new Error('[db] void reason is required (legal journal)');
       db.exec('BEGIN IMMEDIATE');
       try {
-        const sale = db.prepare('SELECT id, invoice_number, status, created_at FROM sales WHERE id = ?').get(saleId) as
-          | { id: string; invoice_number: string; status: string; created_at: string } | undefined;
+        const sale = db.prepare('SELECT id, invoice_number, status, created_at, payment_method, client_id, total_ttc_ct FROM sales WHERE id = ?').get(saleId) as
+          | { id: string; invoice_number: string; status: string; created_at: string; payment_method: string; client_id: number | null; total_ttc_ct: number } | undefined;
         if (!sale) throw new Error(`[db] sale not found: ${saleId}`);
         if (sale.status === 'CANCELLED') throw new Error('[db] sale already voided');
+        // V-credit: money already given back via an approved return must never
+        // be given back twice — return the remaining lines instead of voiding.
+        const decided = db.prepare(`SELECT COUNT(*) AS n FROM returns WHERE sale_id = ? AND status = 'APPROVED'`).get(saleId) as { n: number };
+        if (decided.n > 0) throw new Error('[db] sale has approved returns — return the remaining lines instead of voiding');
         // #004/F2: voids land in the LOCAL fiscal day of the sale.
         const day = fiscalDayISO(new Date(sale.created_at));
         if (isDayLocked(db, day)) {
@@ -2120,6 +2124,12 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         db.prepare(
           'INSERT INTO void_log (sale_id, invoice_number, reason, voided_by, voided_at) VALUES (?, ?, ?, ?, ?)',
         ).run(saleId, sale.invoice_number, reason, voidedBy, new Date().toISOString());
+        // V-credit: voiding a CREDIT sale gives the posted debt back — same
+        // txn, exact mirror of the posting at recordSale (B-credit).
+        if (sale.payment_method === 'CREDIT' && sale.client_id !== null) {
+          db.prepare('UPDATE clients SET credit_balance_ct = credit_balance_ct - ? WHERE id = ?')
+            .run(sale.total_ttc_ct, sale.client_id);
+        }
         db.exec('COMMIT');
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
