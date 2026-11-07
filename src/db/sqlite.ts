@@ -2055,6 +2055,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       if (!(RETURN_REASONS as readonly string[]).includes(input.reason)) {
         throw new Error(`[db] bad return reason: ${input.reason}`);
       }
+      // A4 (supermarket): OTHER without a note is an unauditable black box.
+      if (input.reason === 'OTHER' && !(input.reason_note ?? '').trim()) {
+        throw new Error('[db] return reason OTHER needs a note (what exactly is wrong?)');
+      }
       const actor = input.actor?.trim();
       if (!actor) throw new Error('[db] return actor is required');
       const key = input.client_return_key ?? null;

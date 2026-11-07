@@ -40,6 +40,7 @@ function mapReturnError(raw: string | null, isAr: boolean): string {
   if (r.includes('already decided')) return pick('حُسم هذا الإرجاع مسبقاً', 'Retour déjà traité');
   if (r.includes('exceeds remaining') || r.includes('remaining')) return pick('الكمية تتجاوز المتبقي القابل للإرجاع', 'Quantité supérieure au reliquat');
   if (r.includes('locked') || r.includes('clôtur')) return pick('اليوم الجبائي مغلق', 'Journée fiscale clôturée');
+  if (r.includes('needs a note')) return pick('سبب «أخرى» يتطلب ملاحظة تشرح العيب', 'Motif «Autre» : note explicative requise');
   if (r.includes('not completed') || r.includes('cancelled')) return pick('الفاتورة ملغاة/غير مكتملة — ليست للإرجاع', 'Facture annulée — hors retour');
   if (r.includes('unreachable')) return pick('القاعدة لا تستجيب', 'Base injoignable');
   return pick(`رفض: ${raw}`, `Refus : ${raw}`);
@@ -112,6 +113,11 @@ export const ReturnsView: React.FC = () => {
 
   const doCreate = async () => {
     if (!lookup) return;
+    // A4 (supermarket): OTHER without a note is refused lane-side too.
+    if (reason === 'OTHER' && !reasonNote.trim()) {
+      setMsg({ kind: 'err', text: mapReturnError('needs a note', isAr) });
+      return;
+    }
     const lines = Object.entries(picked)
       .map(([sid, v]) => ({ saleItemId: Number(sid), v }))
       .filter(e => Number.isFinite(e.v) && e.v > 0)

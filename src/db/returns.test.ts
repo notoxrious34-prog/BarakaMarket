@@ -136,6 +136,11 @@ test('v1.5.0: guards — unknown/cancelled sale, bad reason, over-qty, double de
     assert.throws(() => b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: 999999, qty_milli: 1 }], reason: 'DEFECT', actor: 'lina' }), /not part of/);
     assert.throws(() => b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 2001 }], reason: 'DEFECT', actor: 'lina' }), /exceeds remaining/);
     assert.throws(() => b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 1 }], reason: 'NOPE' as never, actor: 'lina' }), /bad return reason/);
+    // A4 (supermarket): OTHER without a note is refused, with a note passes.
+    assert.throws(() => b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 1 }], reason: 'OTHER', actor: 'lina' }), /needs a note/);
+    assert.throws(() => b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 1 }], reason: 'OTHER', reason_note: '   ', actor: 'lina' }), /needs a note/);
+    const noted = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 1 }], reason: 'OTHER', reason_note: 'boîte écrasée', actor: 'lina' });
+    assert.equal(typeof noted.id, 'string');
     b.voidSale(sale.id, 'test', 'karim');
     assert.throws(() => b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: lc, qty_milli: 1 }], reason: 'DEFECT', actor: 'lina' }), /COMPLETED/);
     b.close();

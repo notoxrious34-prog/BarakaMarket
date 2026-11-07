@@ -951,6 +951,12 @@ pub fn return_create(
     if !RETURN_REASONS.contains(&reason) {
         return Err(format!("[fiscal] bad return reason: {reason}"));
     }
+    // A4 (supermarket): OTHER without a note is an unauditable black box.
+    if reason == "OTHER" && reason_note.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(
+            "[fiscal] return reason OTHER needs a note (what exactly is wrong?)".to_string(),
+        );
+    }
     if actor.trim().is_empty() {
         return Err("[fiscal] return actor is required".to_string());
     }
@@ -3235,6 +3241,29 @@ mod tests {
             "2026-11-01"
         )
         .is_err());
+        // A4 (supermarket): OTHER without a note is refused, with a note passes.
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "OTHER",
+            None,
+            "lina",
+            None,
+            "2026-11-01"
+        )
+        .is_err());
+        assert!(return_create(
+            &mut db,
+            "s1",
+            &items,
+            "OTHER",
+            Some("boite ecrasee".to_string()),
+            "lina",
+            None,
+            "2026-11-01"
+        )
+        .is_ok());
         assert!(return_create(
             &mut db,
             "nope",
