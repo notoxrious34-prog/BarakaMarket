@@ -5,12 +5,25 @@ import {
   validateLicense, evaluateTrial,
 } from '../../core/licensing';
 import { getOrCreateMachineSeed, getInstallEpochMs, loadStoredLicense, saveStoredLicense } from '../../core/license-store';
+import { APP_VERSION } from '../../core/version';
 import {
   KeyRound,
   ShieldCheck,
   Copy,
   Check,
+  Building2,
+  WifiOff,
+  FileCheck2,
+  Store,
+  Fingerprint,
+  KeySquare,
+  Headset,
 } from 'lucide-react';
+
+/* PLAN-v1.5.1-UX §1 — institutional Licence page.
+ * BarakaDEV identity first, activation sanctuary second, licence terms third.
+ * No price is ever rendered here: pricing lives on the quote/invoice, not in
+ * the product. Key generation stays EXCLUSIVELY in scripts/keygen.ts. */
 
 export const LicenseManagerView: React.FC = () => {
   const { language, sales, storeProfile, licenseBroken, licenseDrift, licenseCryptoOk } = useApp();
@@ -75,8 +88,8 @@ export const LicenseManagerView: React.FC = () => {
 
   return (
     <div className="flex-1 bg-[#0b0f17] p-6 overflow-y-auto space-y-6">
-      {/* Header Banner */}
-      <div className="force-dark relative overflow-hidden bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 md:p-8 shadow-2xl">
+      {/* ── 1 · Institutional hero — BarakaDEV first, never a price ── */}
+      <div className="relative overflow-hidden bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 md:p-8 shadow-2xl">
         {/* Gold hairline sheen */}
         <div aria-hidden={true} className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />
         {/* Watermark depth layer */}
@@ -97,19 +110,19 @@ export const LicenseManagerView: React.FC = () => {
         <div className="space-y-2.5 text-center md:text-start">
           <div className="flex items-center justify-center md:justify-start gap-2 flex-wrap">
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              BarakaDEV Algerian Retail Solutions
+              BarakaDEV — Algerian Retail Solutions
             </span>
-            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              Tarif Unique: 5,000 DZD
+            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/10 text-sky-400 border border-sky-500/20 font-mono">
+              Baraka Market v{APP_VERSION}
             </span>
           </div>
           <h2 className="text-2xl md:text-3xl font-black tracking-tight text-white">
-            {isAr ? 'نظام الحماية ورخصة البرنامج بدون إنترنت (Offline Licensing)' : 'Licence Perpétuelle & Empreinte Matérielle'}
+            {isAr ? 'الترخيص والدعم المؤسسي' : 'Licence & support institutionnel'}
           </h2>
           <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">
             {isAr
-              ? 'تعتمد منظومة Baraka Market على بصمة العتاد (Hardware ID) لتفعيل النسخة الدائمة بدون الحاجة لاتصال بالإنترنت، مع ثبات مطلق وسرعة تشغيل فائقة.'
-              : 'Système d\'activation autonome hors-ligne basé sur l\'empreinte unique de la machine (HWID), sans dépendance au cloud ni frais récurrents.'}
+              ? 'محرّك البيع بالتجزئة من تطوير BarakaDEV — يعمل دون إنترنت، مرتبط ببصمة جهازك، ومدعوم بعقد صيانة مؤسسي.'
+              : 'Moteur retail développé par BarakaDEV — 100% hors-ligne, lié à votre machine, couvert par un support institutionnel.'}
           </p>
         </div>
 
@@ -129,9 +142,26 @@ export const LicenseManagerView: React.FC = () => {
         </div>
       </div>
 
-      {/* Luxe épuré activation sanctuary — single centered card, zero vendor tools. */}
-      <div className="flex justify-center">
-        <div className="w-full max-w-2xl bg-[#111722] border border-amber-500/25 rounded-2xl shadow-2xl overflow-hidden">
+      {/* ── 2 · Who stands behind the product ────────────────────────── */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {[
+          { icon: Building2, t: isAr ? 'مطوّر جزائري' : 'Éditeur algérien', d: isAr ? 'تصميم وتطوير وصيانة محلية — فواتير بالدينار وعقود صيانة للمؤسسات.' : 'Conception locale — facturation en DZD, contrats de maintenance pour les enseignes.' },
+          { icon: WifiOff, t: isAr ? 'استقلالية تامة' : 'Autonomie totale', d: isAr ? 'تفعيل وتشغيل دون إنترنت — لا اشتراكات، لا اعتماد على السحابة.' : 'Activation et exploitation sans internet — ni abonnement, ni dépendance cloud.' },
+          { icon: FileCheck2, t: isAr ? 'امتثال محاسبي' : 'Conformité SCF', d: isAr ? 'يومية جبائية وسلاسل أرقام قابلة للتدقيق وفق النظام المحاسبي.' : 'Journal fiscal et chaînage vérifiable, alignés sur le SCF.' },
+        ].map(c => (
+          <div key={c.t} className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 flex gap-3.5">
+            <c.icon className="w-7 h-7 shrink-0 text-amber-400" />
+            <div>
+              <div className="text-sm font-black text-white mb-1">{c.t}</div>
+              <div className="text-xs text-slate-400 leading-relaxed">{c.d}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── 3 + 4 · Activation sanctuary + licence terms ─────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-4 items-start">
+        <div className="bg-[#111722] border border-amber-500/25 rounded-2xl shadow-2xl overflow-hidden">
           <div className="text-center px-6 pt-6 pb-4 border-b border-[#1e293b] relative">
             <div aria-hidden={true} className="pointer-events-none absolute inset-x-16 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />
             <div className="text-base md:text-lg font-black tracking-wide text-white">
@@ -193,7 +223,8 @@ export const LicenseManagerView: React.FC = () => {
 
             {/* Step 1 — HWID */}
             <div>
-              <div className="text-xs font-bold text-white mb-1.5">
+              <div className="text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                <Fingerprint className="w-3.5 h-3.5 text-amber-400" />
                 {isAr ? '1. البصمة الفريدة لصندوقك (HWID):' : '1. EMPREINTE UNIQUE DE VOTRE CAISSE (HWID) :'}
               </div>
               <div className="flex items-center gap-2">
@@ -213,24 +244,11 @@ export const LicenseManagerView: React.FC = () => {
               </div>
             </div>
 
-            {/* Activation instructions */}
-            <div className="bg-[#0b0f17] border border-[#233145] rounded-xl p-3.5 text-xs text-slate-300 leading-relaxed space-y-1">
-              <div className="font-bold text-amber-300 text-[11px] uppercase tracking-wide">
-                {isAr ? 'إرشادات التفعيل السريع' : "Instructions d'activation rapide"}
-              </div>
-              <p>
-                {isAr
-                  ? 'للحصول على مفتاح التفعيل الدائم، يرجى إرسال هذا الكود (HWID) مع اسم المحل عبر واتساب أو الهاتف إلى مصلحة الدعم الفني لشركة BarakaDEV:'
-                  : 'Pour obtenir la clé définitive, envoyez ce code (HWID) avec le nom du magasin via WhatsApp ou téléphone au support BarakaDEV:'}
-              </p>
-              <p className="font-mono text-white">📞 Téléphone / WhatsApp: +213 770 80 70 05</p>
-              <p>💰 {isAr ? 'سعر الرخصة: 5,000 دج (دفعة واحدة مدى الحياة)' : 'Tarif de la licence: 5,000 DZD (Paiement unique à vie)'}</p>
-            </div>
-
             {/* Steps 2+3 — store identity + activation key */}
             <form onSubmit={handleActivate} className="space-y-3">
               <div>
-                <div className="text-xs font-bold text-white mb-1.5">
+                <div className="text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                  <Store className="w-3.5 h-3.5 text-amber-400" />
                   {isAr ? '2. اسم المحل (كما في السجل التجاري):' : '2. NOM DU MAGASIN (registre de commerce):'}
                 </div>
                 <input
@@ -242,7 +260,8 @@ export const LicenseManagerView: React.FC = () => {
                 />
               </div>
               <div>
-                <div className="text-xs font-bold text-white mb-1.5">
+                <div className="text-xs font-bold text-white mb-1.5 flex items-center gap-1.5">
+                  <KeySquare className="w-3.5 h-3.5 text-amber-400" />
                   {isAr ? '3. أدخل مفتاح التفعيل المستلم:' : "3. SAISIR LA CLÉ D'ACTIVATION REÇUE:"}
                 </div>
                 <input
@@ -269,6 +288,41 @@ export const LicenseManagerView: React.FC = () => {
 
           <div className="px-6 py-3 border-t border-[#1e293b] text-center text-[10px] text-slate-500">
             {isAr ? 'الأمان: توقيع Ed25519 دون اتصال | لا يتطلب اتصالاً بالإنترنت' : 'Sécurité: signature Ed25519 hors-ligne | Aucune connexion Internet requise'}
+          </div>
+        </div>
+
+        {/* ── 4 · Licence terms + support channel ─────────────────────── */}
+        <div className="space-y-4">
+          <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5">
+            <div className="text-sm font-black text-white mb-3">
+              {isAr ? 'شروط الرخصة الدائمة' : 'Conditions de la licence perpétuelle'}
+            </div>
+            <ul className="space-y-2 text-xs text-slate-300 leading-relaxed">
+              {(isAr
+                ? ['دفعة واحدة مدى الحياة — بلا اشتراكات ولا رسوم متكررة', 'مرتبطة بهذا الجهاز (HWID) — قابلة للنقل عبر الدعم عند تغيير الصندوق', 'تفعيل وتشغيل كامل دون إنترنت', 'التحديثات والدعم عبر قناة BarakaDEV الرسمية']
+                : ['Paiement unique à vie — ni abonnement, ni frais récurrents', 'Liée à cette machine (HWID) — transférable via le support en cas de changement de caisse', 'Activation et exploitation 100% hors-ligne', 'Mises à jour et support via le canal officiel BarakaDEV']
+              ).map(li => (
+                <li key={li} className="flex gap-2">
+                  <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400 mt-0.5" />
+                  <span>{li}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="bg-gradient-to-br from-amber-500/10 to-transparent border border-amber-500/25 rounded-2xl p-5">
+            <div className="flex items-center gap-2 text-sm font-black text-white mb-2">
+              <Headset className="w-4 h-4 text-amber-400" />
+              {isAr ? 'الحصول على المفتاح' : 'Obtenir votre clé'}
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed mb-2">
+              {isAr
+                ? 'أرسل بصمة الجهاز (HWID) مع اسم المحل إلى موزّعك المعتمد أو إلى الدعم الفني لـ BarakaDEV:'
+                : 'Envoyez votre HWID avec le nom du magasin à votre revendeur agréé ou au support BarakaDEV :'}
+            </p>
+            <p className="font-mono text-white text-sm">📞 Téléphone / WhatsApp: +213 770 80 70 05</p>
+            <p className="text-[11px] text-slate-500 mt-2">
+              {isAr ? 'الأسعار وشروط البيع في عرض السعر والفاتورة — لا تُعرض داخل البرنامج.' : 'Tarifs et CGV sur devis et facture — jamais affichés dans le produit.'}
+            </p>
           </div>
         </div>
       </div>

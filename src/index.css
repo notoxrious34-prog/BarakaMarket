@@ -176,6 +176,7 @@ html.light .text-sky-300 { color: #0369a1 !important; }
 html.light .text-slate-500 { color: #475569 !important; }
 html.light .placeholder-slate-400::placeholder { color: #64748b !important; }
 html.light .placeholder-slate-500::placeholder { color: #64748b !important; }
+html.light input::placeholder { color: #475569 !important; }
 html.light .force-dark .text-emerald-400 { color: #34d399 !important; }
 html.light .force-dark .text-emerald-300 { color: #6ee7b7 !important; }
 html.light .force-dark .text-amber-400 { color: #fbbf24 !important; }
@@ -187,6 +188,67 @@ html.light .force-dark .text-sky-300 { color: #7dd3fc !important; }
 /* Brand chip: stays deep-navy in light mode so the gold emblem keeps contrast */
 html.light .brand-chip {
   background-color: #0b0f17 !important;
+}
+
+/* PLAN-v1.5.1-UX §3: unify every page in light mode.
+ * Modal/panel navy variants (Cash, POS modals, Suppliers, Backup…) map to the
+ * same light surfaces as the core palette above — no dark islands left. */
+html.light .bg-\[\#101724\],
+html.light .bg-\[\#0d1420\],
+html.light .bg-\[\#101a28\],
+html.light .bg-\[\#0e1522\],
+html.light .bg-\[\#0d1320\] {
+  background-color: #ffffff !important;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+}
+html.light .bg-\[\#1c2f45\] {
+  background-color: #f1f5f9 !important;
+}
+html.light .border-\[\#1a2432\],
+html.light .border-\[\#2d3f56\],
+html.light .border-\[\#2b3a50\] {
+  border-color: #cbd5e1 !important;
+}
+/* Hero gradients: dark navy stops become light surfaces (same geometry). */
+html.light .from-\[\#111722\] {
+  --tw-gradient-from: #ffffff !important;
+}
+html.light .via-\[\#162030\] {
+  --tw-gradient-via: #f1f5f9 !important;
+}
+html.light .to-\[\#111722\] {
+  --tw-gradient-to: #ffffff !important;
+}
+/* Active/disabled slate fills become light silver — pairs with the
+ * text-white/text-slate-400 daylight mappings above (dark-on-light). */
+html.light .bg-slate-700 {
+  background-color: #cbd5e1 !important;
+}
+/* Opacity-modified text colors escape the base selectors above — map every
+ * variant actually used so no gold/rose/emerald text goes pale-on-white. */
+html.light .text-amber-400\/90, html.light .text-amber-400\/80 { color: #b45309 !important; }
+html.light .text-amber-300\/90, html.light .text-amber-300\/80, html.light .text-amber-300\/70 { color: #92400e !important; }
+html.light .text-amber-200\/90 { color: #92400e !important; }
+html.light .text-emerald-400\/80, html.light .text-emerald-300\/80 { color: #047857 !important; }
+html.light .text-rose-300\/80 { color: #be123c !important; }
+/* Translucent status boxes: dark tints become pastel tints, borders follow. */
+html.light .bg-emerald-950\/60, html.light .bg-emerald-950\/70, html.light .bg-emerald-950\/80, html.light .bg-emerald-950 {
+  background-color: rgb(236 253 245 / 0.9) !important;
+}
+html.light .bg-amber-950\/60, html.light .bg-amber-950\/40, html.light .bg-amber-950\/80 {
+  background-color: rgb(255 251 235 / 0.9) !important;
+}
+html.light .bg-rose-950\/60, html.light .bg-rose-950\/40 {
+  background-color: rgb(255 241 242 / 0.9) !important;
+}
+html.light .border-emerald-800\/60, html.light .border-emerald-800\/50, html.light .border-emerald-800 {
+  border-color: #6ee7b7 !important;
+}
+html.light .border-amber-800\/60, html.light .border-amber-800\/50 {
+  border-color: #fcd34d !important;
+}
+html.light .border-rose-800\/60, html.light .border-rose-800\/50, html.light .border-rose-800 {
+  border-color: #fda4af !important;
 }
 
 /* Print styling for Thermal Receipt (80mm) and Facture A4 */

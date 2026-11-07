@@ -9,7 +9,6 @@ import {
   FileText,
   KeyRound,
   Settings,
-  Scale,
   Languages,
   Clock,
   ChevronDown,
@@ -59,9 +58,6 @@ export const Navbar: React.FC = () => {
     currentCart,
     restoreHeldCart,
     deleteHeldCart,
-    isHardwareScaleActive,
-    setHardwareScaleActive,
-    scaleWeightGrams,
     session,
     logout,
     lockSession,
@@ -384,29 +380,8 @@ export const Navbar: React.FC = () => {
             )}
           </div>
 
-          {/* NAVBAR-REDESIGN Phase 2: scale STATE (read-only) + scale ACTION (toggle).
-              Status is never the switch — the eye reads, the button acts. */}
-          <span
-            className={`px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1.5 border tabular-nums ${
-              isHardwareScaleActive
-                ? 'bg-emerald-950/60 text-emerald-300 border-emerald-500/50'
-                : 'bg-[#162030] text-slate-400 border-[#2b3a4f]'
-            }`}
-            dir="ltr"
-            title={isAr ? 'حالة الميزان الإلكتروني RS232' : 'État balance RS232'}
-          >
-            <span className={`w-1.5 h-1.5 rounded-full inline-block ${isHardwareScaleActive ? 'bg-emerald-400' : 'bg-slate-600'}`} />
-            {isHardwareScaleActive ? `${(scaleWeightGrams / 1000).toFixed(3)} kg` : (isAr ? 'الميزان' : 'Balance')}
-          </span>
-          <button
-            onClick={() => setHardwareScaleActive(!isHardwareScaleActive)}
-            className="p-2 bg-[#162030] hover:bg-[#1e293b] border border-[#2b3a4f] rounded-lg text-slate-300 hover:text-white transition-colors cursor-pointer"
-            title={isAr ? 'تفعيل/إيقاف محاكي الميزان الإلكتروني' : 'Activer/couper le simulateur balance'}
-            aria-label={isAr ? 'تفعيل/إيقاف محاكي الميزان' : 'Activer/couper le simulateur balance'}
-            aria-pressed={isHardwareScaleActive}
-          >
-            <Scale className="w-4 h-4" />
-          </button>
+          {/* PLAN-v1.5.1-UX §2: scale lives ONLY in the POS bottom bar (F6).
+              The top-bar state pill + toggle were a redundant duplicate. */}
 
           {/* Language Switch */}
           <button
