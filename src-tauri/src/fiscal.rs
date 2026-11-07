@@ -1330,6 +1330,22 @@ pub fn return_approve(
     }
     if payment == "ESPECES" {
         let sid = session.clone().unwrap_or_default();
+        // A2 (supermarket): never drive the drawer negative — same
+        // theoretical as cash_session_status (opening + cash + settled + dep − wit − exp).
+        let (opening_float_ct, opened_at): (i64, String) = tx
+            .query_row(
+                "SELECT opening_float_ct, opened_at FROM cash_sessions WHERE id = ?1",
+                [&sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let (cash, _, settled, dep, wit, exp) = status_sums(&tx, &opened_at, &now, &sid)?;
+        let holds = opening_float_ct + cash + settled + dep - wit - exp;
+        if holds < refund_ct {
+            return Err(format!(
+                "[fiscal] drawer short: holds {holds} ct, refund needs {refund_ct} ct — count the drawer or split the refund"
+            ));
+        }
         tx.execute(
             "INSERT INTO cash_movements (id, session_id, movement_type, amount_ct, reason, created_at)
              VALUES (?1, ?2, 'WITHDRAWAL', ?3, ?4, ?5)",
@@ -3215,6 +3231,63 @@ mod tests {
         // Decided returns are terminal.
         assert!(return_approve(&mut db, &id, "owner2", "owner", "2026-11-01").is_err());
         assert!(return_reject(&mut db, &id, "owner2", None).is_err());
+    }
+
+    #[test]
+    fn return_approve_refuses_when_drawer_short() {
+        // A2 (supermarket): an ESPECES refund can never drive the drawer negative.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("R-9")), &sale_items()).unwrap();
+        cash_open(&db, "sess-short", "Amine", 0).unwrap();
+        // Drain exactly what the open session window holds — drawer now at 0.
+        let opened: String = db
+            .query_row(
+                "SELECT opened_at FROM cash_sessions WHERE id = 'sess-short'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let (cash, _, settled, dep, wit, exp) =
+            status_sums(&db, &opened, &now_iso(), "sess-short").unwrap();
+        let holds = cash + settled + dep - wit - exp;
+        assert!(holds >= 0);
+        if holds > 0 {
+            cash_movement(
+                &db,
+                "m-drain",
+                "sess-short",
+                "WITHDRAWAL",
+                holds,
+                "supplier run",
+            )
+            .unwrap();
+        }
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        let d = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            Some("k-short-1".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        let err = return_approve(&mut db, &id, "karim", "manager", "2026-11-01").unwrap_err();
+        assert!(err.contains("drawer short"), "got: {err}");
+        // Top up exactly the refund → approval passes.
+        let refund = d["refund_ct"].as_i64().unwrap();
+        cash_movement(&db, "m-top", "sess-short", "DEPOSIT", refund, "top-up").unwrap();
+        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01").is_ok());
     }
 
     #[test]

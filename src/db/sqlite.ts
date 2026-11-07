@@ -2209,11 +2209,33 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         }
         const number = `RET-${year}-${pad6(bumpSeq(db, 'RET', year))}`;
         if (head.payment_method === 'ESPECES') {
-          // Cash leaves the drawer through the movement journal, so the cash
+          // Cash leaves through the movement journal, so the cash
           // session lane (F8/K9) stays balanced with zero special-casing.
-          const open = db.prepare("SELECT id FROM cash_sessions WHERE status = 'OPEN' LIMIT 1").get() as
-            | { id: string } | undefined;
+          const open = db.prepare("SELECT id, opening_float_ct, opened_at FROM cash_sessions WHERE status = 'OPEN' LIMIT 1").get() as
+            | { id: string; opening_float_ct: number; opened_at: string }
+            | undefined;
           if (!open) throw new Error('[db] cash refund needs an OPEN cash session — open one first');
+          // A2 (supermarket): never drive the drawer negative — refuse with
+          // both numbers so the cashier sees holds vs needs.
+          const nowIso = new Date().toISOString();
+          const cashSales = (db.prepare(
+            `SELECT COALESCE(SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END), 0) AS t
+             FROM sales WHERE status = 'COMPLETED' AND created_at >= ? AND created_at <= ?`,
+          ).get(open.opened_at, nowIso) as { t: number }).t;
+          const cashSettled = (db.prepare(
+            `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
+             WHERE payment_method = 'ESPECES' AND date >= ? AND date <= ?`,
+          ).get(open.opened_at, nowIso) as { t: number }).t;
+          const mv = db.prepare(
+            `SELECT COALESCE(SUM(CASE WHEN movement_type = 'DEPOSIT' THEN amount_ct ELSE 0 END), 0) AS dep,
+                    COALESCE(SUM(CASE WHEN movement_type = 'WITHDRAWAL' THEN amount_ct ELSE 0 END), 0) AS wit,
+                    COALESCE(SUM(CASE WHEN movement_type = 'EXPENSE' THEN amount_ct ELSE 0 END), 0) AS exp
+             FROM cash_movements WHERE session_id = ?`,
+          ).get(open.id) as { dep: number; wit: number; exp: number };
+          const holds = open.opening_float_ct + cashSales + cashSettled + mv.dep - mv.wit - mv.exp;
+          if (holds < head.refund_ct) {
+            throw new Error(`[db] drawer short: holds ${holds} ct, refund needs ${head.refund_ct} ct — count the drawer or split the refund`);
+          }
           db.prepare(
             `INSERT INTO cash_movements (id, session_id, movement_type, amount_ct, reason, created_at)
              VALUES (?, ?, 'WITHDRAWAL', ?, ?, ?)`,

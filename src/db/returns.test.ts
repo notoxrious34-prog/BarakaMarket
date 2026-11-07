@@ -149,6 +149,30 @@ test('v1.5.0: guards — unknown/cancelled sale, bad reason, over-qty, double de
   }
 });
 
+test('A2 (supermarket): ESPECES approve refuses when the drawer cannot cover the refund', () => {
+  const p = tmpFile('drawer-short');
+  try {
+    const b = openBarakaDb(p);
+    b.upsertProduct(PROD);
+    b.openCashSession('Amine', 0);
+    const sale = recordTodaySale(b);
+    const [la] = saleItemIds(b, sale.id);
+    const d = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 2000 }], reason: 'DEFECT', actor: 'lina' });
+    const live = b.getActiveCashSession()!;
+    // Drain every centime that came in — the drawer is now empty.
+    b.recordCashMovement(live.session.id, 'WITHDRAWAL', live.theoreticalCashCt, 'supplier run');
+    assert.throws(() => b.approveReturn(d.id, 'karim', 'manager'), /drawer short/);
+    // Top up exactly the refund → approval passes and the drawer nets to zero.
+    b.recordCashMovement(live.session.id, 'DEPOSIT', d.refund_ct, 'top-up');
+    const ap = b.approveReturn(d.id, 'karim', 'manager');
+    assert.match(ap.return_number, /^RET-\d{4}-\d{6}$/);
+    assert.equal(b.getActiveCashSession()!.theoreticalCashCt, 0);
+    b.close();
+  } finally {
+    for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
+  }
+});
+
 test('v1.5.0: 7-day window — day 7 passes, day 8 refused', () => {
   const p = tmpFile('window');
   try {
