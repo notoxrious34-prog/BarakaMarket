@@ -129,8 +129,41 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
     b.changePin(m.id, '5151', '0000');
     assert.equal(b.listUsers().find(u => u.id === m.id)!.pin_expires_at, null);
     assert.equal(b.listUsers().find(u => u.id === m.id)!.must_change_pin, 0);
+    // v1.5.1 §4: rotation — default 90, garbage config rejected, window
+    // audited, due forces change, countdown rides verify, NULL clock fresh.
+    assert.equal(b.getPinRotationDays(), 90);
+    assert.throws(() => b.setPinRotationDays(0, 'owner'), /1-365/);
+    assert.throws(() => b.setPinRotationDays(400, 'owner'), /1-365/);
+    assert.throws(() => b.setPinRotationDays(45.5, 'owner'), /1-365/);
+    b.setPinRotationDays(30, 'owner');
+    assert.equal(b.getPinRotationDays(), 30);
+    const rotAudit = b.listAudit(100).filter(a => a.action === 'users.rotation_config' && /days=30/.test(a.detail ?? ''));
+    assert.equal(rotAudit.length, 1, 'window audited');
+    b.setPinRotationDays(90, 'owner');
+    b.db.prepare('UPDATE users SET pin_changed_at = NULL WHERE id = ?').run(m.id);
+    const nullClock = b.verifyUser('sara', '0000');
+    assert.equal(nullClock.ok, true);
+    if (nullClock.ok) {
+      assert.equal(nullClock.user.rotation_due, false);
+      assert.equal(nullClock.user.rotation_days_left, 90);
+    }
+    b.db.prepare("UPDATE users SET pin_changed_at = '2000-01-01T00:00:00' WHERE id = ?").run(m.id);
+    const due = b.verifyUser('sara', '0000');
+    assert.equal(due.ok, true);
+    if (due.ok) {
+      assert.equal(due.user.rotation_due, true);
+      assert.ok((due.user.rotation_days_left ?? 1) <= 0);
+    }
+    b.db.prepare("UPDATE users SET pin_changed_at = strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id = ?").run(m.id);
+    const fresh = b.verifyUser('sara', '0000');
+    assert.equal(fresh.ok, true);
+    if (fresh.ok) {
+      assert.equal(fresh.user.rotation_due, false);
+      assert.ok((fresh.user.rotation_days_left ?? 0) > 80);
+    }
+    assert.ok(b.listUsers().find(u => u.id === m.id)!.pin_changed_at, 'clock visible in list');
     const audit = b.listAudit(50).map(a => a.action);
-    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change', 'pin.reset'] as const) {
+    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change', 'pin.reset', 'users.rotation_config'] as const) {
       assert.ok(audit.includes(a), `audit must contain ${a}`);
     }
     b.close();

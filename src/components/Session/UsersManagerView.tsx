@@ -6,6 +6,8 @@ import {
   createSessionUser,
   setSessionUserActive,
   resetSessionUserPin,
+  getRotationDays,
+  setRotationDays,
   lastUserLaneError,
 } from '../../core/session-authority';
 import { isValidPinFormat } from '../../core/security';
@@ -57,6 +59,10 @@ export const UsersManagerView: React.FC = () => {
   const [resetConfirm, setResetConfirm] = useState('');
   // §3 completion: temp-PIN lifespan (PLAN binds expiry — auto-dies).
   const [resetHours, setResetHours] = useState<'8' | '24' | '48'>('24');
+  // v1.5.1 §4: rotation window (days) — owner config, re-armed per login.
+  const [rotDays, setRotDays] = useState<number>(90);
+  const [rotInput, setRotInput] = useState('90');
+  const [rotBusy, setRotBusy] = useState(false);
 
   // The shop survives reloads with a persisted session while this tab mounts
   // on demand — fetch on every visit so the list is never a stale empty.
@@ -69,6 +75,13 @@ export const UsersManagerView: React.FC = () => {
       const list = await listSessionUsers();
       if (!alive) return;
       setLane(list ? 'ready' : 'offline');
+      // v1.5.1 §4: rotation window for the countdown chips.
+      try {
+        const d = await getRotationDays();
+        if (!alive) return;
+        setRotDays(d);
+        setRotInput(String(d));
+      } catch { /* default 90 stands */ }
     })();
     return () => {
       alive = false;
@@ -232,6 +245,28 @@ export const UsersManagerView: React.FC = () => {
 
   // v1.5.1 §3: issue a temporary PIN — the lane flags must_change so the
   // PIN dies at first login. PIN shape + match are checked lane-side too.
+  // v1.5.1 §4: owner sets the rotation window (1..365, audited, both lanes).
+  const saveRotation = async () => {
+    if (rotBusy || !session) return;
+    const n = Number.parseInt(rotInput, 10);
+    if (!Number.isInteger(n) || n < 1 || n > 365) {
+      setMsg({ kind: 'err', text: ar ? 'النافذة بين يوم و365 يوماً.' : 'Fenêtre : 1 à 365 jours.' });
+      return;
+    }
+    setRotBusy(true);
+    setMsg(null);
+    try {
+      await setRotationDays(n, session.username);
+      setRotDays(n);
+      setRotInput(String(n));
+      setMsg({ kind: 'ok', text: ar ? `حُفظت نافذة التدوير: كل ${n} يوم` : `Fenêtre de rotation : tous les ${n} jours` });
+    } catch (e) {
+      setMsg({ kind: 'err', text: e instanceof Error ? e.message : (ar ? 'تعذر حفظ نافذة التدوير' : 'Échec de sauvegarde') });
+    } finally {
+      setRotBusy(false);
+    }
+  };
+
   const confirmReset = async (id: number, username: string) => {
     if (pendingId !== null || !session) return;
     if (!isValidPinFormat(resetPin)) {
@@ -285,6 +320,29 @@ export const UsersManagerView: React.FC = () => {
         </p>
       )}
 
+      {/* v1.5.1 §4: rotation window — owner config, audited, both lanes. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-slate-800 bg-[#0b0f17] px-3 py-2 text-[12px]">
+        <span className="text-slate-400">
+          {ar ? 'التدوير الإجباري كل' : 'Rotation obligatoire tous les'}
+        </span>
+        <input
+          inputMode="numeric"
+          dir="ltr"
+          value={rotInput}
+          onChange={e => setRotInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 3))}
+          className="w-16 rounded-md border border-slate-700 bg-[#0e141f] px-2 py-1 text-center text-slate-100 tabular-nums"
+          aria-label={ar ? 'نافذة التدوير بالأيام' : 'Fenêtre de rotation (jours)'}
+        />
+        <span className="text-slate-400">{ar ? `يوم (الحالية: ${rotDays})` : `jours (actuelle : ${rotDays})`}</span>
+        <button
+          onClick={() => void saveRotation()}
+          disabled={rotBusy}
+          className="rounded-md bg-amber-600/80 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-600 disabled:opacity-50 cursor-pointer"
+        >
+          {rotBusy ? (ar ? 'جارٍ الحفظ…' : 'Enregistrement…') : (ar ? 'حفظ النافذة' : 'Enregistrer')}
+        </button>
+      </div>
+
       <div className="space-y-2 mb-4">
         {lane === 'loading' && sessionUsers.length === 0 && (
           <p className="text-sm text-slate-500">{ar ? 'جارٍ التحميل…' : 'Chargement…'}</p>
@@ -319,6 +377,25 @@ export const UsersManagerView: React.FC = () => {
                     {u.freeze_reason ? ` [${FREEZE_LABEL[loc][u.freeze_reason as FreezeReasonCode] ?? u.freeze_reason}]` : ''}
                   </span>
                 )}
+                {/* v1.5.1 §4: rotation countdown from the pin_changed_at clock. */}
+                {u.active === 1 && u.pin_changed_at && (() => {
+                  const t = Date.parse(`${u.pin_changed_at}Z`);
+                  if (!Number.isFinite(t)) return null;
+                  const left = rotDays - Math.floor((Date.now() - t) / 86_400_000);
+                  if (left <= 0) {
+                    return (
+                      <span className="ml-1 text-[10px] font-bold text-red-400">
+                        {ar ? 'التدوير متجاوز — سيُجبر عند الدخول' : 'Rotation dépassée — forcée à la connexion'}
+                      </span>
+                    );
+                  }
+                  const tone = left <= 7 ? 'text-amber-300' : 'text-slate-500';
+                  return (
+                    <span className={`ml-1 text-[10px] ${tone}`}>
+                      {ar ? `التدوير بعد ${left} ${left === 1 ? 'يوم' : 'أيام'}` : `Rotation dans ${left} j`}
+                    </span>
+                  );
+                })()}
               </span>
               {frozen ? (
                 <span className="text-[11px] px-2 py-1 text-slate-600" title={frozenTitle}>

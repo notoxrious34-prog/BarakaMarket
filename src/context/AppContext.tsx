@@ -229,6 +229,9 @@ interface AppContextType {
   sessionLocked: boolean;
   lockNotice: string;
   sessionUsers: SessionUser[];
+  /** v1.5.1 §4: 7-day rotation reminder (set at login, dismissible). */
+  rotationNotice: { daysLeft: number; username: string } | null;
+  dismissRotationNotice: () => void;
   lockSession: () => void;
   login: (username: string, pin: string) => Promise<
     | { ok: true }
@@ -524,6 +527,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // B2: explains WHY a lock-screen unlock bounced (e.g. stale default PIN).
   const [lockNotice, setLockNotice] = useState('');
   const [sessionUsers, setSessionUsers] = useState<SessionUser[]>([]);
+  /** v1.5.1 §4: rotation reminder banner (dismissible, re-armed each login). */
+  const [rotationNotice, setRotationNotice] = useState<{ daysLeft: number; username: string } | null>(null);
+  const dismissRotationNotice = (): void => setRotationNotice(null);
   const sessionRef = useRef<Session | null>(session);
   sessionRef.current = session;
 
@@ -548,11 +554,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const login = async (username: string, pin: string) => {
     const r = await loginUser(username.trim(), pin);
     if (!r.ok) return r;
-    if (r.user.must_change_pin === 1) {
+    // v1.5.1 §3+§4: must-change flows (temp-PIN flag or rotation window due).
+    if (r.user.must_change_pin === 1 || r.user.rotation_due === true) {
       return { ok: false as const, locked: false, mustChange: { userId: r.user.id, username: r.user.username } };
     }
     setSessionLocked(false);
     setLockNotice('');
+    // v1.5.1 §4: 7-day rotation reminder — silent otherwise.
+    const left = r.user.rotation_days_left;
+    setRotationNotice(
+      typeof left === 'number' && left >= 0 && left <= 7
+        ? { daysLeft: left, username: r.user.username }
+        : null,
+    );
     setSession({
       userId: r.user.id, username: r.user.username, displayName: r.user.display_name,
       role: r.user.role, loginAt: Date.now(), lastActivityAt: Date.now(),
@@ -566,6 +580,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setSessionLocked(false);
     setSession(null);
     setSessionUsers([]);
+    setRotationNotice(null);
   };
 
   const unlockSession = async (pin: string): Promise<boolean> => {
@@ -576,11 +591,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // B2 fix: a stale lock-screen session with must_change_pin=1 used to die
     // here with a misleading "wrong code". Reset to full login instead — the
     // proven forced-change flow takes over from there.
-    if (r.user.must_change_pin === 1) {
+    if (r.user.must_change_pin === 1 || r.user.rotation_due === true) {
       await logout();
       setLockNotice(language === 'ar'
-        ? 'الرمز الافتراضي يحتاج تغييراً — سجّل الدخول برقمك ثم اختر رمزاً جديداً'
-        : 'Le code par défaut doit être changé — connectez-vous puis choisissez un code');
+        ? 'الرمز يحتاج تغييراً — سجّل الدخول برقمك ثم اختر رمزاً جديداً'
+        : 'Le code doit être changé — connectez-vous puis choisissez un code');
       return false;
     }
     setSession({ ...s, loginAt: Date.now(), lastActivityAt: Date.now() });
@@ -2307,6 +2322,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sessionLocked,
         lockNotice,
         sessionUsers,
+        rotationNotice,
+        dismissRotationNotice,
         lockSession,
         login,
         logout,

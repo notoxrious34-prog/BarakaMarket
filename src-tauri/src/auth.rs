@@ -178,6 +178,73 @@ pub fn migrate_v4(conn: &Connection) -> Result<(), String> {
 const LOCK_MAX: i64 = 5;
 const LOCK_BASE_MS: i64 = 60_000;
 
+/// v1.5.1 §4: periodic mandatory rotation — window in days (meta KV),
+/// default 90, valid 1..365. Garbage/blank reads fall back to the default.
+pub const PIN_ROTATION_DEFAULT_DAYS: i64 = 90;
+const PIN_ROTATION_MIN_DAYS: i64 = 1;
+const PIN_ROTATION_MAX_DAYS: i64 = 365;
+const PIN_ROTATION_META_KEY: &str = "pin_rotation_days";
+
+pub fn get_rotation_days(conn: &Connection) -> i64 {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?1",
+            [PIN_ROTATION_META_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap_or(None)
+        .flatten();
+    if let Some(s) = raw {
+        if let Ok(n) = s.trim().parse::<i64>() {
+            if (PIN_ROTATION_MIN_DAYS..=PIN_ROTATION_MAX_DAYS).contains(&n) {
+                return n;
+            }
+        }
+    }
+    PIN_ROTATION_DEFAULT_DAYS
+}
+
+pub fn set_rotation_days(conn: &Connection, days: i64, actor: &str) -> Result<Value, String> {
+    if !(PIN_ROTATION_MIN_DAYS..=PIN_ROTATION_MAX_DAYS).contains(&days) {
+        return Err("[auth] rotation window must be 1-365 days".to_string());
+    }
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![PIN_ROTATION_META_KEY, days.to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    audit(
+        conn,
+        actor,
+        "users.rotation_config",
+        &format!("days={days}"),
+    );
+    Ok(json!({ "ok": true, "days": days }))
+}
+
+/// Whole days since a `YYYY-MM-DDTHH:MM:SS` stamp (floor, UTC). None =
+/// missing/garbage clock (treated as fresh by the caller).
+fn days_since(stamp: Option<String>) -> Option<i64> {
+    let s = stamp?;
+    if s.len() < 19 {
+        return None;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    let y: i64 = s[0..4].parse().ok()?;
+    let m: i64 = s[5..7].parse().ok()?;
+    let d: i64 = s[8..10].parse().ok()?;
+    let now_secs: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|x| x.as_secs() as i64)
+        .unwrap_or(0);
+    let elapsed = now_secs.div_euclid(86_400) - crate::fiscal::days_from_civil(y, m, d);
+    Some(elapsed.max(0))
+}
+
 pub fn user_verify(conn: &Connection, username: &str, pin: &str) -> Result<Value, String> {
     let name = username.trim().to_lowercase();
     let row: Option<(i64, String, String, String, String, i64, i64, i64, i64)> = conn
@@ -231,8 +298,22 @@ pub fn user_verify(conn: &Connection, username: &str, pin: &str) -> Result<Value
             }
         }
         let must: i64 = row2.0;
+        // v1.5.1 §4: rotation — N days since the last change forces a change;
+        // the countdown rides along for the 7-day reminder. NULL clock = fresh.
+        let win = get_rotation_days(conn);
+        let changed: Option<String> = conn
+            .query_row(
+                "SELECT pin_changed_at FROM users WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let (rotation_due, rotation_days_left) = match days_since(changed) {
+            None => (false, win),
+            Some(elapsed) => (elapsed >= win, win - elapsed),
+        };
         return Ok(
-            json!({ "ok": true, "user": { "id": id, "username": uname, "display_name": display, "role": role, "must_change_pin": must, "active": 1 } }),
+            json!({ "ok": true, "user": { "id": id, "username": uname, "display_name": display, "role": role, "must_change_pin": must, "active": 1, "rotation_due": rotation_due, "rotation_days_left": rotation_days_left } }),
         );
     }
     // Failure: T8 lockout math (mirrors TS registerAttempt exactly).
@@ -373,7 +454,7 @@ pub fn audit_log(
 
 pub fn user_list(conn: &Connection) -> Result<Value, String> {
     let mut st = conn
-        .prepare("SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note, pin_expires_at FROM users ORDER BY id")
+        .prepare("SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note, pin_expires_at, pin_changed_at FROM users ORDER BY id")
         .map_err(|e| e.to_string())?;
     let rows = st
         .query_map([], |r| {
@@ -384,6 +465,7 @@ pub fn user_list(conn: &Connection) -> Result<Value, String> {
                 "freeze_reason": r.get::<_, Option<String>>(6)?,
                 "freeze_note": r.get::<_, Option<String>>(7)?,
                 "pin_expires_at": r.get::<_, Option<String>>(8)?,
+                "pin_changed_at": r.get::<_, Option<String>>(9)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -775,5 +857,43 @@ mod tests {
             )
             .unwrap();
         assert_eq!(exp_audit, "temp-expired");
+        // v1.5.1 §4: rotation — default 90, garbage config refused, window
+        // audited, due forces change, countdown rides verify, NULL clock fresh.
+        assert_eq!(super::get_rotation_days(&db), 90);
+        assert!(super::set_rotation_days(&db, 0, "owner").is_err());
+        assert!(super::set_rotation_days(&db, 400, "owner").is_err());
+        assert!(super::set_rotation_days(&db, 30, "owner").is_ok());
+        assert_eq!(super::get_rotation_days(&db), 30);
+        let rot_audit: String = db
+            .query_row(
+                "SELECT detail FROM audit_log WHERE action = 'users.rotation_config' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rot_audit, "days=30");
+        assert!(super::set_rotation_days(&db, 90, "owner").is_ok());
+        // §3 left a past deadline armed — re-issue + self-change to clear it
+        // (clock=now, flag=0), so the rotation math below reads clean.
+        assert!(
+            super::user_reset_pin(&db, id, "5151", "owner", "owner", "2099-12-31T23:59:59").is_ok()
+        );
+        assert!(super::user_change_pin(&db, id, "5151", "7777").is_ok());
+        db.execute("UPDATE users SET pin_changed_at = NULL WHERE id = ?1", [id])
+            .unwrap();
+        // sara's live PIN is 7777 (re-issued + self-changed above).
+        let null_clock2 = super::user_verify(&db, "sara", "7777").unwrap();
+        assert_eq!(null_clock2["ok"], true);
+        assert_eq!(null_clock2["user"]["rotation_due"], false);
+        assert_eq!(null_clock2["user"]["rotation_days_left"], 90);
+        db.execute(
+            "UPDATE users SET pin_changed_at = '2000-01-01T00:00:00' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+        let due = super::user_verify(&db, "sara", "7777").unwrap();
+        assert_eq!(due["ok"], true);
+        assert_eq!(due["user"]["rotation_due"], true);
+        assert!(due["user"]["rotation_days_left"].as_i64().unwrap() <= 0);
     }
 }

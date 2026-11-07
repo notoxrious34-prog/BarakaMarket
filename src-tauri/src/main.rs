@@ -454,6 +454,29 @@ fn reset_pin(
     )
 }
 
+/// v1.5.1 §4: native rotation-window read (days, default 90).
+#[tauri::command]
+fn rotation_get() -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "days": auth::get_rotation_days(&conn) }))
+}
+
+/// v1.5.1 §4: native rotation-window write (owner-gated, 1..365, audited).
+#[tauri::command(rename_all = "camelCase")]
+fn rotation_set(
+    days: i64,
+    requester_role: String,
+    actor: String,
+) -> Result<serde_json::Value, String> {
+    if requester_role != "owner" {
+        return Err("[auth] owner role required".to_string());
+    }
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    auth::set_rotation_days(&conn, days, &actor)
+}
+
 /// T8: native audit read for the manager lane.
 #[tauri::command]
 fn audit_list(limit: u32) -> Result<serde_json::Value, String> {
@@ -532,6 +555,8 @@ fn main() {
             user_create,
             user_set_active,
             reset_pin,
+            rotation_get,
+            rotation_set,
             audit_list,
             audit_log,
             cash_open,

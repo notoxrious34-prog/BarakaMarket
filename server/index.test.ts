@@ -455,6 +455,44 @@ test('api: v1.5.1 §3 reset-pin — owner-only temp PIN with forced change', asy
   assert.ok(!reset!.detail.includes('4242'), 'no PIN digits in audit');
 });
 
+test('api: v1.5.1 §4 rotation window — GET default, POST owner-gated + audited', async () => {
+  const post = async (p: string, body: unknown) =>
+    fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  // Default window is 90 (meta unset in the fresh test DB).
+  const dflt = (await (await fetch(`${base}/api/users/rotation`)).json()) as { days: number };
+  assert.equal(dflt.days, 90);
+  // Admin write without the token stays 401 (NOT in SELF_AUTH).
+  const bare = await _rawFetch(`${base}/api/users/rotation`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ days: 30, requesterRole: 'owner', actor: 'owner' }),
+  });
+  assert.equal(bare.status, 401);
+  // Non-owner refused even with a token; garbage shapes are 400.
+  const denied = await post('/api/users/rotation', { days: 30, requesterRole: 'manager', actor: 'm' });
+  assert.equal(denied.status, 403);
+  const zero = await post('/api/users/rotation', { days: 0, requesterRole: 'owner', actor: 'owner' });
+  assert.equal(zero.status, 400);
+  const huge = await post('/api/users/rotation', { days: 400, requesterRole: 'owner', actor: 'owner' });
+  assert.equal(huge.status, 400);
+  // Owner write persists and is audited; countdown rides the verify payload.
+  const ok = await post('/api/users/rotation', { days: 30, requesterRole: 'owner', actor: 'owner' });
+  assert.equal(ok.status, 200);
+  assert.equal(((await ok.json()) as { days: number }).days, 30);
+  const again = (await (await fetch(`${base}/api/users/rotation`)).json()) as { days: number };
+  assert.equal(again.days, 30);
+  const live = (await (await post('/api/users/verify', { username: 'owner', pin: '1234' })).json()) as {
+    ok: boolean; user: { rotation_due: boolean; rotation_days_left: number };
+  };
+  assert.equal(live.ok, true);
+  assert.equal(live.user.rotation_due, false);
+  assert.ok(live.user.rotation_days_left > 20 && live.user.rotation_days_left <= 30);
+  const logged = await (await fetch(`${base}/api/audit?limit=50`)).json() as { action: string; detail: string }[];
+  assert.ok(logged.some(a => a.action === 'users.rotation_config' && a.detail === 'days=30'), 'window audited');
+  // Leave the shared lane DB at the default for the tests after us.
+  const back = await post('/api/users/rotation', { days: 90, requesterRole: 'owner', actor: 'owner' });
+  assert.equal(back.status, 200);
+});
+
 test('api: T8 self-auth posts work WITHOUT the loopback token; the rest stay gated', async () => {
   // Negative path: _rawFetch bypasses the file's token-injecting fetch shim.
   const bare = (p: string, body: unknown) =>

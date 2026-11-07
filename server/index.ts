@@ -161,6 +161,24 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     }
   });
 
+  /**
+   * v1.5.1 §4: rotation window (days). GET = read (self-auth ok).
+   * POST = owner-only write (token lane, NOT in SELF_AUTH).
+   */
+  app.get('/api/users/rotation', (req, res) => {
+    void req;
+    res.json({ days: baraka.getPinRotationDays() });
+  });
+
+  app.post('/api/users/rotation', (req, res) => {
+    const { days, requesterRole, actor } = (req.body ?? {}) as { days?: unknown; requesterRole?: string; actor?: string };
+    if (requesterRole !== 'owner') return res.status(403).json({ error: 'owner role required' });
+    try {
+      baraka.setPinRotationDays(days as number, actor ?? 'owner');
+      res.json({ ok: true, days: baraka.getPinRotationDays() });
+    } catch (e) { res.status(400).json({ error: (e as Error).message }); }
+  });
+
   // T8: client-side security events the DAL cannot see (logout, session lock).
   app.post('/api/audit', (req, res) => {
     try {

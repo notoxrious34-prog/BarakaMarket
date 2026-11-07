@@ -12,10 +12,14 @@ import type { Role, AuditAction } from './rbac.js';
 export interface SessionUser {
   id: number; username: string; display_name: string; role: Role;
   must_change_pin: number; active: number;
-  /** v1.5.1 §1: set on deactivate, cleared on reactivate. */
+  /** v1.5.1 §1 */
   freeze_reason?: string | null; freeze_note?: string | null;
-  /** v1.5.1 §3: temp-PIN deadline (`YYYY-MM-DDTHH:MM:SS`), NULL = none. */
+  /** v1.5.1 §3 */
   pin_expires_at?: string | null;
+  /** v1.5.1 §4: rotation clock (from user_list). NULL = fresh. */
+  pin_changed_at?: string | null;
+  /** v1.5.1 §4: computed at verify only. */
+  rotation_due?: boolean; rotation_days_left?: number;
 }
 
 export type VerifyOut = { ok: true; user: SessionUser } | { ok: false; locked: boolean };
@@ -184,6 +188,65 @@ export async function createSessionUser(
   if (l.ok && isSessionUser(l.value)) return l.value;
   userLaneError = (l.ok ? '' : l.error) || 'server refused';
   return null;
+}
+
+/**
+ * v1.5.1 §4: rotation window read — native first, token-lane fallback.
+ * Default 90 (both lanes agree), so offline reads stay coherent.
+ */
+export async function getRotationDays(): Promise<number> {
+  const pick = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isInteger(v)) return v;
+    const d = (v as { days?: unknown } | null)?.days;
+    return typeof d === 'number' && Number.isInteger(d) ? d : null;
+  };
+  if (isTauriRuntime()) {
+    const n = await invokeUserNative<unknown>('rotation_get', {});
+    const d = n.ok ? pick(n.value) : null;
+    if (d !== null) return d;
+  }
+  const l = await getUserLoopback<unknown>('/api/users/rotation');
+  return (l.ok ? pick(l.value) : null) ?? 90;
+}
+
+/**
+ * v1.5.1 §4: rotation window write (owner only, both lanes).
+ * Throws a human error on refusal/invalid.
+ */
+export async function setRotationDays(days: number, actor: string): Promise<void> {
+  const payload = { days, requesterRole: 'owner', actor };
+  const fail = (e: string) => { throw new Error(mapRotationError(e)); };
+  if (isTauriRuntime()) {
+    const n = await invokeUserNative<{ ok?: boolean }>('rotation_set', payload);
+    if (!(n.ok && (n.value as { ok?: boolean }).ok)) fail(n.ok ? '' : n.error);
+    return;
+  }
+  const l = await postUserLoopback<{ ok?: boolean }>('/api/users/rotation', payload);
+  if (!(l.ok && l.value.ok)) fail(l.ok ? '' : l.error);
+}
+
+/** v1.5.1 §4: lane-agnostic validation copy (the lanes re-check anyway). */
+function mapRotationError(e: string): string {
+  if (/1-365|1–365|days/.test(e)) return 'النافذة بين يوم و365 يوماً';
+  if (/owner/i.test(e)) return 'المالك فقط يغيّر نافذة التدوير';
+  return 'تعذر حفظ نافذة التدوير';
+}
+
+async function getUserLoopback<T>(path: string): Promise<LaneOut<T>> {
+  try {
+    const token = await getLoopbackToken();
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const r = await fetch(`${LOOPBACK_BASE}${path}`, {
+      headers: { ...(token ? { 'x-baraka-loopback': token } : {}) },
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
+    return { ok: true, value: (await r.json()) as T };
+  } catch {
+    return { ok: false, error: 'lane unreachable' };
+  }
 }
 
 /** Owner-gated activate/deactivate (invoke-first, loopback fallback). False

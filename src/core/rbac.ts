@@ -91,7 +91,7 @@ export function isSessionLive(s: Session, now = Date.now(), idleMs = SESSION_IDL
 /** Security audit actions (T8). Transactional audit is T10. */
 export type AuditAction =
   | 'login.ok' | 'login.fail' | 'login.locked' | 'logout' | 'session.lock' | 'session.unlock'
-  | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset'
+  | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset' | 'users.rotation_config'
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
   | 'return.create' | 'return.approve' | 'return.reject'

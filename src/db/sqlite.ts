@@ -227,8 +227,41 @@ export interface SafeUser {
   must_change_pin: number; active: number;
   /** v1.5.1 §1: set on deactivate, cleared on reactivate. */
   freeze_reason: string | null; freeze_note: string | null;
-  /** v1.5.1 §3: temp-PIN expiry (`YYYY-MM-DDTHH:MM:SS`), NULL = no expiry. */
+  /** v1.5.1 §3: temp-PIN deadline (`YYYY-MM-DDTHH:MM:SS`), NULL = no expiry. */
   pin_expires_at: string | null;
+  /** v1.5.1 §4: last PIN change (rotation clock). NULL = treat as fresh. */
+  pin_changed_at?: string | null;
+  /** v1.5.1 §4: computed at verify — forced change when due. */
+  rotation_due?: boolean;
+  /** v1.5.1 §4: computed at verify — N - elapsed days (reminder ≤7). */
+  rotation_days_left?: number;
+}
+
+/** v1.5.1 §4: periodic mandatory rotation. Configurable window (days),
+ *  default 90, reminder in the last 7. Stored in meta KV. */
+export const PIN_ROTATION_META_KEY = 'pin_rotation_days';
+export const PIN_ROTATION_DEFAULT_DAYS = 90;
+export const PIN_ROTATION_REMIND_DAYS = 7;
+const PIN_ROTATION_MIN_DAYS = 1;
+const PIN_ROTATION_MAX_DAYS = 365;
+
+/** Whole days between a `YYYY-MM-DDTHH:MM:SS` stamp and now (floor, UTC). */
+function daysSince(stamp: string | null | undefined, nowMs = Date.now()): number | null {
+  if (!stamp) return null;
+  const t = Date.parse(`${stamp}Z`);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Math.floor((nowMs - t) / 86_400_000));
+}
+
+/** v1.5.1 §4: read the rotation window (meta KV). Garbage/blank → default. */
+function readRotationDays(db: DatabaseSync): number {
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(PIN_ROTATION_META_KEY) as
+      { value: string } | undefined;
+    const n = Number.parseInt(row?.value ?? '', 10);
+    if (Number.isInteger(n) && n >= PIN_ROTATION_MIN_DAYS && n <= PIN_ROTATION_MAX_DAYS) return n;
+  } catch { /* meta unreadable — default below */ }
+  return PIN_ROTATION_DEFAULT_DAYS;
 }
 
 export interface AuditRow {
@@ -253,6 +286,7 @@ const safeUser = (r: UserRow): SafeUser => ({
   role: r.role, must_change_pin: r.must_change_pin, active: r.active,
   freeze_reason: r.freeze_reason, freeze_note: r.freeze_note,
   pin_expires_at: r.pin_expires_at ?? null,
+  pin_changed_at: (r as { pin_changed_at?: string | null }).pin_changed_at ?? null,
 });
 
 /** T11 (ADR-034): append-only + terminal-state guards. Mirrors schema.sql tail;
@@ -587,6 +621,10 @@ export interface BarakaDb {
    *  `opts.expiresAt` (`YYYY-MM-DDTHH:MM:SS`, UTC, future) arms auto-expiry;
    *  omitted = provisioned-style flag with no deadline. */
   resetUserPin(userId: number, newPin: string, actor: string, opts?: { expiresAt?: string | null }): void;
+  /** v1.5.1 §4: rotation window in days (meta). 1..365, default 90. */
+  getPinRotationDays(): number;
+  /** v1.5.1 §4: owner sets the rotation window; audited. Throws on garbage. */
+  setPinRotationDays(days: number, actor: string): void;
   listAudit(limit?: number): AuditRow[];
   logAudit(e: AuditEvent): void;
 }
@@ -2388,10 +2426,29 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       }
       db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
       logAuditRow(db, { actor: name, action: 'login.ok' });
-      return { ok: true as const, user: safeUser(row) };
+      // v1.5.1 §4: rotation — N days since the last change forces a change;
+      // the countdown rides along for the 7-day reminder. NULL clock = fresh.
+      const win = readRotationDays(db);
+      const elapsed = daysSince(row.pin_changed_at);
+      const user = safeUser(row);
+      user.rotation_due = elapsed !== null && elapsed >= win;
+      user.rotation_days_left = elapsed === null ? win : win - elapsed;
+      return { ok: true as const, user };
     },
     listUsers(): SafeUser[] {
-      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note, pin_expires_at FROM users ORDER BY id').all() as unknown as SafeUser[]);
+      return (db.prepare('SELECT id, username, display_name, role, must_change_pin, active, freeze_reason, freeze_note, pin_expires_at, pin_changed_at FROM users ORDER BY id').all() as unknown as SafeUser[]);
+    },
+    /** v1.5.1 §4: rotation window (meta KV). Garbage/blank → default 90. */
+    getPinRotationDays(): number {
+      return readRotationDays(db);
+    },
+    setPinRotationDays(days: number, actor: string): void {
+      if (!Number.isInteger(days) || days < PIN_ROTATION_MIN_DAYS || days > PIN_ROTATION_MAX_DAYS) {
+        throw new Error(`[db] rotation window must be ${PIN_ROTATION_MIN_DAYS}-${PIN_ROTATION_MAX_DAYS} days`);
+      }
+      db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value')
+        .run(PIN_ROTATION_META_KEY, String(days));
+      logAuditRow(db, { actor, action: 'users.rotation_config', detail: `days=${days}` });
     },
     /** v1.5.1 §1: deactivation REQUIRES a freeze reason (+ optional note ≤140);
      * reactivation clears both. Reason travels into the audit detail. */

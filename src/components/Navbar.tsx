@@ -23,6 +23,7 @@ import {
   Lock,
   MoreHorizontal,
   LogOut,
+  X,
 } from 'lucide-react';
 import { formatDZD } from '../core/display';
 
@@ -64,6 +65,8 @@ export const Navbar: React.FC = () => {
     session,
     logout,
     lockSession,
+    rotationNotice,
+    dismissRotationNotice,
   } = useApp();
 
   const [showHeldDropdown, setShowHeldDropdown] = useState(false);
@@ -416,6 +419,27 @@ export const Navbar: React.FC = () => {
           </button>
         </div>
       </div>
+      {/* v1.5.1 §4: rotation countdown — dismissible, re-armed at each login. */}
+      {rotationNotice && (
+        <div
+          role="status"
+          className="flex items-center justify-center gap-2 px-3 py-1 bg-amber-500/10 border-t border-amber-500/30 text-[11px] text-amber-200"
+        >
+          <KeyRound className="w-3.5 h-3.5 shrink-0" />
+          <span>
+            {isAr
+              ? `التدوير الإجباري بعد ${rotationNotice.daysLeft} ${rotationNotice.daysLeft === 1 ? 'يوم' : 'أيام'} — غيّر رمزك قبل انتهاء المهلة`
+              : `Rotation obligatoire dans ${rotationNotice.daysLeft} jour(s) — changez votre code avant l'échéance`}
+          </span>
+          <button
+            onClick={() => dismissRotationNotice()}
+            className="ms-2 text-amber-300/70 hover:text-amber-100 cursor-pointer"
+            aria-label={isAr ? 'إخفاء' : 'Masquer'}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
     </header>
   );
 };

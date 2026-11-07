@@ -319,7 +319,7 @@ fn valid_day(day: &str) -> bool {
 /// Algiers is UTC+1 year-round (no DST), so a local day D is exactly the
 /// UTC window [D-1 23:00Z, D 23:00Z). No chrono dependency — civil-date
 /// arithmetic (Howard Hinnant's days_from_civil / civil_from_days).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y2 = if m <= 2 { y - 1 } else { y };
     let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
     let yoe = y2 - era * 400;
