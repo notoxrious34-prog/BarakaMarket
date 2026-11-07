@@ -199,7 +199,7 @@ export function mintRowId(): string {
 async function invokeLane<T>(
   command: 'record_sale' | 'record_settlement' | 'next_invoice' | 'void_sale' | 'daily_z' | 'z_close' | 'backup_db' | 'factory_reset'
     | 'cash_open' | 'cash_movement' | 'cash_active' | 'cash_sessions' | 'cash_movements' | 'cash_close_and_z'
-    | 'record_loss' | 'backup_create' | 'backup_list' | 'z_list',
+    | 'record_loss' | 'losses_list' | 'backup_create' | 'backup_list' | 'z_list',
   args: Record<string, unknown>,
 ): Promise<T | null> {
   if (!isTauriRuntime()) return null;
@@ -222,6 +222,24 @@ export async function recordLossNative(input: {
 }): Promise<{ stock_milli: number } | null> {
   const r = await invokeLane<{ stock_milli?: number }>('record_loss', { input });
   return r && typeof r.stock_milli === 'number' ? { stock_milli: r.stock_milli } : null;
+}
+
+/** Phase C (supermarket): DESTROY scrappage rows for the PERTE journal leg.
+ * Invoke-first, loopback fallback, empty last — never throws. */
+export async function listLossesNative(limit = 200): Promise<Array<Record<string, unknown>>> {
+  const r = await invokeLane<Array<Record<string, unknown>>>('losses_list', { limit });
+  if (Array.isArray(r)) return r;
+  try {
+    const token = await getLoopbackToken();
+    const lr = await fetch(`${LOOPBACK_BASE}/api/losses?limit=${limit}`, {
+      headers: token ? { 'x-baraka-loopback': token } : {},
+    });
+    if (!lr.ok) return [];
+    const j = (await lr.json()) as unknown;
+    return Array.isArray(j) ? (j as Array<Record<string, unknown>>) : [];
+  } catch {
+    return [];
+  }
 }
 
 /** v1.4.9 (#PROD-LOCAL): self-contained hot backup (native → loopback create). */

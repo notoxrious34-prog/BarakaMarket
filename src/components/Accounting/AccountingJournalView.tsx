@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { ExpensesWorkersView } from './ExpensesWorkersView';
 import { formatDZD } from '../../core/display';
@@ -7,7 +7,11 @@ import {
   filterJournalByPeriod,
   journalToCsv,
   type JournalPeriod,
+  type SaleReturn,
+  type StockLoss,
 } from '../../core/compta-kernel';
+import { listReturns } from '../../core/returns-authority';
+import { listLossesNative } from '../../core/fiscal-authority';
 import { calculateAccountingSummary } from '../../utils/accounting';
 import {
   PieChart,
@@ -37,14 +41,48 @@ export const AccountingJournalView: React.FC = () => {
   // C4-fix: the period filter is now wired to the journal AND the flow KPIs.
   const [filterPeriod, setFilterPeriod] = useState<JournalPeriod>('all');
 
+  // Phase C (supermarket): reversal legs come from the fiscal lanes, not
+  // localStorage — approved returns (AVOIR) + DESTROY waste (PERTE). A
+  // failed fetch surfaces as an empty leg with a banner, never a fake zero.
+  const [retLeg, setRetLeg] = useState<SaleReturn[]>([]);
+  const [lossLeg, setLossLeg] = useState<StockLoss[]>([]);
+  const [legsFailed, setLegsFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [rets, losses] = await Promise.all([
+          listReturns('APPROVED'),
+          listLossesNative(500),
+        ]);
+        if (!alive) return;
+        if (rets === null) { setLegsFailed(true); return; }
+        setRetLeg(rets.map(r => ({
+          id: r.id, date: r.posting_day ?? r.created_at, ref: r.return_number ?? r.id,
+          invoice_number: r.invoice_number, payment_method: r.payment_method as SaleReturn['payment_method'],
+          refund_ct: r.refund_ct, status: r.status,
+        })));
+        setLossLeg(losses.map(l => ({
+          id: l.id as number | string, date: String(l.created_at ?? ''),
+          product_name: String(l.product_name ?? '—'),
+          total_loss_ct: Number(l.total_loss_ct ?? 0),
+        })));
+      } catch {
+        if (alive) setLegsFailed(true);
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
   const handlePrint = () => {
     window.print();
   };
 
   // SCF journal from the tested kernel (C3/C6/C7/C9 fixed at the source).
+  // Phase C: approved returns + DESTROY waste ride as AVOIR/PERTE legs.
   const journalEntries = useMemo(
-    () => buildJournalEntries({ sales, purchases, settlements, supplierPayments, expenses }),
-    [sales, purchases, settlements, supplierPayments, expenses]
+    () => buildJournalEntries({ sales, purchases, settlements, supplierPayments, expenses, returns: retLeg, losses: lossLeg }),
+    [sales, purchases, settlements, supplierPayments, expenses, retLeg, lossLeg]
   );
   const visibleJournal = useMemo(
     () => filterJournalByPeriod(journalEntries, filterPeriod),
@@ -146,6 +184,14 @@ export const AccountingJournalView: React.FC = () => {
 
       {/* Printable SCF synthesis (C10-fix: window.print() now has a target). */}
       <div id="printable-compta">
+      {/* Phase C: legs-failure banner — reversals missing is stated, never silent. */}
+      {legsFailed && (
+        <div className="mb-4 px-4 py-2 rounded-xl border border-amber-700 bg-amber-950/40 text-amber-300 text-xs font-bold">
+          {isAr
+            ? 'تعذر تحميل المرتجعات المعتمدة / الهالك — الدفتر يعرض بدون ساقي AVOIR وPERTE'
+            : 'Retours/casse non chargés — journal sans jambes AVOIR/PERTE'}
+        </div>
+      )}
       {/* Primary Financial KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Gross Margin */}

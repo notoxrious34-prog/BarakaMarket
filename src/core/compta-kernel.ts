@@ -10,13 +10,14 @@ import type {
   DebtSettlement,
   Expense,
   ExpenseCategory,
+  PaymentMethod,
   PurchaseInvoice,
   Sale,
   SupplierPayment,
 } from '../types';
 import { fiscalDayISO } from './fiscal-day';
 
-export type JournalType = 'VENTE' | 'ACHAT' | 'ENCAISSEMENT' | 'DECAISSEMENT';
+export type JournalType = 'VENTE' | 'ACHAT' | 'ENCAISSEMENT' | 'DECAISSEMENT' | 'AVOIR' | 'PERTE';
 
 export interface JournalEntry {
   id: string;
@@ -67,6 +68,36 @@ export interface JournalInput {
   settlements: DebtSettlement[];
   supplierPayments: SupplierPayment[];
   expenses: Expense[];
+  /**
+   * Phase C (supermarket): approved returns ride as AVOIR (exact mirror of
+   * the original VENTE posting — timbre excluded, it is non-refundable),
+   * DESTROY waste rides as PERTE at buy cost (C3 memo, consistent with Z).
+   * Optional so legacy callers keep compiling; absent = no reversal rows.
+   */
+  returns?: SaleReturn[];
+  losses?: StockLoss[];
+}
+
+/** Phase C: an APPROVED return — the exact mirror of its VENTE row. */
+export interface SaleReturn {
+  id: string;
+  /** posting_day (approval day) — never the sale day. */
+  date: string;
+  ref: string;
+  invoice_number: string;
+  payment_method: PaymentMethod;
+  /** Refund in centimes (lines only — timbre never refunded). */
+  refund_ct: number;
+  status: string;
+}
+
+/** Phase C: a DESTROY scrappage row from inventory_losses. */
+export interface StockLoss {
+  id: number | string;
+  date: string;
+  product_name: string;
+  /** Valuation in centimes (buy cost × qty — the C3/Z memo). */
+  total_loss_ct: number;
 }
 
 /**
@@ -168,6 +199,48 @@ export function buildJournalEntries(input: JournalInput): JournalEntry[] {
       debitAccount: EXPENSE_DEBIT[ex.category] ?? EXPENSE_DEBIT.AUTRE,
       creditAccount: ex.method === 'ESPECES' ? ACC.cash : ACC.bank,
       amountDzd: round2(ex.amountCt / 100),
+      timbreDzd: 0,
+      provisional: false,
+    });
+  }
+
+  // Phase C (supermarket): approved returns are not missing money — they
+  // ride as AVOIR, the exact mirror of the original VENTE posting. Only
+  // APPROVED rows count (DRAFT/REJECTED are not fiscal events); timbre is
+  // excluded from the refund (non-refundable), so timbreDzd stays 0.
+  for (const r of input.returns ?? []) {
+    if (r.status !== 'APPROVED') continue;
+    out.push({
+      id: r.id,
+      date: r.date,
+      type: 'AVOIR',
+      ref: r.ref,
+      label: `Avoir retour ${r.ref} (${r.invoice_number})`,
+      debitAccount: ACC.sales,
+      creditAccount:
+        r.payment_method === 'CREDIT'
+          ? ACC.clients
+          : r.payment_method === 'ESPECES'
+            ? ACC.cash
+            : ACC.bankCard,
+      amountDzd: round2(r.refund_ct / 100),
+      timbreDzd: 0,
+      provisional: false,
+    });
+  }
+
+  // Phase C: DESTROY scrappage leaves the fiscal books through PERTE —
+  // buy-cost valuation, the same memo the Z lane carries (A3/C3).
+  for (const l of input.losses ?? []) {
+    out.push({
+      id: `loss-${l.id}`,
+      date: l.date,
+      type: 'PERTE',
+      ref: `CASSE-${l.id}`,
+      label: `Rebut DESTROY - ${l.product_name} (prix d'achat, mémo C3)`,
+      debitAccount: EXPENSE_DEBIT.AUTRE,
+      creditAccount: ACC.stock,
+      amountDzd: round2(l.total_loss_ct / 100),
       timbreDzd: 0,
       provisional: false,
     });

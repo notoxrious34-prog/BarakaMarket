@@ -83,4 +83,36 @@ describe('compta-kernel (C-lane)', () => {
     assert.ok(csv.startsWith('﻿Date;Type;'), 'missing BOM/header');
     assert.equal(csv.split('\n').length, 6); // header + 5 rows
   });
+  it('Phase C: APPROVED returns ride as AVOIR, exact mirror of the VENTE', () => {
+    const j = buildJournalEntries({
+      ...base,
+      returns: [
+        { id: 'R1', date: '2026-11-04', ref: 'RET-2026-000001', invoice_number: 'FACT-1', payment_method: 'CIB', refund_ct: 20000, status: 'APPROVED' },
+        { id: 'R2', date: '2026-11-04', ref: 'RET-2026-000002', invoice_number: 'FACT-2', payment_method: 'ESPECES', refund_ct: 5000, status: 'APPROVED' },
+        { id: 'R3', date: '2026-11-04', ref: 'RET-2026-000003', invoice_number: 'FACT-2', payment_method: 'ESPECES', refund_ct: 1000, status: 'DRAFT' },
+      ],
+    });
+    const card = j.find(e => e.id === 'R1')!;
+    assert.equal(card.type, 'AVOIR');
+    assert.equal(card.debitAccount, '700000 Ventes Marchandises + 4457 TVA');
+    assert.equal(card.creditAccount, '512000 Banque CIB'); // mirror of the card VENTE
+    assert.equal(card.amountDzd, 200);
+    assert.equal(card.timbreDzd, 0); // timbre non-refundable
+    const cash = j.find(e => e.id === 'R2')!;
+    assert.equal(cash.creditAccount, '530000 Caisse Espèces');
+    assert.ok(!j.some(e => e.id === 'R3'), 'DRAFT return journaled!');
+  });
+  it('Phase C: DESTROY waste rides as PERTE at buy cost (C3 memo)', () => {
+    const j = buildJournalEntries({
+      ...base,
+      losses: [
+        { id: 7, date: '2026-11-04', product_name: 'LAIT', total_loss_ct: 24000 },
+      ],
+    });
+    const p = j.find(e => e.id === 'loss-7')!;
+    assert.equal(p.type, 'PERTE');
+    assert.equal(p.debitAccount, '658000 Charges diverses');
+    assert.equal(p.creditAccount, '300000 Stock Marchandises (au PMP)');
+    assert.equal(p.amountDzd, 240);
+  });
 });
