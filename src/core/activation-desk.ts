@@ -84,6 +84,22 @@ export interface LedgerEntry {
   note: string;
   prev: string;
   hash: string;
+  /**
+   * Desk v4 additions (OPTIONAL, never hashed): client context on `issue`
+   * rows and the revoked target on `revoke` rows. The chain formula
+   * `ledgerHash(prev|seq|ts|kind|store|hwid|key)` is FROZEN — old entries
+   * without these fields keep verifying, and CLI readers ignore them.
+   */
+  meta?: LedgerMeta;
+  revokes?: number;
+}
+
+/** Client context attached to `issue` rows (staff CRM-lite, all optional). */
+export interface LedgerMeta {
+  phone?: string;
+  wilaya?: string;
+  paidDzd?: number;
+  note?: string;
 }
 
 const GENESIS = '0'.repeat(64);
@@ -91,14 +107,18 @@ const GENESIS = '0'.repeat(64);
 export const ledgerHash = (prev: string, seq: number, ts: string, kind: string, store: string, hwid: string, key: string): string =>
   createHash('sha256').update([prev, seq, ts, kind, store, hwid, key].join('|')).digest('hex');
 
-export function ledgerAppend(prevEntries: LedgerEntry[], input: { ts: string; kind: 'issue' | 'revoke'; store: string; hwid: string; key: string; note?: string }): LedgerEntry {
+export function ledgerAppend(prevEntries: LedgerEntry[], input: { ts: string; kind: 'issue' | 'revoke'; store: string; hwid: string; key: string; note?: string; meta?: LedgerMeta; revokes?: number }): LedgerEntry {
   const prev = prevEntries.length === 0 ? GENESIS : prevEntries[prevEntries.length - 1].hash;
   const seq = prevEntries.length + 1;
-  return {
+  // NOTE: hash covers the FROZEN septet only — meta/revokes ride along unhashed.
+  const entry: LedgerEntry = {
     seq, ts: input.ts, kind: input.kind, store: input.store, hwid: input.hwid,
     key: input.key, note: input.note ?? '', prev,
     hash: ledgerHash(prev, seq, input.ts, input.kind, input.store, input.hwid, input.key),
   };
+  if (input.meta !== undefined) entry.meta = input.meta;
+  if (input.revokes !== undefined) entry.revokes = input.revokes;
+  return entry;
 }
 
 /** Replay the chain: linkage + recompute every hash. Returns the first broken seq, or null when intact. */
@@ -145,4 +165,4 @@ export function renderReceipt(store: string, hwid: string, key: string, seq: num
   ].join('\n');
 }
 
-export const DESK_VERSION = '3.0.0';
+export const DESK_VERSION = '4.0.0';

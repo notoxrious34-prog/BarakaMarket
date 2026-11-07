@@ -23,3 +23,9 @@ releases/
 src-tauri/target/
 # Activation-desk SEA staging + exe (rebuilt via docs/ACTIVATION-DESK.md).
 .tmp-sea/
+# Activation-desk issuance ledger — lives next to the exe, never in the repo.
+keygen-ledger.jsonl
+keygen-ledger.backup.jsonl
+desk-audit.log
+# Activation-desk operator token (minted beside the exe, rotate by deleting).
+.desk-token

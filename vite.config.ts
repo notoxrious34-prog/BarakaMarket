@@ -16,6 +16,23 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Activation Desk station: the Vite dev server forwards /api/desk/*
+      // to the local signing server (`npm run desk`, 127.0.0.1:3200).
+      proxy: {
+        '/api/desk': {
+          target: 'http://127.0.0.1:3200',
+          changeOrigin: false,
+        },
+      },
+    },
+    build: {
+      rollupOptions: {
+        // Main POS + staff Activation Desk (desk.html) ship from one build.
+        input: {
+          main: 'index.html',
+          desk: 'desk.html',
+        },
+      },
     },
   };
 });
