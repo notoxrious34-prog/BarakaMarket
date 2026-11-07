@@ -110,7 +110,7 @@ export const LicenseManagerView: React.FC = () => {
         <div className="space-y-2.5 text-center md:text-start">
           <div className="flex items-center justify-center md:justify-start gap-2 flex-wrap">
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              BarakaDEV — Algerian Retail Solutions
+              Baraka DEV — Algerian Retail Solutions
             </span>
             <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-sky-500/10 text-sky-400 border border-sky-500/20 font-mono">
               Baraka Market v{APP_VERSION}
@@ -167,7 +167,7 @@ export const LicenseManagerView: React.FC = () => {
             <div className="text-base md:text-lg font-black tracking-wide text-white">
               BARAKA MARKET — {isAr ? 'تفعيل النظام' : 'ACTIVATION DU SYSTÈME'}
             </div>
-            <div className="text-[11px] text-amber-300/90 mt-0.5">ETS MOHAMED EL-BARAKA / BarakaDEV</div>
+            <div className="text-[11px] text-amber-300/90 mt-0.5">Baraka DEV</div>
           </div>
 
           <div className="p-6 space-y-5">
@@ -299,8 +299,8 @@ export const LicenseManagerView: React.FC = () => {
             </div>
             <ul className="space-y-2 text-xs text-slate-300 leading-relaxed">
               {(isAr
-                ? ['دفعة واحدة مدى الحياة — بلا اشتراكات ولا رسوم متكررة', 'مرتبطة بهذا الجهاز (HWID) — قابلة للنقل عبر الدعم عند تغيير الصندوق', 'تفعيل وتشغيل كامل دون إنترنت', 'التحديثات والدعم عبر قناة BarakaDEV الرسمية']
-                : ['Paiement unique à vie — ni abonnement, ni frais récurrents', 'Liée à cette machine (HWID) — transférable via le support en cas de changement de caisse', 'Activation et exploitation 100% hors-ligne', 'Mises à jour et support via le canal officiel BarakaDEV']
+                ? ['دفعة واحدة مدى الحياة — بلا اشتراكات ولا رسوم متكررة', 'مرتبطة بهذا الجهاز (HWID) — قابلة للنقل عبر الدعم عند تغيير الصندوق', 'تفعيل وتشغيل كامل دون إنترنت', 'التحديثات والدعم عبر قناة Baraka DEV الرسمية']
+                : ['Paiement unique à vie — ni abonnement, ni frais récurrents', 'Liée à cette machine (HWID) — transférable via le support en cas de changement de caisse', 'Activation et exploitation 100% hors-ligne', 'Mises à jour et support via le canal officiel Baraka DEV']
               ).map(li => (
                 <li key={li} className="flex gap-2">
                   <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400 mt-0.5" />
@@ -316,10 +316,14 @@ export const LicenseManagerView: React.FC = () => {
             </div>
             <p className="text-xs text-slate-300 leading-relaxed mb-2">
               {isAr
-                ? 'أرسل بصمة الجهاز (HWID) مع اسم المحل إلى موزّعك المعتمد أو إلى الدعم الفني لـ BarakaDEV:'
-                : 'Envoyez votre HWID avec le nom du magasin à votre revendeur agréé ou au support BarakaDEV :'}
+                ? 'أرسل بصمة الجهاز (HWID) مع اسم المحل إلى موزّعك المعتمد أو إلى الدعم الفني لـ Baraka DEV:'
+                : 'Envoyez votre HWID avec le nom du magasin à votre revendeur agréé ou au support Baraka DEV :'}
             </p>
             <p className="font-mono text-white text-sm">📞 Téléphone / WhatsApp: +213 770 80 70 05</p>
+            <p className="font-mono text-white text-sm" dir="ltr">✉️ BarakaDev.34@outlook.com</p>
+            <p className="text-xs text-slate-300">
+              {isAr ? '📍 حي 17 أكتوبر، برج بوعريريج — الجزائر' : '📍 Cité 17 Octobre, Bordj Bou Arréridj — Algérie'}
+            </p>
             <p className="text-[11px] text-slate-500 mt-2">
               {isAr ? 'الأسعار وشروط البيع في عرض السعر والفاتورة — لا تُعرض داخل البرنامج.' : 'Tarifs et CGV sur devis et facture — jamais affichés dans le produit.'}
             </p>

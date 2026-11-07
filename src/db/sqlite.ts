@@ -2112,14 +2112,32 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     },
 
     getSaleForReturn(key: string) {
+      // Smart lookup (supermarket lane): exact id/FACT → digits-only short
+      // (FACT-{year}-{pad6}) → unique invoice suffix. Read-only, no schema.
+      // NOTE: exact pass uses the trimmed-as-typed key (UUID ids are lowercase).
       const k = key.trim();
-      if (!k) return null;
-      const sale = db.prepare(
+      const raw = k.toUpperCase().replace(/\s+/g, '');
+      if (!raw) return null;
+      const head = (a: string, b: string) => db.prepare(
         `SELECT id, invoice_number, status, created_at, payment_method, client_name, total_ttc_ct
          FROM sales WHERE id = ? OR invoice_number = ?`,
-      ).get(k, k) as
+      ).get(a, b) as
         | { id: string; invoice_number: string; status: string; created_at: string; payment_method: string; client_name: string | null; total_ttc_ct: number }
         | undefined;
+      let sale = head(k, k);
+      if (!sale && raw !== k) sale = head(raw, raw);
+      if (!sale && /^\d{1,6}$/.test(raw)) {
+        const cand = `FACT-${new Date().getFullYear()}-${raw.padStart(6, '0')}`;
+        sale = head(cand, cand);
+      }
+      if (!sale && raw.length >= 3) {
+        const esc = raw.replace(/[\\%_]/g, m => `\\${m}`);
+        const rows = db.prepare(
+          `SELECT id, invoice_number, status, created_at, payment_method, client_name, total_ttc_ct
+           FROM sales WHERE invoice_number LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT 2`,
+        ).all(`%-${esc}`) as { id: string; invoice_number: string; status: string; created_at: string; payment_method: string; client_name: string | null; total_ttc_ct: number }[];
+        if (rows.length === 1) sale = rows[0];
+      }
       if (!sale) return null;
       const items = db.prepare(
         `SELECT si.id AS sale_item_id, si.product_id, si.barcode, si.name_fr, si.name_ar,

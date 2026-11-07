@@ -2057,16 +2057,23 @@ pub fn return_list(conn: &Connection, status: Option<String>) -> Result<Value, S
 /// remaining qty, found by UUID id OR FACT number. Null when unknown.
 /// Read-only twin of the TS `getSaleForReturn` (same shape, same guard math).
 pub fn sale_for_return(conn: &Connection, key: &str) -> Result<Value, String> {
+    // Smart lookup (supermarket lane, mirrors sqlite.ts): exact id/FACT →
+    // digits-only short (FACT-{year}-{pad6}) → unique invoice suffix.
     let k = key.trim();
     if k.is_empty() {
         return Ok(Value::Null);
     }
-    let head: Option<Value> = conn
-        .query_row(
+    let raw: String = k
+        .to_uppercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let fetch = |q: &str| -> Result<Option<Value>, String> {
+        conn.query_row(
             "SELECT id, invoice_number, status, created_at, payment_method,
               client_name, total_ttc_ct
              FROM sales WHERE id = ?1 OR invoice_number = ?1",
-            [k],
+            [q],
             |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, String>(0)?,
@@ -2080,7 +2087,59 @@ pub fn sale_for_return(conn: &Connection, key: &str) -> Result<Value, String> {
             },
         )
         .optional()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+    };
+    let mut head = fetch(k)?;
+    if head.is_none() && !raw.is_empty() && raw != k {
+        head = fetch(&raw)?;
+    }
+    if head.is_none()
+        && !raw.is_empty()
+        && raw.len() <= 6
+        && raw.chars().all(|c| c.is_ascii_digit())
+    {
+        let year: String = now_iso().chars().take(4).collect();
+        let cand = format!("FACT-{}-{:0>6}", year, raw);
+        head = fetch(&cand)?;
+    }
+    if head.is_none() && raw.len() >= 3 {
+        let esc: String = raw
+            .chars()
+            .flat_map(|c| match c {
+                '\\' | '%' | '_' => vec!['\\', c],
+                c => vec![c],
+            })
+            .collect();
+        let like = format!("%-{}", esc);
+        let mut st = conn
+            .prepare(
+                "SELECT id, invoice_number, status, created_at, payment_method,
+                  client_name, total_ttc_ct
+                 FROM sales WHERE invoice_number LIKE ?1 ESCAPE '\\'
+                 ORDER BY created_at DESC LIMIT 2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = st
+            .query_map([like], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, String>(0)?,
+                    "invoice_number": r.get::<_, String>(1)?,
+                    "status": r.get::<_, String>(2)?,
+                    "created_at": r.get::<_, String>(3)?,
+                    "payment_method": r.get::<_, String>(4)?,
+                    "client_name": r.get::<_, Option<String>>(5)?,
+                    "total_ttc_ct": r.get::<_, i64>(6)?,
+                }))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut found: Vec<Value> = Vec::new();
+        for r in rows {
+            found.push(r.map_err(|e| e.to_string())?);
+        }
+        if found.len() == 1 {
+            head = Some(found.remove(0));
+        }
+    }
     let Some(h) = head else {
         return Ok(Value::Null);
     };
@@ -4211,6 +4270,13 @@ mod tests {
         }
         assert!(sale_for_return(&db, "FACT-2099-999999").unwrap().is_null());
         assert!(sale_for_return(&db, "   ").unwrap().is_null());
+        // Smart lookup (supermarket lane): lowercase, padded spaces, and a
+        // unique invoice suffix all resolve (digits path misses the 2026
+        // fixture year, suffix fallback catches it).
+        for key in ["fact-2026-000001", "  FACT-2026-000001  ", "000001"] {
+            let f = sale_for_return(&db, key).unwrap();
+            assert_eq!(f["sale"]["invoice_number"], "FACT-2026-000001", "key={key}");
+        }
         // After a full approval the consumed line reads zero remaining.
         let item_id: i64 = db
             .query_row(

@@ -56,3 +56,12 @@ Méthode (pas de big-bang) :
 `tsc --noEmit` + `npm run lint` + suites concernées vertes + lane visuelle
 avant/après + `git status` propre + commit conventionnel. Aucun `add -A`
 (arborescence partagée avec l'Activation Desk).
+
+## 5. Extension 2026-11-07 — bureau Retours + infos Licence (réponses owner)
+
+- Retours : hero 4 portes + cartes 01/02/03 ; recherche tolérante côté DAL
+  (exact → FACT-{année}-{pad6} → suffixe unique, lecture seule, miroir
+  TS/Rust + tests) + normalisation vue (trim/upper/espaces) + autofocus.
+- Licence : nom affiché « Baraka DEV », contacts (tél + BarakaDev.34@outlook.com
+  + Cité 17 Octobre, Bordj Bou Arréridj — Algérie), sans horaires, sans
+  numéros RC/NIF, prix toujours hors produit.

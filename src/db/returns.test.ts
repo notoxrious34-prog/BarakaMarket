@@ -340,6 +340,13 @@ test('v1.5.0: sale lookup by FACT or id feeds the draft screen (remaining math)'
     }
     assert.equal(b.getSaleForReturn('FACT-2099-999999'), null);
     assert.equal(b.getSaleForReturn('   '), null);
+    // Smart lookup (supermarket lane): lowercase + spaces, digits-only short,
+    // and unique invoice suffix all resolve to the same sale.
+    const tail6 = sale.invoice_number.slice(-6);
+    assert.equal(b.getSaleForReturn(sale.invoice_number.toLowerCase())!.sale.invoice_number, sale.invoice_number);
+    assert.equal(b.getSaleForReturn(`  ${sale.invoice_number.toLowerCase()}  `)!.sale.invoice_number, sale.invoice_number);
+    assert.equal(b.getSaleForReturn(String(Number(tail6)))!.sale.invoice_number, sale.invoice_number);
+    assert.equal(b.getSaleForReturn(tail6)!.sale.invoice_number, sale.invoice_number);
     // after a full approval the line shows consumed
     const [la] = saleItemIds(b, sale.id);
     const d = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 2000 }], reason: 'DEFECT', actor: 'lina' });
