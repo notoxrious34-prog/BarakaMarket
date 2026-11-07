@@ -738,6 +738,18 @@ pub fn record_sale(
             .map_err(|e| e.to_string())?;
         }
     }
+    // B-credit (supermarket): a CREDIT sale posts the debt the moment it
+    // commits — stored balance and derived statement stay symmetric, and
+    // the return lane reverses exactly this posting on approval.
+    if method == "CREDIT" {
+        if let Some(c) = client_fk {
+            tx.execute(
+                "UPDATE clients SET credit_balance_ct = credit_balance_ct + ?1 WHERE id = ?2",
+                rusqlite::params![ttc, c],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "id": id, "invoice_number": invoice, "ticket_number": ticket }))
 }
@@ -1243,7 +1255,7 @@ pub fn return_approve(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let (status, sale_id, invoice_number, payment, refund_ct, actor, sale_day, reason): (
+    let (status, sale_id, invoice_number, payment, refund_ct, actor, sale_day, reason, client_id): (
         String,
         String,
         String,
@@ -1252,9 +1264,10 @@ pub fn return_approve(
         String,
         String,
         String,
+        Option<i64>,
     ) = tx
         .query_row(
-            "SELECT status, sale_id, invoice_number, payment_method, refund_ct, actor, sale_day, reason
+            "SELECT status, sale_id, invoice_number, payment_method, refund_ct, actor, sale_day, reason, client_id
              FROM returns WHERE id = ?1",
             [id],
             |r| {
@@ -1267,6 +1280,7 @@ pub fn return_approve(
                     r.get(5)?,
                     r.get(6)?,
                     r.get(7)?,
+                    r.get(8)?,
                 ))
             },
         )
@@ -1486,13 +1500,28 @@ pub fn return_approve(
         )
         .map_err(|e| e.to_string())?;
     }
+    // B-credit: reversing a CREDIT sale shrinks the client's debt by the
+    // refund — same txn, exact mirror of the posting at record_sale.
+    // No floor: increment and reversal are symmetric, so a negative would
+    // be a loud signal, never a silent absorption.
+    let mut cred_note = String::new();
+    if payment == "CREDIT" {
+        if let Some(c) = client_id {
+            tx.execute(
+                "UPDATE clients SET credit_balance_ct = credit_balance_ct - ?1 WHERE id = ?2",
+                rusqlite::params![refund_ct, c],
+            )
+            .map_err(|e| e.to_string())?;
+            cred_note = format!(" cred-{refund_ct}");
+        }
+    }
     audit_return(
         &tx,
         who,
         "return.approve",
         id,
         format!(
-            "{number} {invoice_number} refund={refund_ct} creator={actor} disp=R{n_restock}/Q{n_quar}/D{n_destroy}"
+            "{number} {invoice_number} refund={refund_ct} creator={actor} disp=R{n_restock}/Q{n_quar}/D{n_destroy}{cred_note}"
         ),
     )?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -3975,6 +4004,75 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (179400 - 36000, 36000, 1, 24000));
+    }
+
+    #[test]
+    fn b_credit_posts_debt_and_return_reverses_it() {
+        // B-credit (supermarket): a CREDIT sale posts the client's debt at
+        // commit; approving a return on it shrinks the debt by the refund —
+        // same txn, exact mirror. Fixture TTC 179400 − timbre 1800 = 177600.
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO clients (id, name, credit_balance_ct) VALUES (7, 'Zed', 0)",
+            [],
+        )
+        .unwrap();
+        let mut h = sale_header(Some("BC-1"));
+        h["payment_method"] = serde_json::json!("CREDIT");
+        h["client_id"] = serde_json::json!(7);
+        h["totals"]["timbre_ct"] = serde_json::json!(0);
+        h["totals"]["total_ttc_ct"] = serde_json::json!(177600);
+        h["amount_paid_ct"] = serde_json::json!(177600);
+        h["amount_returned_ct"] = serde_json::json!(0);
+        record_sale(&mut db, &h, &sale_items()).unwrap();
+        let bal: i64 = db
+            .query_row(
+                "SELECT credit_balance_ct FROM clients WHERE id = 7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bal, 177600);
+        // Full LAIT line, CHANGED_MIND → RESTOCK default, no cash session.
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        let d = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "CHANGED_MIND",
+            None,
+            "lina",
+            None,
+            "2026-11-01",
+        )
+        .unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        let a = return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).unwrap();
+        assert_eq!(a["refund_ct"], 36000);
+        let bal2: i64 = db
+            .query_row(
+                "SELECT credit_balance_ct FROM clients WHERE id = 7",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bal2, 177600 - 36000);
+        // The audit names the reversal.
+        let detail: String = db
+            .query_row(
+                "SELECT detail FROM audit_log WHERE action = 'return.approve' AND entity_id = ?1 ORDER BY id DESC LIMIT 1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(detail.contains("cred-36000"), "detail: {detail}");
     }
 
     #[test]

@@ -395,3 +395,32 @@ test('A1 (supermarket): disposition defaults, DESTROY waste ledger, explicit ove
     for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
   }
 });
+
+test('B-credit (supermarket): CREDIT sale posts debt; approved return reverses it', () => {
+  const p = tmpFile('bcredit');
+  try {
+    const b = openBarakaDb(p);
+    b.upsertProduct(PROD);
+    b.db.prepare('INSERT INTO clients (id, name, phone, credit_balance_ct, max_credit_limit_ct) VALUES (30, ?, ?, 0, 0)').run('CLIENT 30', '0550000000');
+    const bal = () => (b.db.prepare('SELECT credit_balance_ct FROM clients WHERE id = 30').get() as { credit_balance_ct: number }).credit_balance_ct;
+    // The debt posts at commit — stored balance matches the derived statement.
+    const sale = recordTodaySale(b, 'CREDIT', 30);
+    const ttc = (b.getSale(sale.id) as Record<string, unknown>).total_ttc_ct as number;
+    assert.ok(ttc > 0);
+    assert.equal(bal(), ttc);
+    // Full first-line return (CHANGED_MIND → RESTOCK, no cash session needed).
+    const [la] = saleItemIds(b, sale.id);
+    const d = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 2000 }], reason: 'CHANGED_MIND', actor: 'lina' });
+    const ap = b.approveReturn(d.id, 'karim', 'manager');
+    assert.ok(ap.refund_ct > 0);
+    assert.equal(bal(), ttc - ap.refund_ct);
+    // The client statement itemizes the reversal; the audit names it.
+    const st = b.getClientStatement(30);
+    assert.equal(st.creditReturns.length, 1);
+    const audit = b.listAudit(50).find(r => r.action === 'return.approve' && r.entity_id === d.id);
+    assert.ok(audit && audit.detail.includes(`cred-${ap.refund_ct}`));
+    b.close();
+  } finally {
+    for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
+  }
+});

@@ -556,6 +556,7 @@ export interface BarakaDb {
     client: Record<string, unknown>;
     settlements: Record<string, unknown>[];
     creditSales: Record<string, unknown>[];
+    creditReturns: Record<string, unknown>[];
   };
   /** ADR-013-MKT: cash session lifecycle + Z closure. */
   openCashSession(cashierName: string, openingFloatCt: number): CashSessionRecord;
@@ -2038,6 +2039,13 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             it.qty_milli, it.unit, it.tva_rate, it.discount_bp, it.line_ht_ct, it.line_tva_ct, it.line_ttc_ct);
           if (it.product_id !== null) decStock.run(it.qty_milli, it.product_id);
         }
+        // B-credit (supermarket): a CREDIT sale posts the debt the moment it
+        // commits — stored balance and derived statement stay symmetric, and
+        // the return lane reverses exactly this posting on approval.
+        if (header.payment_method === 'CREDIT' && clientFk !== null) {
+          db.prepare('UPDATE clients SET credit_balance_ct = credit_balance_ct + ? WHERE id = ?')
+            .run(t.total_ttc_ct, clientFk);
+        }
         db.exec('COMMIT');
         return { id, invoice_number: invoice, ticket_number: ticket };
       } catch (e) {
@@ -2243,11 +2251,12 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       }
       const head = db.prepare(
         `SELECT id, sale_id, invoice_number, payment_method, reason, refund_ct,
-          status, actor, sale_day FROM returns WHERE id = ?`,
+          status, actor, sale_day, client_id FROM returns WHERE id = ?`,
       ).get(id) as
         | {
           id: string; sale_id: string; invoice_number: string; payment_method: string;
           reason: string; refund_ct: number; status: string; actor: string; sale_day: string;
+          client_id: number | null;
         } | undefined;
       if (!head) throw new Error(`[db] return not found: ${id}`);
       if (head.status !== 'DRAFT') throw new Error(`[db] return ${id} is already decided (${head.status})`);
@@ -2352,9 +2361,19 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           `UPDATE returns SET status = 'APPROVED', approver = ?, posting_day = ?,
            decided_at = ?, return_number = ? WHERE id = ?`,
         ).run(who, postingDay, now, number, head.id);
+        // B-credit: reversing a CREDIT sale shrinks the client's debt by the
+        // refund — same txn, exact mirror of the posting at recordSale.
+        // No floor: increment and reversal are symmetric, so a negative would
+        // be a loud signal, never a silent absorption.
+        let credNote = '';
+        if (head.payment_method === 'CREDIT' && head.client_id !== null) {
+          db.prepare('UPDATE clients SET credit_balance_ct = credit_balance_ct - ? WHERE id = ?')
+            .run(head.refund_ct, head.client_id);
+          credNote = ` cred-${head.refund_ct}`;
+        }
         logAuditRow(db, {
           actor: who, action: 'return.approve', entity: 'returns', entityId: head.id,
-          detail: `${number} ${head.invoice_number} refund=${head.refund_ct} creator=${head.actor} disp=R${dispCount.RESTOCK}/Q${dispCount.QUARANTINE}/D${dispCount.DESTROY}`,
+          detail: `${number} ${head.invoice_number} refund=${head.refund_ct} creator=${head.actor} disp=R${dispCount.RESTOCK}/Q${dispCount.QUARANTINE}/D${dispCount.DESTROY}${credNote}`,
         });
         db.exec('COMMIT');
         return { return_number: number, refund_ct: head.refund_ct, posting_day: postingDay };
