@@ -19,8 +19,13 @@ export function useAutoFocusBarcode(
   }, [ref]);
 
   // Re-arm when the dependency lane changes (modals open/close toggles).
+  // F3/F6 fix: re-arm ONLY when every modal is closed. Firing on open stole
+  // focus from the modal's own input (barcode field won the race, keystrokes
+  // landed behind the modal). Note modal indexes are numbers — 0 is open.
   useEffect(() => {
     if (resetDeps.length === 0) return;
+    const anyOpen = resetDeps.some(d => d !== null && d !== false && d !== undefined);
+    if (anyOpen) return;
     rearm();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, resetDeps);

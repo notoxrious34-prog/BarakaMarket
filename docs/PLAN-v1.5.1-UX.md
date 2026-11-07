@@ -51,6 +51,23 @@ Méthode (pas de big-bang) :
 3. Lane visuelle `theme-unified` : POS, Licence, Retours, Compta, Paramètres —
    captures dark + light (bascule via `baraka_theme_v2`), revue pixel par pixel.
 
+## 6. Correctifs caisse 2026-11-07 — F3 + F6 (signalement owner, preuve live)
+
+- **F3 Remise ciblait la mauvaise ligne** : `editingItemIndex` collant
+  (jamais réinitialisé après scans/suppressions/encaissement) → F3 éditait
+  la première ligne au lieu de la dernière scannée, ou rien (index périmé).
+  Règle : F3/F2 visent toujours la dernière ligne scannée ; état collant
+  supprimé. + **vol de focus** : le réarmement auto du champ code-barres se
+  déclenchait aussi à l'OUVERTURE des modales (course avec l'autofocus du
+  modal) → touches perdues derrière la modale. Le réarm ne se fait que quand
+  toutes les modales sont fermées (index numérique 0 = ouvert).
+- Preuve live (lane-f3, sombre+clair) : 3 lignes → F3 ouvre sur la DERNIÈRE
+  (CHOCOLAT) → 10 % appliqué sur la bonne ligne ; F6 ouvre le bureau repensé.
+- **F6 Balance repensée en bureau 1·2·3** : en-tête (statut SIMU/STABLE) +
+  1·choix article avec recherche instantanée, 2·plateau LED + molettes
+  ±50/±100 g + presets + lien live RS-232/USB, 3·ticket à injecter
+  (code-barres + total). Revue visuelle : sombre 9/10, clair sans îlots.
+
 ## 4. Portes d'acceptation (chaque lot)
 
 `tsc --noEmit` + `npm run lint` + suites concernées vertes + lane visuelle

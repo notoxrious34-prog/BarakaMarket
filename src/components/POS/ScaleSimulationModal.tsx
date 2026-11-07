@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Scale, Barcode, CheckCircle, X, ShoppingBag, Cable } from 'lucide-react';
+import { Scale, Barcode, CheckCircle, X, ShoppingBag, Cable, Search, Minus, Plus } from 'lucide-react';
 import { formatDZD } from '../../core/display';
 import { connectLiveScale, type ScaleLiveStatus } from '../../hardware/scale';
 
@@ -17,6 +17,12 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
     scaleProducts.length > 0 ? scaleProducts[0].id : 4
   );
   const [weightKg, setWeightKg] = useState<number>(1.45); // default 1.45 kg matching prompt receipt example
+  const [query, setQuery] = useState('');
+  const shownProducts = scaleProducts.filter(p => {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return p.name_fr.toLowerCase().includes(q) || p.name_ar.includes(query.trim()) || p.barcode.includes(q);
+  });
 
   // T6 (ADR-029): live RS-232/USB scale via Web Serial. Streams into the
   // same simulated weight so the rest of the flow (barcode + POS) is
@@ -67,39 +73,56 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-      <div className="bg-[#111722] border border-[#1e293b] rounded-2xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
-        {/* Header */}
+      <div className="bg-[#111722] border border-amber-500/20 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden flex flex-col">
+        {/* Header — brand + live status at a glance */}
         <div className="px-5 py-4 border-b border-[#1e293b] flex items-center justify-between bg-[#0b0f17]">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center">
               <Scale className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm font-bold text-white">
-                {isAr ? 'محاكي ميزان التجزئة الإلكتروني (RS232/USB)' : 'Simulateur Balance Électronique'}
+              <h3 className="text-sm font-black text-white">
+                {isAr ? 'الميزان — وزن وحقن (F6)' : 'Balance — pesée & injection (F6)'}
               </h3>
               <p className="text-[11px] text-slate-400">
-                {isAr ? 'توليد باركود الميزان الذكي (20XXXXXWWWWWC)' : 'Génération Code-barres Balance Automatique'}
+                {isAr ? 'اختر الصنف ← اضبط الوزن ← احقن في السلة' : 'Article → poids → injection panier'}
               </p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg cursor-pointer"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border ${liveStatus === 'live' ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300' : 'bg-[#162030] border-[#2b3a4f] text-slate-400'}`} dir="ltr">
+              <span className={`w-1.5 h-1.5 rounded-full inline-block ${liveStatus === 'live' ? (liveStable ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse') : 'bg-slate-600'}`} />
+              {liveStatus === 'live' ? (liveStable ? (isAr ? 'ثابت' : 'STABLE') : '…') : (isAr ? 'محاكاة' : 'SIMU')}
+            </span>
+            <button
+              onClick={onClose}
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
         <div className="p-5 space-y-4">
-          {/* Select Scale Produce / Meat */}
+          {/* Product picker with instant filter */}
           <div>
-            <label className="text-xs font-semibold text-slate-300 block mb-1.5">
-              {isAr ? 'اختر مادة للوزن (خضر / فواكه / لحوم / أجبان):' : 'Article au Poids (Fruits/Légumes/Boucherie):'}
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              {scaleProducts.map(p => (
+            <div className="flex items-center gap-2 mb-1.5">
+              <label className="text-xs font-bold text-slate-200">
+                {isAr ? '1 · الصنف الموزون:' : '1 · Article à peser :'}
+              </label>
+              <div className="relative ms-auto w-44">
+                <Search className="w-3.5 h-3.5 absolute start-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                <input
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
+                  placeholder={isAr ? 'ابحث عن صنف…' : 'Rechercher un article…'}
+                  className="w-full bg-[#0b0f17] border border-[#2b3a4f] rounded-lg ps-8 pe-2 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 max-h-36 overflow-y-auto pe-0.5">
+              {shownProducts.map(p => (
                 <button
                   key={p.id}
                   type="button"
@@ -116,22 +139,42 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
                   </div>
                 </button>
               ))}
+              {shownProducts.length === 0 && (
+                <div className="col-span-2 text-center text-xs text-slate-500 py-3">
+                  {isAr ? 'لا صنف مطابق — امسح باركود الميزان مباشرة.' : 'Aucun article — scannez le ticket balance.'}
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Weight adjustment */}
-          <div className="bg-[#0b0f17] border border-[#1e293b] rounded-xl p-4 text-center space-y-3">
-            <span className="text-[11px] text-slate-400 uppercase tracking-wider">
-              {isAr ? 'الوزن المقاس على لوحة الميزان' : 'Poids Mesuré sur le Plateau'}
-            </span>
-            <div className="text-4xl font-black font-mono text-emerald-400 tracking-tight">
+          {/* 2 · Scale plateau — LED digits, steppers, presets, live link */}
+          <div className="bg-[#0b0f17] border border-[#1e293b] rounded-xl p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-bold text-slate-200">
+                {isAr ? '2 · الوزن على اللوحة:' : '2 · Poids sur le plateau :'}
+              </span>
+              <div className="ms-auto flex items-center gap-1.5" dir="ltr">
+                {[-0.1, -0.05, 0.05, 0.1].map(d => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setWeightKg(w => Math.max(0.05, Math.round((w + d) * 1000) / 1000))}
+                    className="px-2 py-1 bg-[#162030] hover:bg-[#233145] border border-[#2b3a4f] text-slate-300 rounded-lg text-xs font-mono cursor-pointer flex items-center gap-0.5"
+                    title={isAr ? 'ضبط دقيق ±' : 'Ajust fin ±'}
+                  >
+                    {d > 0 ? <Plus className="w-3 h-3" /> : <Minus className="w-3 h-3" />}{Math.abs(d * 1000)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="text-center text-5xl font-black font-mono text-emerald-400 tracking-tight" dir="ltr">
               {weightKg.toFixed(3)} <span className="text-lg text-slate-400 font-normal">kg</span>
             </div>
 
             {/* Slider */}
             <input
               type="range"
-              min="0.1"
+              min="0.05"
               max="10"
               step="0.05"
               value={weightKg}
@@ -140,15 +183,15 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
             />
 
             {/* Quick Weight Chips */}
-            <div className="flex justify-center gap-1.5 pt-1">
-              {[0.5, 1.0, 1.45, 2.0, 3.5].map(w => (
+            <div className="flex justify-center gap-1.5 flex-wrap">
+              {[0.25, 0.5, 1.0, 1.45, 2.0, 3.5, 5.0].map(w => (
                 <button
                   key={w}
                   type="button"
                   onClick={() => setWeightKg(w)}
-                  className="px-2 py-0.5 bg-[#162030] hover:bg-[#233145] text-slate-300 rounded text-xs font-mono border border-[#2b3a4f] cursor-pointer"
+                  className={`px-2 py-0.5 rounded text-xs font-mono border cursor-pointer ${weightKg === w ? 'bg-amber-600 border-amber-500 text-white' : 'bg-[#162030] hover:bg-[#233145] text-slate-300 border-[#2b3a4f]'}`}
                 >
-                  {w} kg
+                  {w === 1.45 ? '1.450' : w} kg
                 </button>
               ))}
             </div>
@@ -170,17 +213,17 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
             </button>
           </div>
 
-          {/* Barcode Output Preview */}
-          <div className="bg-[#162030] border border-[#2b3a4f] rounded-xl p-3 flex items-center justify-between">
-            <div>
-              <div className="text-[10px] text-slate-400">{isAr ? 'ملصق الباركود المتولد:' : 'Code Balance Généré:'}</div>
-              <div className="text-sm font-mono font-bold text-amber-300 tracking-widest mt-0.5">
+          {/* 3 · Ticket to inject — barcode + computed total */}
+          <div className="bg-[#162030] border border-amber-500/25 rounded-xl p-3 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[10px] font-bold text-slate-200">{isAr ? '3 · تذكرة الميزان للحقن:' : '3 · Ticket à injecter :'}</div>
+              <div className="text-sm font-mono font-bold text-amber-300 tracking-widest mt-0.5 truncate" dir="ltr">
                 {generatedBarcode}
               </div>
             </div>
-            <div className="text-end">
-              <div className="text-[10px] text-slate-400">{isAr ? 'السعر المقدر:' : 'Prix Calculé:'}</div>
-              <div className="text-sm font-mono font-bold text-emerald-400">
+            <div className="text-end shrink-0">
+              <div className="text-[10px] text-slate-400">{isAr ? 'الإجمالي:' : 'Total :'}</div>
+              <div className="text-lg font-mono font-black text-emerald-400">
                 {formatDZD(estimatedPrice, false)}
               </div>
             </div>

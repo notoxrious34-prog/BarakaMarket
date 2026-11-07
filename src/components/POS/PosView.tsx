@@ -73,7 +73,6 @@ export const PosView: React.FC = () => {
   const [qtyModalIndex, setQtyModalIndex] = useState<number | null>(null);
   const [discountModalIndex, setDiscountModalIndex] = useState<number | null>(null);
   const [showCatalogModal, setShowCatalogModal] = useState(false);
-  const [editingItemIndex, setEditingItemIndex] = useState<number | null>(null);
   const [isLocked, setIsLocked] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
@@ -132,20 +131,19 @@ export const PosView: React.FC = () => {
         barcodeInputRef.current?.focus();
         barcodeInputRef.current?.select();
       } else if (action === 'pos.qty') {
-        // Quantity override modal for last scanned / selected item
+        // Quantity override modal for the LAST scanned line. The old sticky
+        // editingItemIndex pointed at a stale row after new scans/removals,
+        // so F2/F3 silently edited the wrong line (or none at all).
         e.preventDefault();
         if (currentCart.length > 0) {
-          const idx = editingItemIndex ?? currentCart.length - 1;
-          setEditingItemIndex(idx);
+          const idx = currentCart.length - 1;
           setQtyModalIndex(idx);
         }
       } else if (action === 'pos.discount') {
-        // Line remise modal (percent or fixed DZD)
+        // Line remise modal (percent or fixed DZD) — same last-line rule.
         e.preventDefault();
         if (currentCart.length > 0) {
-          const idx = editingItemIndex ?? currentCart.length - 1;
-          setEditingItemIndex(idx);
-          setDiscountModalIndex(idx);
+          setDiscountModalIndex(currentCart.length - 1);
         }
       } else if (action === 'pos.hold') {
         e.preventDefault();
@@ -178,7 +176,7 @@ export const PosView: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentCart, heldCarts, holdCurrentCart, restoreHeldCart, editingItemIndex, updateCartItemQty, updateCartItemDiscount, isLocked, isTrialExpired]);
+  }, [currentCart, heldCarts, holdCurrentCart, restoreHeldCart, updateCartItemQty, updateCartItemDiscount, isLocked, isTrialExpired]);
 
   // Handle barcode scanner submission
   const handleBarcodeSubmit = (e: React.FormEvent) => {
