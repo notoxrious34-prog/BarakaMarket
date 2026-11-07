@@ -186,7 +186,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 12;
+export const LATEST_SCHEMA_VERSION = 13;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -509,6 +509,18 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 12');
     v = 12;
   }
+  // v12 → v13 (A3 supermarket): daily scrappage memo columns on z_reports.
+  if (v < 13) {
+    const zcols = db.prepare('PRAGMA table_info(z_reports)').all() as { name: string }[];
+    if (!zcols.some(c => c.name === 'losses_count')) {
+      db.exec('ALTER TABLE z_reports ADD COLUMN losses_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!zcols.some(c => c.name === 'losses_total_ct')) {
+      db.exec('ALTER TABLE z_reports ADD COLUMN losses_total_ct INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec('PRAGMA user_version = 13');
+    v = 13;
+  }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -616,6 +628,7 @@ export interface BarakaDb {
       dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
       firstInvoice: string; lastInvoice: string;
       returnsCount: number; returnsTotalTtcCt: number;
+      lossesCount: number; lossesTotalCt: number;
     };
   }): { report_number: string; hash: string; prev_hash: string };
   getLatestZHash(): string;
@@ -685,6 +698,10 @@ export interface DayAggregatesCt {
   firstInvoice: string; lastInvoice: string;
   /** v1.5.0 (RETURNS memo): approved returns posted this day; money columns above are NET. */
   returnsCount: number; returnsTotalTtcCt: number;
+  /** A3 (supermarket): daily scrappage memo — cost-at-buy of goods DESTROYED
+   *  this day (waste ledger window). Shown on the Z as its own line; it never
+   *  touches sales, it is a management/profit signal, not fiscal turnover. */
+  lossesCount: number; lossesTotalCt: number;
 }
 
 export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregatesCt {
@@ -738,6 +755,13 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
     n: number; ht: number; b0: number; b9: number; a9: number; b19: number; a19: number;
     tva: number; ttc: number; cash: number; cib: number; dah: number; cred: number;
   };
+  // A3 (supermarket): daily scrappage memo — same UTC window as the sales
+  // above (created_at is ISO UTC in both the manual casse lane and the
+  // DESTROY write inside approveReturn). Cost-at-buy, never fiscal turnover.
+  const los = db.prepare(
+    `SELECT COUNT(*) AS n, COALESCE(SUM(total_loss_ct), 0) AS t FROM inventory_losses
+     WHERE created_at >= ? AND created_at < ?`,
+  ).get(start, end) as { n: number; t: number };
   return {
     salesCount: agg.n, totalHtCt: agg.ht - ret.ht, tva0BaseCt: agg.b0 - ret.b0, tva9BaseCt: agg.b9 - ret.b9,
     tva9AmtCt: agg.a9 - ret.a9, tva19BaseCt: agg.b19 - ret.b19, tva19AmtCt: agg.a19 - ret.a19, totalTvaCt: agg.tva - ret.tva,
@@ -745,6 +769,7 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
     cibTotalCt: agg.cib - ret.cib, dahabiyaTotalCt: agg.dah - ret.dah, creditGrantedCt: agg.cred - ret.cred,
     creditCollectedCt: settled.t, firstInvoice: agg.first ?? '', lastInvoice: agg.last ?? '',
     returnsCount: ret.n, returnsTotalTtcCt: ret.ttc,
+    lossesCount: los.n, lossesTotalCt: los.t,
   };
 }
 
@@ -1442,6 +1467,35 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           `SELECT COALESCE(SUM(total_collected_ct), 0) AS t FROM client_settlements
            WHERE payment_method = 'ESPECES' AND date >= ? AND date <= ?`,
         ).get(s.opened_at, periodEnd) as { t: number };
+        // A3 (supermarket): the SHIFT snapshot nets APPROVED returns decided
+        // inside this shift window — same bug class as the DAY lane had: raw
+        // turnover inflates the shift's fiscal picture. Timbre stays gross
+        // (non-refundable stamp duty). decided_at is ISO UTC like created_at.
+        const ret = db.prepare(
+          `SELECT COUNT(*) AS n,
+             COALESCE(SUM(ri.line_ht_ct), 0) AS ht,
+             COALESCE(SUM(CASE WHEN ri.tva_rate = 0 THEN ri.line_ht_ct ELSE 0 END), 0) AS b0,
+             COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_ht_ct ELSE 0 END), 0) AS b9,
+             COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_tva_ct ELSE 0 END), 0) AS a9,
+             COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_ht_ct ELSE 0 END), 0) AS b19,
+             COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_tva_ct ELSE 0 END), 0) AS a19,
+             COALESCE(SUM(ri.line_tva_ct), 0) AS tva,
+             COALESCE(SUM(ri.line_ttc_ct), 0) AS ttc,
+             COALESCE(SUM(CASE WHEN r.payment_method = 'ESPECES' THEN ri.line_ttc_ct ELSE 0 END), 0) AS cash,
+             COALESCE(SUM(CASE WHEN r.payment_method = 'CIB' THEN ri.line_ttc_ct ELSE 0 END), 0) AS cib,
+             COALESCE(SUM(CASE WHEN r.payment_method = 'DAHABIYA' THEN ri.line_ttc_ct ELSE 0 END), 0) AS dah,
+             COALESCE(SUM(CASE WHEN r.payment_method = 'CREDIT' THEN ri.line_ttc_ct ELSE 0 END), 0) AS cred
+           FROM return_items ri JOIN returns r ON r.id = ri.return_id
+           WHERE r.status = 'APPROVED' AND r.decided_at >= ? AND r.decided_at <= ?`,
+        ).get(s.opened_at, periodEnd) as {
+          n: number; ht: number; b0: number; b9: number; a9: number; b19: number; a19: number;
+          tva: number; ttc: number; cash: number; cib: number; dah: number; cred: number;
+        };
+        // A3 memo: scrappage written off during this shift (cost-at-buy).
+        const los = db.prepare(
+          `SELECT COUNT(*) AS n, COALESCE(SUM(total_loss_ct), 0) AS t FROM inventory_losses
+           WHERE created_at >= ? AND created_at <= ?`,
+        ).get(s.opened_at, periodEnd) as { n: number; t: number };
         const moves = db.prepare(
           `SELECT
              COALESCE(SUM(CASE WHEN movement_type = 'DEPOSIT' THEN amount_ct ELSE 0 END), 0) AS dep,
@@ -1452,6 +1506,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         const theoretical = s.opening_float_ct + agg.cash + settled.t + moves.dep - moves.wit - moves.exp;
         const diff = countedCashCt - theoretical;
         // Fiscal Z (hash-chained, gapless) — same statements as finalizeZReport, inside this txn.
+        // A3: hash and store the NET picture (returns netted, timbre gross),
+        // with returns + scrappage as memo columns like the DAY row.
+        const netTtc = agg.ttc - ret.ttc;
         const day = fiscalDayISO(new Date(periodEnd));
         const year = parseInt(day.slice(0, 4), 10);
         const prevRow = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as
@@ -1459,19 +1516,22 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           | undefined;
         const prev = prevRow?.hash ?? GENESIS_Z_HASH;
         const zNumber = `Z-${year}-${pad6(bumpSeq(db, 'Z', year))}`;
-        const hash = computeZHashDb(prev, zNumber, day, agg.ttc, agg.timbre);
+        const hash = computeZHashDb(prev, zNumber, day, netTtc, agg.timbre);
         db.prepare(
           `INSERT INTO z_reports (report_number, day, opening_time, closing_time,
             total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
             tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
             especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
-            credit_collected_ct, first_invoice_number, last_invoice_number,
+            credit_collected_ct, returns_count, returns_total_ttc_ct,
+            losses_count, losses_total_ct,
+            first_invoice_number, last_invoice_number,
             prev_hash, hash, finalized, close_kind)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'SHIFT')`,
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'SHIFT')`,
         ).run(
           zNumber, day, s.opened_at, periodEnd,
-          agg.n, agg.ht, agg.b9, agg.a9, agg.b19, agg.a19, agg.a9 + agg.a19,
-          agg.timbre, agg.ttc, agg.cash, agg.cib, agg.dah, agg.cred, settled.t,
+          agg.n, agg.ht - ret.ht, agg.b9 - ret.b9, agg.a9 - ret.a9, agg.b19 - ret.b19, agg.a19 - ret.a19, (agg.a9 + agg.a19) - ret.tva,
+          agg.timbre, netTtc, agg.cash - ret.cash, agg.cib - ret.cib, agg.dah - ret.dah, agg.cred - ret.cred, settled.t,
+          ret.n, ret.ttc, los.n, los.t,
           agg.first ?? '', agg.last ?? '', prev, hash,
         );
         db.prepare(
@@ -1482,12 +1542,13 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         db.exec('COMMIT');
         return {
           zNumber, sessionId, cashierName: s.cashier_name, periodStart: s.opened_at, periodEnd,
-          totalHtCt: agg.ht, totalTva9Ct: agg.a9, totalTva19Ct: agg.a19, totalTimbreCt: agg.timbre,
-          totalTtcCt: agg.ttc, salesCount: agg.n, cashSalesCt: agg.cash, cibSalesCt: agg.cib,
-          dahabiyaSalesCt: agg.dah, creditSalesCt: agg.cred, settlementsCashCt: settled.t,
+          totalHtCt: agg.ht - ret.ht, totalTva9Ct: agg.a9 - ret.a9, totalTva19Ct: agg.a19 - ret.a19, totalTimbreCt: agg.timbre,
+          totalTtcCt: netTtc, salesCount: agg.n, cashSalesCt: agg.cash - ret.cash, cibSalesCt: agg.cib - ret.cib,
+          dahabiyaSalesCt: agg.dah - ret.dah, creditSalesCt: agg.cred - ret.cred, settlementsCashCt: settled.t,
           depositsCt: moves.dep, withdrawalsCt: moves.wit, expensesCt: moves.exp,
           openingFloatCt: s.opening_float_ct, theoreticalCashCt: theoretical,
           closingCountedCt: countedCashCt, cashDiffCt: diff, hash, prevHash: prev,
+          returnsCount: ret.n, returnsTotalTtcCt: ret.ttc, lossesCount: los.n, lossesTotalCt: los.t,
         };
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
@@ -2616,6 +2677,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
         firstInvoice: string; lastInvoice: string;
         returnsCount: number; returnsTotalTtcCt: number;
+        lossesCount: number; lossesTotalCt: number;
       };
     }) {
       const t = input.totals;
@@ -2653,6 +2715,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       num('creditCollectedCt', t.creditCollectedCt, ledger.creditCollectedCt);
       num('returnsCount', t.returnsCount, ledger.returnsCount);
       num('returnsTotalTtcCt', t.returnsTotalTtcCt, ledger.returnsTotalTtcCt);
+      num('lossesCount', t.lossesCount, ledger.lossesCount);
+      num('lossesTotalCt', t.lossesTotalCt, ledger.lossesTotalCt);
       if (t.firstInvoice !== ledger.firstInvoice) bad.push(`firstInvoice: caller=${t.firstInvoice} ledger=${ledger.firstInvoice}`);
       if (t.lastInvoice !== ledger.lastInvoice) bad.push(`lastInvoice: caller=${t.lastInvoice} ledger=${ledger.lastInvoice}`);
       if (bad.length > 0) {
@@ -2670,15 +2734,17 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
           credit_collected_ct, returns_count, returns_total_ttc_ct,
+          losses_count, losses_total_ct,
           first_invoice_number, last_invoice_number,
           prev_hash, hash, finalized, close_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
       ).run(
         number, input.day, input.openingTime, input.closingTime,
         t.salesCount, t.totalHtCt, t.tva0BaseCt, t.tva9BaseCt, t.tva9AmtCt,
         t.tva19BaseCt, t.tva19AmtCt, t.totalTvaCt, t.totalTimbreCt, t.totalTtcCt,
         t.especesGrossCt, t.cibTotalCt, t.dahabiyaTotalCt, t.creditGrantedCt,
         t.creditCollectedCt, t.returnsCount, t.returnsTotalTtcCt,
+        t.lossesCount, t.lossesTotalCt,
         t.firstInvoice, t.lastInvoice, prev, hash,
       );
       return { report_number: number, hash, prev_hash: prev };

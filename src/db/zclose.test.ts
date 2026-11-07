@@ -70,7 +70,7 @@ const totalsDay1 = () => ({
   totalTimbreCt: 1000, totalTtcCt: 71400, especesGrossCt: 11900,
   cibTotalCt: 59500, dahabiyaTotalCt: 0, creditGrantedCt: 0,
   creditCollectedCt: 21000, firstInvoice: 'FACT-2026-000001', lastInvoice: 'FACT-2026-000002',
-  returnsCount: 0, returnsTotalTtcCt: 0,
+  returnsCount: 0, returnsTotalTtcCt: 0, lossesCount: 0, lossesTotalCt: 0,
 });
 
 const seedDay1 = (b: ReturnType<typeof openBarakaDb>) => {
@@ -187,7 +187,7 @@ test('zclose: locked day freezes voids, late sales and shift closes', () => {
       totalTimbreCt: 0, totalTtcCt: 1000, especesGrossCt: 0,
       cibTotalCt: 1000, dahabiyaTotalCt: 0, creditGrantedCt: 0,
       creditCollectedCt: 0, firstInvoice: 'FACT-2026-000003', lastInvoice: 'FACT-2026-000003',
-      returnsCount: 0, returnsTotalTtcCt: 0,
+      returnsCount: 0, returnsTotalTtcCt: 0, lossesCount: 0, lossesTotalCt: 0,
     },
   });
   assert.throws(() => b.closeCashSessionAndGenerateZ(s.id, 100000), /legally closed/);
@@ -201,13 +201,76 @@ test('zclose: locked day freezes voids, late sales and shift closes', () => {
       totalTimbreCt: 0, totalTtcCt: 1000, especesGrossCt: 0,
       cibTotalCt: 1000, dahabiyaTotalCt: 0, creditGrantedCt: 0,
       creditCollectedCt: 0, firstInvoice: 'FACT-2026-000004', lastInvoice: 'FACT-2026-000004',
-      returnsCount: 0, returnsTotalTtcCt: 0,
+      returnsCount: 0, returnsTotalTtcCt: 0, lossesCount: 0, lossesTotalCt: 0,
     },
   });
   assert.equal(z2.report_number, 'Z-2026-000003');
   b.close();
   for (const suf of ['', '-wal', '-shm', '-journal']) {
     try { fs.unlinkSync(p + suf); } catch { /* ignore */ }
+  }
+});
+
+test('A3 (supermarket): DESTROY feeds the daily casse memo; SHIFT-Z nets returns', () => {
+  const p = tmpFile();
+  try {
+    const b = openBarakaDb(p);
+    b.upsertProduct(PROD);
+    const today = fiscalDayISO();
+    const s = b.openCashSession('Yacine', 500000);
+    // ESPECES 9%: 10000 + 900 TVA + 1000 timbre -> 11900 TTC.
+    // created_at = now so the sale falls inside the shift window just opened.
+    const sale = b.recordSale(header('ESPECES', 10000, 900, 1000, 9, new Date().toISOString()), [item(10000, 900, 9)]);
+    const saleItemId = (b.db.prepare('SELECT id FROM sale_items WHERE sale_id = ?').get(sale.id) as { id: number }).id;
+    // Full-line EXPIRED return -> DESTROY default: nothing restocks, the waste
+    // ledger takes cost-at-buy (8000 x 1000 milli), refund nets the TTC.
+    const d = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId, qty_milli: 1000 }], reason: 'EXPIRED', actor: 'lina' });
+    const ap = b.approveReturn(d.id, 'karim', 'manager');
+    assert.equal(ap.refund_ct, 10900);
+    // DAY ledger: timbre stays gross (1000), TTC net (1000), casse memo set.
+    const ledger = computeDayAggregates(b.db, today);
+    assert.equal(ledger.lossesCount, 1);
+    assert.equal(ledger.lossesTotalCt, 8000);
+    assert.equal(ledger.returnsCount, 1);
+    assert.equal(ledger.returnsTotalTtcCt, 10900);
+    assert.equal(ledger.totalTimbreCt, 1000);
+    assert.equal(ledger.totalTtcCt, 1000);
+    // SHIFT close nets the same way: drawer math intact, snapshot is net.
+    // Drawer: 500000 float + 11900 cash - 10900 withdrawal = 501000.
+    const zc = b.closeCashSessionAndGenerateZ(s.id, 501000);
+    assert.equal(zc.cashDiffCt, 0);
+    assert.equal(zc.totalTtcCt, 1000);
+    assert.equal(zc.returnsCount, 1);
+    assert.equal(zc.returnsTotalTtcCt, 10900);
+    assert.equal(zc.lossesCount, 1);
+    assert.equal(zc.lossesTotalCt, 8000);
+    const shiftRow = b.db.prepare(
+      "SELECT total_ttc_ct, returns_count, returns_total_ttc_ct, losses_count, losses_total_ct, close_kind FROM z_reports WHERE report_number = ?",
+    ).get(zc.zNumber) as { total_ttc_ct: number; returns_count: number; returns_total_ttc_ct: number; losses_count: number; losses_total_ct: number; close_kind: string };
+    assert.equal(shiftRow.close_kind, 'SHIFT');
+    assert.equal(shiftRow.total_ttc_ct, 1000);
+    assert.equal(shiftRow.returns_total_ttc_ct, 10900);
+    assert.equal(shiftRow.losses_total_ct, 8000);
+    // DAY finalize accepts the ledger (incl. memo) and stores it.
+    const totals = {
+      salesCount: ledger.salesCount, totalHtCt: ledger.totalHtCt, tva0BaseCt: ledger.tva0BaseCt,
+      tva9BaseCt: ledger.tva9BaseCt, tva9AmtCt: ledger.tva9AmtCt, tva19BaseCt: ledger.tva19BaseCt,
+      tva19AmtCt: ledger.tva19AmtCt, totalTvaCt: ledger.totalTvaCt, totalTimbreCt: ledger.totalTimbreCt,
+      totalTtcCt: ledger.totalTtcCt, especesGrossCt: ledger.especesGrossCt, cibTotalCt: ledger.cibTotalCt,
+      dahabiyaTotalCt: ledger.dahabiyaTotalCt, creditGrantedCt: ledger.creditGrantedCt,
+      creditCollectedCt: ledger.creditCollectedCt, firstInvoice: ledger.firstInvoice, lastInvoice: ledger.lastInvoice,
+      returnsCount: ledger.returnsCount, returnsTotalTtcCt: ledger.returnsTotalTtcCt,
+      lossesCount: ledger.lossesCount, lossesTotalCt: ledger.lossesTotalCt,
+    };
+    const z = b.finalizeZReport({ day: today, openingTime: '08:00', closingTime: '20:00', totals });
+    const dayRow = b.db.prepare(
+      'SELECT losses_count, losses_total_ct FROM z_reports WHERE report_number = ?',
+    ).get(z.report_number) as { losses_count: number; losses_total_ct: number };
+    assert.equal(dayRow.losses_count, 1);
+    assert.equal(dayRow.losses_total_ct, 8000);
+    b.close();
+  } finally {
+    for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* ignore */ } }
   }
 });
 

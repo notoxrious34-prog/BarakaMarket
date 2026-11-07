@@ -308,6 +308,7 @@ test('v1.5.0: day aggregates net approved returns; Z cross-check holds the net',
       dahabiyaTotalCt: ledger.dahabiyaTotalCt, creditGrantedCt: ledger.creditGrantedCt,
       creditCollectedCt: ledger.creditCollectedCt, firstInvoice: ledger.firstInvoice, lastInvoice: ledger.lastInvoice,
       returnsCount: ledger.returnsCount, returnsTotalTtcCt: ledger.returnsTotalTtcCt,
+      lossesCount: ledger.lossesCount, lossesTotalCt: ledger.lossesTotalCt,
     };
     const z = b.finalizeZReport({ day, openingTime: '08:00', closingTime: '20:00', totals });
     assert.match(z.report_number, /^Z-/);

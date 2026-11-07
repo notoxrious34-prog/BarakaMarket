@@ -536,6 +536,9 @@ export interface ZCloseTotals {
   totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
   dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
   firstInvoice: string; lastInvoice: string;
+  /** v1.5.0 memo: approved returns posted this day. A3: + daily scrappage. */
+  returnsCount: number; returnsTotalTtcCt: number;
+  lossesCount: number; lossesTotalCt: number;
 }
 
 /**

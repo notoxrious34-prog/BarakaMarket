@@ -163,6 +163,7 @@ describe('commit lane (T4b)', () => {
         totalTimbreCt: 0, totalTtcCt: 1000, especesGrossCt: 0, cibTotalCt: 1000,
         dahabiyaTotalCt: 0, creditGrantedCt: 0, creditCollectedCt: 0,
         firstInvoice: 'FACT-2026-000001', lastInvoice: 'FACT-2026-000001',
+        returnsCount: 0, returnsTotalTtcCt: 0, lossesCount: 0, lossesTotalCt: 0,
       });
       assert.deepEqual(out, { report_number: 'Z-2026-000001', hash: 'h', prev_hash: 'p' });
       assert.ok(seenUrl.endsWith('/api/z/close'), 'must hit the legal close endpoint');
@@ -184,6 +185,7 @@ describe('commit lane (T4b)', () => {
         totalTimbreCt: 0, totalTtcCt: 0, especesGrossCt: 0, cibTotalCt: 0,
         dahabiyaTotalCt: 0, creditGrantedCt: 0, creditCollectedCt: 0,
         firstInvoice: '', lastInvoice: '',
+        returnsCount: 0, returnsTotalTtcCt: 0, lossesCount: 0, lossesTotalCt: 0,
       }), null);
     } finally {
       globalThis.fetch = realFetch;

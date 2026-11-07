@@ -314,6 +314,10 @@ CREATE TABLE IF NOT EXISTS z_reports (
   -- these two memoize the return flow for the ticket and the audit.
   returns_count      INTEGER NOT NULL DEFAULT 0,
   returns_total_ttc_ct INTEGER NOT NULL DEFAULT 0,
+  -- A3 (supermarket): daily scrappage (casse) memo — cost-at-buy of goods
+  -- written off today, shown on the Z as its own line. NET semantics like returns.
+  losses_count       INTEGER NOT NULL DEFAULT 0,
+  losses_total_ct    INTEGER NOT NULL DEFAULT 0,
   first_invoice_number TEXT  NOT NULL DEFAULT '',
   last_invoice_number  TEXT  NOT NULL DEFAULT '',
   prev_hash          TEXT    NOT NULL DEFAULT '',

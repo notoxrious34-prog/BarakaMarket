@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub const LATEST_SCHEMA_VERSION: i64 = 13;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -318,6 +318,23 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         conn.execute_batch("PRAGMA user_version = 12;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v12 → v13 (A3 supermarket): daily scrappage memo columns on z_reports.
+    if v < 13 {
+        if !has_col("z_reports", "losses_count")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN losses_count INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !has_col("z_reports", "losses_total_ct")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN losses_total_ct INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 13;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -1886,6 +1903,17 @@ pub fn z_close(
         cred - rcred,
     );
     let nb0 = nht - nb9 - nb19;
+    // A3 (supermarket): daily scrappage memo — cost-at-buy of goods DESTROYED
+    // this day (waste ledger window = same UTC window as sales). Never fiscal
+    // turnover; a management/profit signal shown as its own Z line.
+    let (ln, lttc): (i64, i64) = tx
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(total_loss_ct), 0) FROM inventory_losses
+             WHERE created_at >= ?1 AND created_at < ?2",
+            [&wstart, &wend],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
     let prev: String = match tx.query_row(
         "SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1",
         [],
@@ -1904,13 +1932,14 @@ pub fn z_close(
           tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
           credit_collected_ct, returns_count, returns_total_ttc_ct,
+          losses_count, losses_total_ct,
           first_invoice_number, last_invoice_number,
           prev_hash, hash, finalized, close_kind)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,1,'DAY')",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,1,'DAY')",
         rusqlite::params![
             number, day, opening_time, closing_time,
             n, nht, nb0, nb9, na9, nb19, na19, ntva, timbre, nttc,
-            ncash, ncib, ndah, ncred, coll, rn, rttc,
+            ncash, ncib, ndah, ncred, coll, rn, rttc, ln, lttc,
             first.unwrap_or_default(), last.unwrap_or_default(),
             prev, hash,
         ],
@@ -1923,6 +1952,7 @@ pub fn z_close(
         "sales_count": n, "total_ht_ct": nht, "total_tva_ct": ntva,
         "total_timbre_ct": timbre, "total_ttc_ct": nttc,
         "returns_count": rn, "returns_total_ttc_ct": rttc,
+        "losses_count": ln, "losses_total_ct": lttc,
         "hash": hash, "prev_hash": prev,
     }))
 }
@@ -2839,6 +2869,58 @@ pub fn cash_close_and_z(
             .map_err(|e| e.to_string())?;
         let theoretical = opening_float_ct + cash + settled + dep - wit - exp;
         let diff = counted_cash_ct - theoretical;
+        // A3 (supermarket): SHIFT nets APPROVED returns decided in this window
+        // (same bug class as the DAY lane had — raw turnover inflates the
+        // shift's fiscal picture). Timbre stays gross (non-refundable).
+        let (rn, rht, rb9, ra9, rb19, ra19, rtva, rttc, rcash, rcib, rdah, rcred): (
+            i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+        ) = tx
+            .query_row(
+                "SELECT COUNT(*),
+                   COALESCE(SUM(ri.line_ht_ct), 0),
+                   COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_ht_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ri.tva_rate = 9 THEN ri.line_tva_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_ht_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ri.tva_rate = 19 THEN ri.line_tva_ct ELSE 0 END), 0),
+                   COALESCE(SUM(ri.line_tva_ct), 0),
+                   COALESCE(SUM(ri.line_ttc_ct), 0),
+                   COALESCE(SUM(CASE WHEN r.payment_method = 'ESPECES' THEN ri.line_ttc_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN r.payment_method = 'CIB' THEN ri.line_ttc_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN r.payment_method = 'DAHABIYA' THEN ri.line_ttc_ct ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN r.payment_method = 'CREDIT' THEN ri.line_ttc_ct ELSE 0 END), 0)
+                 FROM return_items ri JOIN returns r ON r.id = ri.return_id
+                 WHERE r.status = 'APPROVED' AND r.decided_at >= ?1 AND r.decided_at <= ?2",
+                rusqlite::params![opened_at, period_end],
+                |r| {
+                    Ok((
+                        r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                        r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?,
+                    ))
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        // A3 memo: scrappage written off during this shift (cost-at-buy).
+        let (ln, lttc): (i64, i64) = tx
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(total_loss_ct), 0) FROM inventory_losses
+                 WHERE created_at >= ?1 AND created_at <= ?2",
+                rusqlite::params![opened_at, period_end],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        let (nht, nb9, na9, nb19, na19, ntva, nttc, ncash, ncib, ndah, ncred) = (
+            ht - rht,
+            b9 - rb9,
+            a9 - ra9,
+            b19 - rb19,
+            a19 - ra19,
+            (a9 + a19) - rtva,
+            ttc - rttc,
+            cash - rcash,
+            cib - rcib,
+            dah - rdah,
+            cred - rcred,
+        );
         let day = algiers_day(&period_end)?;
         let year: i64 = day[0..4].parse().map_err(|_| "[fiscal] bad day")?;
         let prev: Option<String> = tx
@@ -2851,35 +2933,41 @@ pub fn cash_close_and_z(
             .map_err(|e| e.to_string())?;
         let prev = prev.unwrap_or_else(|| "0".repeat(64));
         let number = format!("Z-{year}-{:06}", bump_seq(&tx, "Z", year)?);
-        let hash = z_hash(&prev, &number, &day, ttc, timbre);
+        let hash = z_hash(&prev, &number, &day, nttc, timbre);
         tx.execute(
             "INSERT INTO z_reports (report_number, day, opening_time, closing_time,
               total_sales_count, total_ht_ct, tva0_base_ct, tva9_base_ct, tva9_amt_ct,
               tva19_base_ct, tva19_amt_ct, total_tva_ct, total_timbre_ct, total_ttc_ct,
               especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
-              credit_collected_ct, first_invoice_number, last_invoice_number,
+              credit_collected_ct, returns_count, returns_total_ttc_ct,
+              losses_count, losses_total_ct,
+              first_invoice_number, last_invoice_number,
               prev_hash, hash, finalized, close_kind)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, 1, 'SHIFT')",
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, 1, 'SHIFT')",
             rusqlite::params![
                 number,
                 day,
                 opened_at,
                 period_end,
                 n,
-                ht,
-                b9,
-                a9,
-                b19,
-                a19,
-                a9 + a19,
+                nht,
+                nb9,
+                na9,
+                nb19,
+                na19,
+                ntva,
                 timbre,
-                ttc,
-                cash,
-                cib,
-                dah,
-                cred,
+                nttc,
+                ncash,
+                ncib,
+                ndah,
+                ncred,
                 settled,
+                rn,
+                rttc,
+                ln,
+                lttc,
                 first.unwrap_or_default(),
                 last.unwrap_or_default(),
                 prev,
@@ -2905,13 +2993,15 @@ pub fn cash_close_and_z(
         Ok(serde_json::json!({
             "zNumber": number, "sessionId": id, "cashierName": cashier_name,
             "periodStart": opened_at, "periodEnd": period_end,
-            "totalHtCt": ht, "totalTva9Ct": a9, "totalTva19Ct": a19,
-            "totalTimbreCt": timbre, "totalTtcCt": ttc, "salesCount": n,
-            "cashSalesCt": cash, "cibSalesCt": cib, "dahabiyaSalesCt": dah,
-            "creditSalesCt": cred, "settlementsCashCt": settled,
+            "totalHtCt": nht, "totalTva9Ct": na9, "totalTva19Ct": na19,
+            "totalTimbreCt": timbre, "totalTtcCt": nttc, "salesCount": n,
+            "cashSalesCt": ncash, "cibSalesCt": ncib, "dahabiyaSalesCt": ndah,
+            "creditSalesCt": ncred, "settlementsCashCt": settled,
             "depositsCt": dep, "withdrawalsCt": wit, "expensesCt": exp,
             "openingFloatCt": opening_float_ct, "theoreticalCashCt": theoretical,
             "closingCountedCt": counted_cash_ct, "cashDiffCt": diff,
+            "returnsCount": rn, "returnsTotalTtcCt": rttc,
+            "lossesCount": ln, "lossesTotalCt": lttc,
             "hash": hash, "prevHash": prev,
         }))
     };
@@ -3811,6 +3901,80 @@ mod tests {
             z["hash"].as_str().unwrap()
         );
         assert!(z_close(&mut db, "11-02", "08:00", "20:00").is_err()); // bad day
+    }
+
+    #[test]
+    fn a3_destroy_feeds_casse_memo_and_shift_nets_returns() {
+        // A3 (supermarket): EXPIRED approve DESTROYs the line — the DAY row
+        // carries the waste memo at buy cost, money nets, timbre stays gross.
+        // Self-consistent clock: the sale is re-stamped to now so the sale,
+        // the approval (posting_day/decided_at) and the Z windows agree.
+        let now = now_iso();
+        let today = algiers_day(&now).unwrap();
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("A3-1")), &sale_items()).unwrap();
+        db.execute("UPDATE sales SET created_at = ?1", [&now])
+            .unwrap();
+        cash_open(&db, "sess-a3", "Amine", 500000).unwrap();
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        let d =
+            return_create(&mut db, "s1", &items, "EXPIRED", None, "lina", None, &today).unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        return_approve(&mut db, &id, "karim", "manager", &today, None).unwrap();
+        // LAIT line: ht 33028, tva 2972, ttc 36000; buy 12000 → loss 24000.
+        let z = z_close(&mut db, &today, "08:00", "20:00").unwrap();
+        assert_eq!(z["losses_count"], 1);
+        assert_eq!(z["losses_total_ct"], 24000);
+        assert_eq!(z["returns_count"], 1);
+        assert_eq!(z["returns_total_ttc_ct"], 36000);
+        assert_eq!(z["total_ttc_ct"], 179400 - 36000);
+        assert_eq!(z["total_timbre_ct"], 1800);
+        // SHIFT twin on a fresh book: drawer math holds, snapshot is net.
+        let now2 = now_iso();
+        let today2 = algiers_day(&now2).unwrap();
+        let mut db2 = memdb();
+        record_sale(&mut db2, &sale_header(Some("A3-2")), &sale_items()).unwrap();
+        db2.execute("UPDATE sales SET created_at = ?1", [&now2])
+            .unwrap();
+        cash_open(&db2, "sess-a3b", "Amine", 500000).unwrap();
+        let item2: i64 = db2
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items2 = serde_json::json!([{ "saleItemId": item2, "qty_milli": 2000 }]).to_string();
+        let d2 = return_create(
+            &mut db2, "s1", &items2, "EXPIRED", None, "lina", None, &today2,
+        )
+        .unwrap();
+        let id2 = d2["id"].as_str().unwrap().to_string();
+        return_approve(&mut db2, &id2, "karim", "manager", &today2, None).unwrap();
+        // Drawer: 500000 float + 179400 ESPECES − 36000 withdrawal.
+        let zc = cash_close_and_z(&mut db2, "sess-a3b", 500000 + 179400 - 36000, None).unwrap();
+        assert_eq!(zc["cashDiffCt"], 0);
+        assert_eq!(zc["totalTtcCt"], 179400 - 36000);
+        assert_eq!(zc["returnsCount"], 1);
+        assert_eq!(zc["returnsTotalTtcCt"], 36000);
+        assert_eq!(zc["lossesCount"], 1);
+        assert_eq!(zc["lossesTotalCt"], 24000);
+        let row: (i64, i64, i64, i64) = db2
+            .query_row(
+                "SELECT total_ttc_ct, returns_total_ttc_ct, losses_count, losses_total_ct
+                 FROM z_reports WHERE report_number = ?1",
+                [zc["zNumber"].as_str().unwrap()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (179400 - 36000, 36000, 1, 24000));
     }
 
     #[test]

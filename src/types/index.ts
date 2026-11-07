@@ -271,6 +271,11 @@ export interface ZClosureResult {
   cashDiffCt: number;
   hash: string;
   prevHash: string;
+  /** A3 (supermarket): returns netted in this shift + scrappage memo. */
+  returnsCount: number;
+  returnsTotalTtcCt: number;
+  lossesCount: number;
+  lossesTotalCt: number;
 }
 
 /** ADR-010-MKT: shelf-edge label types (canonical in core/shelf-labels). */

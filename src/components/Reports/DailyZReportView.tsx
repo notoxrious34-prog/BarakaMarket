@@ -5,7 +5,8 @@ import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
 import { commitZClose, fetchDailyZ, zListNative } from '../../core/fiscal-authority';
 import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
-import { fiscalDayISO } from '../../core/fiscal-day';
+import { fiscalDayISO, fiscalDayBoundsUTC } from '../../core/fiscal-day';
+import { listReturns } from '../../core/returns-authority';
 import { APP_VERSION } from '../../core/version';
 import {
   FileText,
@@ -189,6 +190,30 @@ export const DailyZReportView: React.FC = () => {
     setCloseNote('');
     try {
       const closingTime = new Date().toLocaleTimeString('fr-FR');
+      // v1.5.0/A3: the legal lane cross-checks caller totals against ITS
+      // ledger — the caller must carry the returns + scrappage memo, summed
+      // over the same windows the DAL aggregates (posting_day / UTC window).
+      let returnsCount = 0, returnsTotalTtcCt = 0, lossesCount = 0, lossesTotalCt = 0;
+      try {
+        const approved = await listReturns('APPROVED');
+        for (const r of approved ?? []) {
+          if (r.posting_day === zReport.date) {
+            returnsCount += 1;
+            returnsTotalTtcCt += r.refund_ct;
+          }
+        }
+      } catch { /* memo fetch failure surfaces as a ledger mismatch, never a fake zero */ }
+      try {
+        const { start, end } = fiscalDayBoundsUTC(zReport.date);
+        const lr = await fetch(`http://127.0.0.1:3100/api/losses?from=${encodeURIComponent(start)}&to=${encodeURIComponent(end)}&limit=500`);
+        const rows = lr.ok ? (await lr.json() as Array<{ created_at?: string; total_loss_ct?: number }>) : [];
+        for (const row of Array.isArray(rows) ? rows : []) {
+          if (typeof row.created_at === 'string' && row.created_at >= start && row.created_at < end) {
+            lossesCount += 1;
+            lossesTotalCt += Number(row.total_loss_ct ?? 0);
+          }
+        }
+      } catch { /* same: mismatch refusal, never a fake zero */ }
       const out = await commitZClose(zReport.date, '08:00', closingTime, {
         salesCount: zReport.sales_count, totalHtCt: ct.ht, tva0BaseCt: ct.b0,
         tva9BaseCt: ct.b9, tva9AmtCt: ct.a9, tva19BaseCt: ct.b19, tva19AmtCt: ct.a19,
@@ -196,6 +221,7 @@ export const DailyZReportView: React.FC = () => {
         especesGrossCt: ct.esp, cibTotalCt: ct.cib, dahabiyaTotalCt: 0,
         creditGrantedCt: ct.cred, creditCollectedCt: ct.coll,
         firstInvoice, lastInvoice,
+        returnsCount, returnsTotalTtcCt, lossesCount, lossesTotalCt,
       });
       if (!out) throw new Error('lane');
       setClosure({ report_number: out.report_number, hash: out.hash });
