@@ -217,7 +217,10 @@ CREATE TABLE IF NOT EXISTS return_items (
   tva_rate      INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
   line_ht_ct    INTEGER NOT NULL,
   line_tva_ct   INTEGER NOT NULL,
-  line_ttc_ct   INTEGER NOT NULL
+  line_ttc_ct   INTEGER NOT NULL,
+  -- A1 (supermarket): per-line disposition decided at approval.
+  disposition   TEXT    NOT NULL DEFAULT 'RESTOCK'
+                CHECK (disposition IN ('RESTOCK', 'QUARANTINE', 'DESTROY'))
 );
 
 CREATE TABLE IF NOT EXISTS client_settlements (

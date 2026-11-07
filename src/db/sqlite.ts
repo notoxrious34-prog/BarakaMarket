@@ -27,7 +27,8 @@ import type {
   BackupMetadata, BackupValidationReport, RestoreResult,
   ReturnReasonCode, ReturnLineInput, ReturnDraftInput, ReturnStatus,
 } from '../types';
-import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_WINDOW_DAYS } from '../types';
+import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_WINDOW_DAYS, RETURN_DISPOSITIONS, DEFAULT_DISPOSITION } from '../types';
+import type { ReturnDisposition } from '../types';
 import { createPinHash, verifyPin, MANAGER_PIN_META_KEY, isValidPinFormat as isValidP } from '../core/security.js';
 import { APP_VERSION } from '../core/version.js';
 import {
@@ -185,7 +186,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 11;
+export const LATEST_SCHEMA_VERSION = 12;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -498,6 +499,16 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 11');
     v = 11;
   }
+  // v11 → v12 (A1 supermarket): per-line disposition on return_items.
+  // No CHECK in the ALTER (SQLite restriction) — the DAL validates strictly.
+  if (v < 12) {
+    const rcols = db.prepare('PRAGMA table_info(return_items)').all() as { name: string }[];
+    if (!rcols.some(c => c.name === 'disposition')) {
+      db.exec("ALTER TABLE return_items ADD COLUMN disposition TEXT NOT NULL DEFAULT 'RESTOCK'");
+    }
+    db.exec('PRAGMA user_version = 12');
+    v = 12;
+  }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -575,10 +586,12 @@ export interface BarakaDb {
   /** v1.5.0 (RETURNS): inverse fiscal rows — draft, two-person approval, reject. */
   nextReturnNumber(year: number): string;
   createReturnDraft(input: ReturnDraftInput): { id: string; refund_ct: number };
-  approveReturn(id: string, approver: string, approverRole: string): { return_number: string; refund_ct: number; posting_day: string };
+  approveReturn(id: string, approver: string, approverRole: string, dispositions?: Record<number, ReturnDisposition>): { return_number: string; refund_ct: number; posting_day: string };
   rejectReturn(id: string, approver: string, note?: string | null): void;
   getReturnOrNull(id: string): Record<string, unknown> | null;
   listReturns(status?: ReturnStatus, limit?: number): Record<string, unknown>[];
+  /** A1 (supermarket): approved lines held for the supplier rep (QUARANTINE). */
+  listQuarantine(limit?: number): Record<string, unknown>[];
   backupTo(destPath: string): void;
   /** TASK 4 — ACID ephemeral cart draft (power-cut resilience). */
   saveCartDraft(sessionId: string, payloadJson: string, itemCount: number, totalTtcCt: number): void;
@@ -2159,7 +2172,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       return { id, refund_ct: refund };
     },
 
-    approveReturn(id: string, approver: string, approverRole: string): { return_number: string; refund_ct: number; posting_day: string } {
+    approveReturn(id: string, approver: string, approverRole: string, dispositions?: Record<number, ReturnDisposition>): { return_number: string; refund_ct: number; posting_day: string } {
       const who = approver?.trim();
       if (!who) throw new Error('[db] approver is required');
       // Hard fiscal gate (same family as the owner-gate on users): the lane
@@ -2193,10 +2206,11 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       try {
         // Atomic recheck: a concurrent approval can never double-return a line.
         const items = db.prepare(
-          `SELECT ri.sale_item_id, ri.qty_milli, ri.product_id, si.qty_milli AS sold_qty
+          `SELECT ri.id AS return_item_id, ri.sale_item_id, ri.qty_milli, ri.product_id,
+                  ri.name_fr, ri.unit, si.qty_milli AS sold_qty
            FROM return_items ri JOIN sale_items si ON si.id = ri.sale_item_id
            WHERE ri.return_id = ?`,
-        ).all(head.id) as { sale_item_id: number; qty_milli: number; product_id: number | null; sold_qty: number }[];
+        ).all(head.id) as { return_item_id: number; sale_item_id: number; qty_milli: number; product_id: number | null; name_fr: string; unit: string; sold_qty: number }[];
         for (const it of items) {
           const already = (db.prepare(
             `SELECT COALESCE(SUM(ri.qty_milli), 0) AS q FROM return_items ri
@@ -2241,10 +2255,37 @@ export function openBarakaDb(dbPath: string): BarakaDb {
              VALUES (?, ?, 'WITHDRAWAL', ?, ?, ?)`,
           ).run(randomUUID(), open.id, head.refund_ct, `Retour ${number} (${head.invoice_number})`, now);
         }
-        // Stock flows back in (null product = ad-hoc line, nothing to restock).
+        // A1 (supermarket): per-line disposition — validated, persisted, then
+        // executed. Defaults come from the reason; the approver overrides.
+        const dispOf = (returnItemId: number): ReturnDisposition => {
+          const d = dispositions?.[returnItemId] ?? DEFAULT_DISPOSITION[head.reason as ReturnReasonCode];
+          if (!(RETURN_DISPOSITIONS as readonly string[]).includes(d)) {
+            throw new Error(`[db] bad disposition for line ${returnItemId}: ${String(dispositions?.[returnItemId])}`);
+          }
+          return d;
+        };
+        const setDisp = db.prepare('UPDATE return_items SET disposition = ? WHERE id = ?');
         const restock = db.prepare('UPDATE products SET stock_milli = stock_milli + ? WHERE id = ?');
+        const loss = db.prepare(
+          `INSERT INTO inventory_losses (product_id, qty_milli, reason, unit_cost_ct, total_loss_ct, notes, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        );
+        const dispCount: Record<ReturnDisposition, number> = { RESTOCK: 0, QUARANTINE: 0, DESTROY: 0 };
         for (const it of items) {
-          if (it.product_id !== null) restock.run(it.qty_milli, it.product_id);
+          const disp = dispOf(it.return_item_id);
+          setDisp.run(disp, it.return_item_id);
+          dispCount[disp] += 1;
+          if (disp === 'RESTOCK') {
+            // Null product = ad-hoc line, nothing to restock.
+            if (it.product_id !== null) restock.run(it.qty_milli, it.product_id);
+          } else if (disp === 'DESTROY' && it.product_id !== null) {
+            // Scrapped customer goods never touch the shelf — they land in
+            // the waste ledger at current buy cost for the casse report.
+            const cost = (db.prepare('SELECT buy_price_ct FROM products WHERE id = ?').get(it.product_id) as { buy_price_ct: number } | undefined)?.buy_price_ct ?? 0;
+            const lossReason = head.reason === 'EXPIRED' ? 'EXPIRED' : head.reason === 'DEFECT' ? 'DAMAGED' : 'AUTRE';
+            loss.run(it.product_id, it.qty_milli, lossReason, cost, Math.round((cost * it.qty_milli) / 1000), `${number} (${head.invoice_number})`, now);
+          }
+          // QUARANTINE: held for the supplier rep — no stock move, no loss row.
         }
         db.prepare(
           `UPDATE returns SET status = 'APPROVED', approver = ?, posting_day = ?,
@@ -2252,7 +2293,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         ).run(who, postingDay, now, number, head.id);
         logAuditRow(db, {
           actor: who, action: 'return.approve', entity: 'returns', entityId: head.id,
-          detail: `${number} ${head.invoice_number} refund=${head.refund_ct} creator=${head.actor}`,
+          detail: `${number} ${head.invoice_number} refund=${head.refund_ct} creator=${head.actor} disp=R${dispCount.RESTOCK}/Q${dispCount.QUARANTINE}/D${dispCount.DESTROY}`,
         });
         db.exec('COMMIT');
         return { return_number: number, refund_ct: head.refund_ct, posting_day: postingDay };
@@ -2292,6 +2333,17 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         return db.prepare('SELECT * FROM returns WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ?').all(status, n) as Record<string, unknown>[];
       }
       return db.prepare('SELECT * FROM returns ORDER BY created_at DESC, id DESC LIMIT ?').all(n) as Record<string, unknown>[];
+    },
+
+    listQuarantine(limit = 200): Record<string, unknown>[] {
+      const n = Math.max(1, Math.min(500, Math.floor(limit)));
+      return db.prepare(
+        `SELECT r.return_number, r.invoice_number, r.reason, r.decided_at,
+                ri.name_fr, ri.qty_milli, ri.unit, ri.product_id, ri.line_ttc_ct
+         FROM return_items ri JOIN returns r ON r.id = ri.return_id
+         WHERE r.status = 'APPROVED' AND ri.disposition = 'QUARANTINE'
+         ORDER BY r.decided_at DESC, ri.id ASC LIMIT ?`,
+      ).all(n) as Record<string, unknown>[];
     },
 
     backupTo(destPath: string) {

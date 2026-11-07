@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import { formatDZDFromCt } from '../../core/display';
-import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT } from '../../types/index';
-import type { ReturnReasonCode, ReturnStatus } from '../../types/index';
+import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_DISPOSITIONS, DEFAULT_DISPOSITION } from '../../types/index';
+import type { ReturnReasonCode, ReturnStatus, ReturnDisposition } from '../../types/index';
 import {
   lookupReturnSale, createReturnDraft, approveReturn, rejectReturn, getReturn,
   listReturns, lastReturnLaneError,
@@ -19,6 +19,12 @@ const REASON_LABEL: Record<ReturnReasonCode, { ar: string; fr: string }> = {
   EXPIRED: { ar: 'منتهي الصلاحية', fr: 'Expiré' },
   CHANGED_MIND: { ar: 'عدول الزبون', fr: 'Avis changé' },
   OTHER: { ar: 'أخرى', fr: 'Autre' },
+};
+
+const DISP_LABEL: Record<ReturnDisposition, { ar: string; fr: string }> = {
+  RESTOCK: { ar: 'إعادة للرف', fr: 'Remise en rayon' },
+  QUARANTINE: { ar: 'حجر (للمندوب)', fr: 'Quarantaine (représentant)' },
+  DESTROY: { ar: 'إتلاف', fr: 'Destruction' },
 };
 
 const STATUS_LABEL: Record<ReturnStatus, { ar: string; fr: string }> = {
@@ -82,6 +88,9 @@ export const ReturnsView: React.FC = () => {
   const [rejectId, setRejectId] = useState<string | null>(null);
   const [rejectNote, setRejectNote] = useState('');
   const [ticket, setTicket] = useState<(ReturnHead & { items: Record<string, unknown>[] }) | null>(null);
+  const [approveId, setApproveId] = useState<string | null>(null);
+  const [approveItems, setApproveItems] = useState<{ id: number; name_fr: string; qty_milli: number; unit: string }[]>([]);
+  const [disp, setDisp] = useState<Record<number, ReturnDisposition>>({});
 
   const refresh = useCallback(async () => {
     setListing(true);
@@ -145,12 +154,32 @@ export const ReturnsView: React.FC = () => {
     void refresh();
   };
 
-  const doApprove = async (r: ReturnHead) => {
+  const openApprove = async (r: ReturnHead) => {
+    const full = await getReturn(r.id);
+    if (!full) { setMsg({ kind: 'err', text: mapReturnError(lastReturnLaneError(), isAr) }); return; }
+    const items = (full.items as unknown[]).map(it => {
+      const o = it as { id?: number; name_fr?: string; qty_milli?: number; unit?: string };
+      return { id: Number(o.id ?? 0), name_fr: String(o.name_fr ?? ''), qty_milli: Number(o.qty_milli ?? 0), unit: String(o.unit ?? 'PIECE') };
+    }).filter(it => it.id > 0);
+    const pre: Record<number, ReturnDisposition> = {};
+    for (const it of items) pre[it.id] = DEFAULT_DISPOSITION[r.reason];
+    setApproveItems(items);
+    setDisp(pre);
+    setApproveId(r.id);
+  };
+
+  const confirmApprove = async (r: ReturnHead) => {
+    // Every line must carry a valid disposition before the money moves.
+    if (approveItems.some(it => !disp[it.id])) {
+      setMsg({ kind: 'err', text: isAr ? 'حدد مصير كل سطر' : 'Choisissez le sort de chaque ligne' });
+      return;
+    }
     setBusy(true);
-    const out = await approveReturn(r.id, session.username, session.role);
+    const out = await approveReturn(r.id, session.username, session.role, disp);
     setBusy(false);
     if (!out) { setMsg({ kind: 'err', text: mapReturnError(lastReturnLaneError(), isAr) }); return; }
     setMsg({ kind: 'ok', text: isAr ? `تم القبول ${out.return_number} — اطبع الوصل` : `Approuvé ${out.return_number} — imprimez le bon` });
+    setApproveId(null);
     void refresh();
   };
 
@@ -308,7 +337,7 @@ export const ReturnsView: React.FC = () => {
               <div className="flex flex-wrap items-center gap-2 mt-2">
                 {r.status === 'DRAFT' && canDecide && (
                   <>
-                    <button type="button" onClick={() => void doApprove(r)} disabled={busy}
+                    <button type="button" onClick={() => void openApprove(r)} disabled={busy}
                       className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-xs font-bold flex items-center gap-1">
                       <CheckCircle2 className="w-3.5 h-3.5" />{isAr ? 'قبول' : 'Approuver'}
                     </button>
@@ -337,6 +366,32 @@ export const ReturnsView: React.FC = () => {
                     className="px-3 py-1.5 rounded-lg bg-red-700 hover:bg-red-600 disabled:opacity-40 text-xs font-bold">
                     {isAr ? 'تأكيد الرفض' : 'Confirmer'}
                   </button>
+                </div>
+              )}
+              {approveId === r.id && (
+                <div className="mt-2 space-y-2 border-t border-[#1e293b] pt-2">
+                  <div className="text-xs font-bold text-amber-300">{isAr ? 'مصير كل سطر قبل تحريك المال:' : 'Sort de chaque ligne avant de rembourser :'}</div>
+                  {approveItems.map(it => (
+                    <div key={it.id} className="flex items-center gap-2 text-sm">
+                      <span className="flex-1 min-w-0 truncate text-slate-300">{it.name_fr}</span>
+                      <select
+                        value={disp[it.id] ?? DEFAULT_DISPOSITION[r.reason]}
+                        onChange={e => setDisp(p => ({ ...p, [it.id]: e.target.value as ReturnDisposition }))}
+                        className="bg-[#0b0f17] border border-[#2b3a4f] rounded-lg px-2 py-1 text-xs">
+                        {RETURN_DISPOSITIONS.map(d => <option key={d} value={d}>{isAr ? DISP_LABEL[d].ar : DISP_LABEL[d].fr}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => void confirmApprove(r)} disabled={busy}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-xs font-bold">
+                      {isAr ? 'تأكيد القبول' : 'Confirmer l’approbation'}
+                    </button>
+                    <button type="button" onClick={() => setApproveId(null)} disabled={busy}
+                      className="px-3 py-1.5 rounded-lg bg-[#162030] border border-[#2b3a4f] text-xs font-bold">
+                      {isAr ? 'إلغاء' : 'Annuler'}
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

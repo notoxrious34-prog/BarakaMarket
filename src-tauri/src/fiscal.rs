@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 11;
+pub const LATEST_SCHEMA_VERSION: i64 = 12;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -306,6 +306,18 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
         conn.execute_batch("PRAGMA user_version = 11;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v11 → v12 (A1 supermarket): per-line disposition on return_items.
+    // No CHECK in the ALTER — the lanes validate strictly.
+    if v < 12 {
+        if !has_col("return_items", "disposition")? {
+            conn.execute_batch(
+                "ALTER TABLE return_items ADD COLUMN disposition TEXT NOT NULL DEFAULT 'RESTOCK';",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 12;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -902,6 +914,19 @@ const RETURN_REASONS: [&str; 6] = [
 const RETURN_WINDOW_DAYS: i64 = 7;
 const RETURN_TWO_PERSON_CT: i64 = 500_000;
 
+/// A1 (supermarket): per-line disposition decided at approval.
+const RETURN_DISPOSITIONS: [&str; 3] = ["RESTOCK", "QUARANTINE", "DESTROY"];
+
+/// A1 defaults by reason — the approver may override line by line.
+fn default_disposition(reason: &str) -> &'static str {
+    match reason {
+        "DEFECT" => "QUARANTINE",
+        "EXPIRED" => "DESTROY",
+        "OTHER" => "QUARANTINE",
+        _ => "RESTOCK",
+    }
+}
+
 /// Civil-day distance sale_day → today, both YYYY-MM-DD. The caller passes
 /// its fiscal day explicitly, so the native lane never needs a clock.
 fn return_window_ok(sale_day: &str, today: &str) -> Result<(), String> {
@@ -1186,6 +1211,7 @@ pub fn return_approve(
     approver: &str,
     approver_role: &str,
     today: &str,
+    dispositions_json: Option<String>,
 ) -> Result<Value, String> {
     if !["manager", "owner"].contains(&approver_role) {
         return Err("[fiscal] returns need a manager or owner to approve".to_string());
@@ -1200,7 +1226,7 @@ pub fn return_approve(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    let (status, sale_id, invoice_number, payment, refund_ct, actor, sale_day): (
+    let (status, sale_id, invoice_number, payment, refund_ct, actor, sale_day, reason): (
         String,
         String,
         String,
@@ -1208,9 +1234,10 @@ pub fn return_approve(
         i64,
         String,
         String,
+        String,
     ) = tx
         .query_row(
-            "SELECT status, sale_id, invoice_number, payment_method, refund_ct, actor, sale_day
+            "SELECT status, sale_id, invoice_number, payment_method, refund_ct, actor, sale_day, reason
              FROM returns WHERE id = ?1",
             [id],
             |r| {
@@ -1222,6 +1249,7 @@ pub fn return_approve(
                     r.get(4)?,
                     r.get(5)?,
                     r.get(6)?,
+                    r.get(7)?,
                 ))
             },
         )
@@ -1253,17 +1281,34 @@ pub fn return_approve(
     if refund_ct > RETURN_TWO_PERSON_CT && who == actor {
         return Err("[fiscal] refunds above 5000 DZD need a second person to approve".to_string());
     }
+    // A1 (supermarket): per-line disposition overrides, keyed by return_items.id.
+    // Absent key → reason default. Unknown code → hard refuse.
+    let disp_over: std::collections::HashMap<String, String> = match dispositions_json {
+        None => std::collections::HashMap::new(),
+        Some(s) => {
+            let v: Value = serde_json::from_str(&s)
+                .map_err(|_| "[fiscal] dispositions must be a JSON object".to_string())?;
+            if !v.is_object() {
+                return Err("[fiscal] dispositions must be a JSON object".to_string());
+            }
+            v.as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, vv)| (k.clone(), vv.as_str().unwrap_or("").to_string()))
+                .collect()
+        }
+    };
     // Atomic recheck (TS DAL): a concurrent approval can never double-return.
-    let items: Vec<(i64, i64, Option<i64>)> = {
+    let items: Vec<(i64, i64, i64, Option<i64>)> = {
         let mut st = tx
             .prepare(
-                "SELECT ri.sale_item_id, ri.qty_milli, ri.product_id FROM return_items ri
+                "SELECT ri.id, ri.sale_item_id, ri.qty_milli, ri.product_id FROM return_items ri
                  JOIN sale_items si ON si.id = ri.sale_item_id
                  WHERE ri.return_id = ?1",
             )
             .map_err(|e| e.to_string())?;
         let lines = st
-            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
         for line in lines {
@@ -1271,7 +1316,7 @@ pub fn return_approve(
         }
         out
     };
-    for (sale_item_id, qty, _) in &items {
+    for (_, sale_item_id, qty, _) in &items {
         let sold_qty: i64 = tx
             .query_row(
                 "SELECT qty_milli FROM sale_items WHERE id = ?1",
@@ -1318,14 +1363,79 @@ pub fn return_approve(
         rusqlite::params![number, who, posting_day, now, id],
     )
     .map_err(|e| e.to_string())?;
-    // Stock flows back in (null product = ad-hoc line, nothing to restock).
-    for (_, qty, product_id) in &items {
-        if let Some(pid) = product_id {
-            tx.execute(
-                "UPDATE products SET stock_milli = stock_milli + ?1 WHERE id = ?2",
-                rusqlite::params![qty, pid],
-            )
-            .map_err(|e| e.to_string())?;
+    // A1 (supermarket): disposition per line — validated, persisted, executed.
+    // RESTOCK = shelf · QUARANTINE = held for the rep · DESTROY = waste ledger.
+    let mut n_restock = 0i64;
+    let mut n_quar = 0i64;
+    let mut n_destroy = 0i64;
+    for (return_item_id, _, qty, product_id) in &items {
+        let disp = disp_over
+            .get(&return_item_id.to_string())
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| default_disposition(&reason));
+        if !RETURN_DISPOSITIONS.contains(&disp) {
+            return Err(format!(
+                "[fiscal] bad disposition for line {return_item_id}: {}",
+                disp_over
+                    .get(&return_item_id.to_string())
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+            ));
+        }
+        tx.execute(
+            "UPDATE return_items SET disposition = ?1 WHERE id = ?2",
+            rusqlite::params![disp, return_item_id],
+        )
+        .map_err(|e| e.to_string())?;
+        match disp {
+            "RESTOCK" => {
+                n_restock += 1;
+                // Null product = ad-hoc line, nothing to restock.
+                if let Some(pid) = product_id {
+                    tx.execute(
+                        "UPDATE products SET stock_milli = stock_milli + ?1 WHERE id = ?2",
+                        rusqlite::params![qty, pid],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+            "QUARANTINE" => {
+                // Held for the supplier rep — no stock move, no loss row.
+                n_quar += 1;
+            }
+            _ => {
+                // DESTROY: scrapped goods never touch the shelf — waste ledger
+                // at current buy cost (null product = nothing traceable).
+                n_destroy += 1;
+                if let Some(pid) = product_id {
+                    let cost: i64 = tx
+                        .query_row(
+                            "SELECT buy_price_ct FROM products WHERE id = ?1",
+                            [pid],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let loss_reason = match reason.as_str() {
+                        "EXPIRED" => "EXPIRED",
+                        "DEFECT" => "DAMAGED",
+                        _ => "AUTRE",
+                    };
+                    tx.execute(
+                        "INSERT INTO inventory_losses (product_id, qty_milli, reason, unit_cost_ct, total_loss_ct, notes, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        rusqlite::params![
+                            pid,
+                            qty,
+                            loss_reason,
+                            cost,
+                            (cost * qty) / 1000,
+                            format!("{number} ({invoice_number})"),
+                            now_iso(),
+                        ],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
         }
     }
     if payment == "ESPECES" {
@@ -1364,7 +1474,9 @@ pub fn return_approve(
         who,
         "return.approve",
         id,
-        format!("{number} {invoice_number} refund={refund_ct} creator={actor}"),
+        format!(
+            "{number} {invoice_number} refund={refund_ct} creator={actor} disp=R{n_restock}/Q{n_quar}/D{n_destroy}"
+        ),
     )?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
@@ -3197,16 +3309,29 @@ mod tests {
         assert_eq!(got["status"], "DRAFT");
         assert!(got["return_number"].is_null());
         assert_eq!(got["items"].as_array().unwrap().len(), 1);
-        let a = return_approve(&mut db, &id, "karim", "manager", "2026-11-01").unwrap();
+        let a = return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).unwrap();
         assert_eq!(a["return_number"], "RET-2026-000001");
         assert_eq!(a["refund_ct"], 36000);
-        // Stock flowed back (2000 milli of LAIT returned to 48000).
+        // A1: DEFECT defaults to QUARANTINE — held for the rep, nothing returns
+        // to the shelf (stock stays 46000) and no waste row is written.
         let stock: i64 = db
             .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| {
                 r.get(0)
             })
             .unwrap();
-        assert_eq!(stock, 48000);
+        assert_eq!(stock, 46000);
+        let disp: String = db
+            .query_row(
+                "SELECT disposition FROM return_items WHERE return_id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(disp, "QUARANTINE");
+        let losses: i64 = db
+            .query_row("SELECT COUNT(*) FROM inventory_losses", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(losses, 0);
         // The refund rode the cash journal as a WITHDRAWAL.
         let w: i64 = db
             .query_row(
@@ -3229,8 +3354,154 @@ mod tests {
             assert_eq!(n, 1, "missing audit {action}");
         }
         // Decided returns are terminal.
-        assert!(return_approve(&mut db, &id, "owner2", "owner", "2026-11-01").is_err());
+        assert!(return_approve(&mut db, &id, "owner2", "owner", "2026-11-01", None).is_err());
         assert!(return_reject(&mut db, &id, "owner2", None).is_err());
+    }
+
+    #[test]
+    fn return_disposition_defaults_override_and_waste_ledger() {
+        // A1 (supermarket): EXPIRED → DESTROY writes a waste row at buy cost
+        // and never restocks; WRONG_ITEM → RESTOCK; explicit override wins;
+        // unknown code is refused.
+        for (reason, want_disp, want_stock, want_loss) in [
+            ("EXPIRED", "DESTROY", 46000, 1),
+            ("WRONG_ITEM", "RESTOCK", 48000, 0),
+            ("CHANGED_MIND", "RESTOCK", 48000, 0),
+        ] {
+            let mut db = memdb();
+            record_sale(&mut db, &sale_header(Some("R-1")), &sale_items()).unwrap();
+            cash_open(&db, "sess-d", "Amine", 1_000_000).unwrap();
+            let item_id: i64 = db
+                .query_row(
+                    "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let items =
+                serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+            let d = return_create(
+                &mut db,
+                "s1",
+                &items,
+                reason,
+                if reason == "OTHER" {
+                    Some("note".to_string())
+                } else {
+                    None
+                },
+                "lina",
+                None,
+                "2026-11-01",
+            )
+            .unwrap();
+            let id = d["id"].as_str().unwrap().to_string();
+            return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).unwrap();
+            let disp: String = db
+                .query_row(
+                    "SELECT disposition FROM return_items WHERE return_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(disp, want_disp, "reason {reason}");
+            let stock: i64 = db
+                .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(stock, want_stock, "reason {reason}");
+            let losses: i64 = db
+                .query_row("SELECT COUNT(*) FROM inventory_losses", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(losses, want_loss, "reason {reason}");
+        }
+        // Waste row carries buy cost (12000 × 2000 milli) and the RET number.
+        {
+            let mut db = memdb();
+            record_sale(&mut db, &sale_header(Some("R-1")), &sale_items()).unwrap();
+            cash_open(&db, "sess-d2", "Amine", 1_000_000).unwrap();
+            let item_id: i64 = db
+                .query_row(
+                    "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let items =
+                serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+            let d = return_create(
+                &mut db,
+                "s1",
+                &items,
+                "EXPIRED",
+                None,
+                "lina",
+                None,
+                "2026-11-01",
+            )
+            .unwrap();
+            let id = d["id"].as_str().unwrap().to_string();
+            return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).unwrap();
+            let (qty, reason, unit, total, notes): (i64, String, i64, i64, String) = db
+                .query_row(
+                    "SELECT qty_milli, reason, unit_cost_ct, total_loss_ct, notes FROM inventory_losses",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap();
+            assert_eq!((qty, unit, total), (2000, 12000, 24000));
+            assert_eq!(reason, "EXPIRED");
+            assert!(notes.starts_with("RET-2026-"), "notes: {notes}");
+        }
+        // Explicit override beats the default; unknown code is refused.
+        {
+            let mut db = memdb();
+            record_sale(&mut db, &sale_header(Some("R-1")), &sale_items()).unwrap();
+            cash_open(&db, "sess-d3", "Amine", 1_000_000).unwrap();
+            let item_id: i64 = db
+                .query_row(
+                    "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let items =
+                serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+            let d = return_create(
+                &mut db,
+                "s1",
+                &items,
+                "DEFECT",
+                None,
+                "lina",
+                None,
+                "2026-11-01",
+            )
+            .unwrap();
+            let id = d["id"].as_str().unwrap().to_string();
+            let ri_id: i64 = db
+                .query_row(
+                    "SELECT id FROM return_items WHERE return_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            // Unknown code → hard refuse, draft stays DRAFT.
+            let bad = serde_json::json!({ ri_id.to_string(): "BURN" }).to_string();
+            let err = return_approve(&mut db, &id, "karim", "manager", "2026-11-01", Some(bad))
+                .unwrap_err();
+            assert!(err.contains("bad disposition"), "got: {err}");
+            // Explicit RESTOCK overrides the DEFECT→QUARANTINE default.
+            let over = serde_json::json!({ ri_id.to_string(): "RESTOCK" }).to_string();
+            return_approve(&mut db, &id, "karim", "manager", "2026-11-01", Some(over)).unwrap();
+            let stock: i64 = db
+                .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_eq!(stock, 48000);
+        }
     }
 
     #[test]
@@ -3282,12 +3553,12 @@ mod tests {
         )
         .unwrap();
         let id = d["id"].as_str().unwrap().to_string();
-        let err = return_approve(&mut db, &id, "karim", "manager", "2026-11-01").unwrap_err();
+        let err = return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).unwrap_err();
         assert!(err.contains("drawer short"), "got: {err}");
         // Top up exactly the refund → approval passes.
         let refund = d["refund_ct"].as_i64().unwrap();
         cash_movement(&db, "m-top", "sess-short", "DEPOSIT", refund, "top-up").unwrap();
-        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01").is_ok());
+        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).is_ok());
     }
 
     #[test]
@@ -3407,10 +3678,10 @@ mod tests {
         )
         .unwrap();
         let id = d["id"].as_str().unwrap().to_string();
-        assert!(return_approve(&mut db, &id, "lina", "cashier", "2026-11-01").is_err());
-        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01").is_err()); // no session
+        assert!(return_approve(&mut db, &id, "lina", "cashier", "2026-11-01", None).is_err());
+        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).is_err()); // no session
         cash_open(&db, "sess-g", "Amine", 1_000_000).unwrap();
-        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01").is_ok());
+        assert!(return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).is_ok());
         // Reject path on a second draft. The first line is fully consumed by
         // the approval above, so the reject draft targets the second line
         // (HUILE, 1000 milli) — a full-qty retry on the first line must now
@@ -3493,7 +3764,7 @@ mod tests {
         )
         .unwrap();
         let id = d["id"].as_str().unwrap().to_string();
-        return_approve(&mut db, &id, "karim", "manager", "2026-11-01").unwrap();
+        return_approve(&mut db, &id, "karim", "manager", "2026-11-01", None).unwrap();
         let f2 = sale_for_return(&db, "FACT-2026-000001").unwrap();
         assert_eq!(f2["items"][0]["returned_milli"], 2000);
         assert_eq!(f2["items"][0]["remaining_milli"], 0);

@@ -75,8 +75,11 @@ test('v1.5.0: full-line ESPECES return — stock back, WITHDRAWAL, RET number, a
     const ap = b.approveReturn(d.id, 'karim', 'manager');
     assert.match(ap.return_number, /^RET-\d{4}-\d{6}$/);
     assert.equal(ap.refund_ct, 36000);
-    // stock flows back in, cash leaves through the movement journal
-    assert.equal(b.getProduct(1).stock_milli, 48000 - 3000);
+    // A1: DEFECT defaults to QUARANTINE — held for the rep, nothing restocks.
+    assert.equal(b.getProduct(1).stock_milli, 48000 - 5000);
+    const head1 = b.getReturnOrNull(d.id) as Record<string, unknown>;
+    const itemDisp = (head1.items as Record<string, unknown>[])[0].disposition;
+    assert.equal(itemDisp, 'QUARANTINE');
     const moves = b.listCashMovements(b.getActiveCashSession()!.session.id);
     const w = moves.find(m => m.type === 'WITHDRAWAL');
     assert.ok(w, 'a WITHDRAWAL movement carries the refund');
@@ -344,6 +347,48 @@ test('v1.5.0: sale lookup by FACT or id feeds the draft screen (remaining math)'
     assert.equal(f2!.items[0].returned_milli, 2000);
     assert.equal(f2!.items[0].remaining_milli, 0);
     assert.equal(f2!.items[1].remaining_milli, 3000);
+    b.close();
+  } finally {
+    for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }
+  }
+});
+
+test('A1 (supermarket): disposition defaults, DESTROY waste ledger, explicit override', () => {
+  const p = tmpFile('disposition');
+  try {
+    const b = openBarakaDb(p);
+    b.upsertProduct(PROD);
+    b.openCashSession('Amine', 1000000);
+    const sale = recordTodaySale(b);
+    const [la] = saleItemIds(b, sale.id);
+    const baseStock = b.getProduct(1).stock_milli;
+
+    // EXPIRED → DESTROY: no restock + one waste row at buy cost.
+    const d1 = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 1000 }], reason: 'EXPIRED', actor: 'lina' });
+    b.approveReturn(d1.id, 'karim', 'manager');
+    assert.equal(b.getProduct(1).stock_milli, baseStock);
+    const losses = b.getInventoryLosses({});
+    assert.equal(losses.length, 1);
+    assert.equal(losses[0].reason, 'EXPIRED');
+    assert.equal(losses[0].qty_milli, 1000);
+    assert.equal(losses[0].unit_cost_ct, PROD.buy_price_ct);
+    assert.equal(losses[0].total_loss_ct, Math.round((PROD.buy_price_ct * 1000) / 1000));
+
+    // Bad disposition code → hard refuse.
+    const d2 = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 500 }], reason: 'DEFECT', actor: 'lina' });
+    const riId = ((b.getReturnOrNull(d2.id) as Record<string, unknown>).items as { id: number }[])[0].id;
+    assert.throws(() => b.approveReturn(d2.id, 'karim', 'manager', { [riId]: 'BURN' as never }), /bad disposition/);
+
+    // Explicit RESTOCK overrides DEFECT→QUARANTINE default → stock flows back.
+    const before = b.getProduct(1).stock_milli;
+    b.approveReturn(d2.id, 'karim', 'manager', { [riId]: 'RESTOCK' });
+    assert.equal(b.getProduct(1).stock_milli, before + 500);
+
+    // QUARANTINE is listed for the supplier rep — make one DEFECT stay default.
+    const d3 = b.createReturnDraft({ sale_id: sale.id, lines: [{ saleItemId: la, qty_milli: 500 }], reason: 'DEFECT', actor: 'lina' });
+    b.approveReturn(d3.id, 'karim', 'manager');
+    const quar = b.listQuarantine(100);
+    assert.ok(quar.length >= 1);
     b.close();
   } finally {
     for (const suf of ['', '-wal', '-shm', '-journal']) { try { fs.unlinkSync(p + suf); } catch { /* x */ } }

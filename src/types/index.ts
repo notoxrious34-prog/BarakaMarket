@@ -110,6 +110,17 @@ export const RETURN_REASONS = ['DEFECT', 'WRONG_ITEM', 'SIZE_FIT', 'EXPIRED', 'C
 export type ReturnReasonCode = (typeof RETURN_REASONS)[number];
 export type ReturnStatus = 'DRAFT' | 'APPROVED' | 'REJECTED';
 
+/** A1 (supermarket): per-line disposition decided at approval.
+ * RESTOCK = back to the shelf · QUARANTINE = held for the supplier rep ·
+ * DESTROY = scrapped via inventory_losses (never resellable). */
+export const RETURN_DISPOSITIONS = ['RESTOCK', 'QUARANTINE', 'DESTROY'] as const;
+export type ReturnDisposition = (typeof RETURN_DISPOSITIONS)[number];
+/** A1 defaults by reason — the approver may override line by line. */
+export const DEFAULT_DISPOSITION: Record<ReturnReasonCode, ReturnDisposition> = {
+  DEFECT: 'QUARANTINE', WRONG_ITEM: 'RESTOCK', SIZE_FIT: 'RESTOCK',
+  EXPIRED: 'DESTROY', CHANGED_MIND: 'RESTOCK', OTHER: 'QUARANTINE',
+};
+
 /** v1.5.1 (USERS-PLUS §1): mandatory freeze-reason taxonomy — a deactivation
  * without one is refused lane-side. Note (≤140) travels beside the code. */
 export const FREEZE_REASONS = ['RESIGNED', 'LEAVE', 'MISUSE', 'OTHER'] as const;

@@ -16,7 +16,7 @@ import type {
 import { buildThermalSettlementQuittance, buildThermalZReport } from '../src/hardware/escpos.js';
 import { isValidPinFormat } from '../src/core/security.js';
 import { can, type Role } from '../src/core/rbac.js';
-import type { ReturnReasonCode, ReturnStatus } from '../src/types/index.js';
+import type { ReturnReasonCode, ReturnStatus, ReturnDisposition } from '../src/types/index.js';
 import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
@@ -235,12 +235,12 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
   app.post('/api/returns/:id/approve', (req, res) => {
     try {
       const id = String(req.params.id ?? '');
-      const { approver, approver_role } = req.body as { approver?: string; approver_role?: Role };
+      const { approver, approver_role, dispositions } = req.body as { approver?: string; approver_role?: Role; dispositions?: Record<number, ReturnDisposition> };
       if (!id || !approver || !approver_role) {
         res.status(400).json({ error: 'body must be {approver, approver_role}' });
         return;
       }
-      res.json(baraka.approveReturn(id, approver, approver_role));
+      res.json(baraka.approveReturn(id, approver, approver_role, dispositions));
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

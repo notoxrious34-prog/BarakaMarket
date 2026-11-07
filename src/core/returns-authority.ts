@@ -9,7 +9,7 @@
  */
 import { isTauriRuntime, LOOPBACK_BASE, getLoopbackToken, mintRowId } from './fiscal-authority.js';
 import { fiscalDayISO } from './fiscal-day.js';
-import type { ReturnReasonCode, ReturnStatus } from '../types/index.js';
+import type { ReturnReasonCode, ReturnStatus, ReturnDisposition } from '../types/index.js';
 
 export interface ReturnLookupItem {
   sale_item_id: number; product_id: number | null; barcode: string;
@@ -151,11 +151,15 @@ function isApproveOut(v: unknown): v is { return_number: string; refund_ct: numb
  * cash WITHDRAWAL. Null on any refusal — read `lastReturnLaneError()`. */
 export async function approveReturn(
   id: string, approver: string, approverRole: string,
+  dispositions?: Record<number, ReturnDisposition>,
 ): Promise<{ return_number: string; refund_ct: number; posting_day: string } | null> {
   returnLaneError = null;
   if (isTauriRuntime()) {
     const n = await invokeReturnsNative<{ return_number?: unknown; refund_ct?: unknown; posting_day?: unknown }>(
-      'return_approve', { id, approver, approverRole, today: fiscalDayISO(new Date()) },
+      'return_approve', {
+        id, approver, approverRole, today: fiscalDayISO(new Date()),
+        dispositions: dispositions ? JSON.stringify(dispositions) : null,
+      },
     );
     if (isApproveOut(n)) return n;
     if (!returnLaneError) returnLaneError = 'native lane refused';
@@ -166,7 +170,7 @@ export async function approveReturn(
     const r = await fetch(`${LOOPBACK_BASE}/api/returns/${encodeURIComponent(id)}/approve`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(token ? { 'x-baraka-loopback': token } : {}) },
-      body: JSON.stringify({ approver, approver_role: approverRole }),
+      body: JSON.stringify({ approver, approver_role: approverRole, dispositions }),
     });
     if (!r.ok) {
       let detail = '';

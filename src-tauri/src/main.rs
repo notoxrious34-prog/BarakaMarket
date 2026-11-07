@@ -178,16 +178,25 @@ fn return_create(
 
 /// v1.5.0 (RETURNS): approve a draft — mints RET-YYYY-XXXXXX, restocks,
 /// posts the cash WITHDRAWAL, audits.
+/// A1 (supermarket): optional per-line dispositions JSON (return_items.id → code).
 #[tauri::command(rename_all = "camelCase")]
 fn return_approve(
     id: String,
     approver: String,
     approver_role: String,
     today: String,
+    dispositions: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
-    fiscal::return_approve(&mut conn, &id, &approver, &approver_role, &today)
+    fiscal::return_approve(
+        &mut conn,
+        &id,
+        &approver,
+        &approver_role,
+        &today,
+        dispositions,
+    )
 }
 
 /// v1.5.0 (RETURNS): reject a draft (terminal, audited).
