@@ -219,6 +219,68 @@ fn return_get(id: String) -> Result<serde_json::Value, String> {
     fiscal::return_get(&conn, &id)
 }
 
+/// R-bridge (supermarket): file a supplier claim over quarantined goods.
+#[tauri::command(rename_all = "camelCase")]
+fn claim_create(
+    supplier_id: i64,
+    supplier_name: String,
+    product_id: Option<i64>,
+    qty_milli: i64,
+    reason: String,
+    note: Option<String>,
+    actor: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::claim_create(
+        &mut conn,
+        supplier_id,
+        &supplier_name,
+        product_id,
+        qty_milli,
+        &reason,
+        &note.unwrap_or_default(),
+        &actor,
+    )
+}
+
+/// R-bridge: settle a claim (manager/owner) — CREDIT_NOTE books the avoir.
+#[tauri::command(rename_all = "camelCase")]
+fn claim_settle(
+    id: String,
+    resolution: String,
+    decided_by: String,
+    decided_role: String,
+) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let mut conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::claim_settle(&mut conn, &id, &resolution, &decided_by, &decided_role)
+}
+
+/// R-bridge: list claims, optionally filtered (read-only).
+#[tauri::command]
+fn claim_list(status: Option<String>) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::claim_list(&conn, status.as_deref())
+}
+
+/// Phase C (supermarket): DESTROY scrappage rows for the PERTE journal leg.
+#[tauri::command]
+fn losses_list(limit: Option<i64>) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::losses_list(&conn, limit.unwrap_or(200))
+}
+
+/// R-bridge: quarantine snapshot for the supplier rep (read-only).
+#[tauri::command]
+fn quarantine_list(limit: Option<i64>) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::quarantine_list(&conn, limit.unwrap_or(200))
+}
+
 /// v1.5.0 (RETURNS lookup): sale head + returnable lines by UUID id OR FACT
 /// number (read-only; null JSON when unknown).
 #[tauri::command]
@@ -585,7 +647,12 @@ fn main() {
             return_reject,
             return_get,
             sale_for_return,
-            return_list
+            return_list,
+            claim_create,
+            claim_settle,
+            claim_list,
+            quarantine_list,
+            losses_list
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baraka Market");

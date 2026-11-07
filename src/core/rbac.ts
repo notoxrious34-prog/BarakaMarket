@@ -19,7 +19,8 @@ export type Permission =
   | 'z.close' | 'accounting.view'
   | 'expense.record' | 'worker.manage' | 'payroll.settle'
   | 'settings.edit' | 'users.manage' | 'audit.view'
-  | 'returns.create' | 'returns.approve';
+  | 'returns.create' | 'returns.approve'
+  | 'claims.create' | 'claims.settle';
 
 const RANK: Record<Role, number> = { cashier: 0, manager: 1, owner: 2 };
 
@@ -33,6 +34,8 @@ const MIN_RANK: Record<Permission, number> = {
   // v1.5.0 (RETURNS): every cashier drafts, manager+ decides (two-person
   // rule above 5000 DZD enforced lane-side, never in the view).
   'returns.create': 0, 'returns.approve': 1,
+  // R-bridge: every cashier flags the supplier issue, manager+ closes it.
+  'claims.create': 0, 'claims.settle': 1,
 };
 
 export function can(role: Role, perm: Permission): boolean {
@@ -95,6 +98,7 @@ export type AuditAction =
   | 'update.check' | 'update.install'
   | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
   | 'return.create' | 'return.approve' | 'return.reject'
+  | 'claim.create' | 'claim.settle'
   | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'
   | 'supplier.pay' | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
 

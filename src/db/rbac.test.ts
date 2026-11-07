@@ -23,11 +23,11 @@ const cleanup = (p: string) => {
   }
 };
 
-test('T8/T13: fresh DB seeds the owner at latest schema (v13)', () => {
+test('T8/T14: fresh DB seeds the owner at latest schema (v14)', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
-    assert.equal(LATEST_SCHEMA_VERSION, 13);
+    assert.equal(LATEST_SCHEMA_VERSION, 14);
     const users = b.listUsers();
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
@@ -200,7 +200,7 @@ test('T8b: provisioned accounts start forced-change, blank names fall back', () 
   }
 });
 
-test('T8/T13: legacy v3 file climbs to v13 and reseeds the owner', () => {
+test('T8/T14: legacy v3 file climbs to v14 and reseeds the owner', () => {
   const p = tmpFile('rbac');
   try {
     const b = openBarakaDb(p);
@@ -215,7 +215,7 @@ test('T8/T13: legacy v3 file climbs to v13 and reseeds the owner', () => {
     assert.equal(users.length, 1);
     assert.equal(users[0].username, 'owner');
     assert.equal(c.verifyUser('owner', '1234').ok, true);
-    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 13);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
     c.close();
   } finally {
     cleanup(p);

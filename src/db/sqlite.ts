@@ -26,8 +26,9 @@ import type {
   ProtectedActionType, VoidLogEntry, VoidLogRecord, VoidSummary,
   BackupMetadata, BackupValidationReport, RestoreResult,
   ReturnReasonCode, ReturnLineInput, ReturnDraftInput, ReturnStatus,
+  ClaimReasonCode, ClaimStatus, ClaimResolution, SupplierClaimInput,
 } from '../types';
-import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_WINDOW_DAYS, RETURN_DISPOSITIONS, DEFAULT_DISPOSITION } from '../types';
+import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_WINDOW_DAYS, RETURN_DISPOSITIONS, DEFAULT_DISPOSITION, CLAIM_REASONS } from '../types';
 import type { ReturnDisposition } from '../types';
 import { createPinHash, verifyPin, MANAGER_PIN_META_KEY, isValidPinFormat as isValidP } from '../core/security.js';
 import { APP_VERSION } from '../core/version.js';
@@ -186,7 +187,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 13;
+export const LATEST_SCHEMA_VERSION = 14;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -461,7 +462,7 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     // The seq CHECK lists the lanes explicitly — rebuild it to admit 'RET',
     // preserving every counter (never reseeds numbering).
     db.exec(`CREATE TABLE seq_new (
-      kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET')),
+      kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET', 'CLM')),
       year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (kind, year))`);
     db.exec('INSERT INTO seq_new (kind, year, last_n) SELECT kind, year, last_n FROM seq');
@@ -520,6 +521,41 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     }
     db.exec('PRAGMA user_version = 13');
     v = 13;
+  }
+  // v13 → v14 (R-bridge): quarantined goods get a commercial way out —
+  // supplier claims tracked from OPEN to a settled resolution.
+  if (v < 14) {
+    // The seq CHECK lists the lanes explicitly — rebuild it to admit 'CLM',
+    // preserving every counter (never reseeds numbering).
+    const seqSql = (db.prepare("SELECT sql FROM sqlite_master WHERE name = 'seq'").get() as { sql: string }).sql ?? '';
+    if (!seqSql.includes("'CLM'")) {
+      db.exec(`CREATE TABLE seq_new (
+        kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET', 'CLM')),
+        year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (kind, year))`);
+      db.exec('INSERT INTO seq_new (kind, year, last_n) SELECT kind, year, last_n FROM seq');
+      db.exec('DROP TABLE seq');
+      db.exec('ALTER TABLE seq_new RENAME TO seq');
+    }
+    db.exec(`CREATE TABLE IF NOT EXISTS supplier_claims (
+      id TEXT PRIMARY KEY, claim_number TEXT NOT NULL UNIQUE,
+      supplier_id INTEGER NOT NULL, supplier_name TEXT NOT NULL DEFAULT '',
+      product_id INTEGER REFERENCES products (id) ON DELETE SET NULL,
+      product_name TEXT NOT NULL DEFAULT '',
+      qty_milli INTEGER NOT NULL CHECK (qty_milli > 0),
+      unit TEXT NOT NULL DEFAULT 'pièce',
+      reason TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+      total_cost_ct INTEGER NOT NULL DEFAULT 0 CHECK (total_cost_ct >= 0),
+      status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'SETTLED')),
+      resolution TEXT CHECK (resolution IN ('CREDIT_NOTE', 'REPLACED', 'REFUNDED', 'REJECTED')),
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_by TEXT, decided_at TEXT
+    )`);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_claims_supplier ON supplier_claims (supplier_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_claims_status ON supplier_claims (status)');
+    db.exec('PRAGMA user_version = 14');
+    v = 14;
   }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
@@ -605,6 +641,10 @@ export interface BarakaDb {
   listReturns(status?: ReturnStatus, limit?: number): Record<string, unknown>[];
   /** A1 (supermarket): approved lines held for the supplier rep (QUARANTINE). */
   listQuarantine(limit?: number): Record<string, unknown>[];
+  /** R-bridge (supermarket): commercial way out for quarantined goods. */
+  createSupplierClaim(input: SupplierClaimInput): { id: string; claim_number: string; total_cost_ct: number };
+  settleSupplierClaim(id: string, resolution: ClaimResolution, decidedBy: string, decidedByRole: string): void;
+  listSupplierClaims(status?: ClaimStatus, limit?: number): Record<string, unknown>[];
   backupTo(destPath: string): void;
   /** TASK 4 — ACID ephemeral cart draft (power-cut resilience). */
   saveCartDraft(sessionId: string, payloadJson: string, itemCount: number, totalTtcCt: number): void;
@@ -656,7 +696,7 @@ export interface BarakaDb {
   logAudit(e: AuditEvent): void;
 }
 
-function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z' | 'RET', year: number): number {
+function bumpSeq(db: DatabaseSync, kind: 'FACT' | 'T' | 'Q' | 'Z' | 'RET' | 'CLM', year: number): number {
   if (!Number.isInteger(year) || year < 2000 || year > 2100) {
     throw new Error(`[db] invalid seq year: ${year}`);
   }
@@ -2434,6 +2474,94 @@ export function openBarakaDb(dbPath: string): BarakaDb {
          WHERE r.status = 'APPROVED' AND ri.disposition = 'QUARANTINE'
          ORDER BY r.decided_at DESC, ri.id ASC LIMIT ?`,
       ).all(n) as Record<string, unknown>[];
+    },
+
+    createSupplierClaim(input: SupplierClaimInput): { id: string; claim_number: string; total_cost_ct: number } {
+      const supplierId = Math.floor(input.supplier_id);
+      if (!Number.isInteger(supplierId) || supplierId <= 0) throw new Error('[db] supplier_id must be a positive integer');
+      const supplierName = (input.supplier_name ?? '').trim();
+      if (!supplierName) throw new Error('[db] supplier_name snapshot is required');
+      if (!(CLAIM_REASONS as readonly string[]).includes(input.reason)) {
+        throw new Error(`[db] bad claim reason: ${input.reason}`);
+      }
+      const qty = Math.floor(input.qty_milli);
+      if (!Number.isInteger(qty) || qty <= 0) throw new Error('[db] qty_milli must be a positive integer');
+      const actor = (input.actor ?? '').trim();
+      if (!actor) throw new Error('[db] claim actor is required');
+      const productId = input.product_id == null ? null : Math.floor(input.product_id);
+      let productName = (input.product_name ?? '').trim();
+      let unitCostCt = 0;
+      if (productId !== null) {
+        const prod = db.prepare('SELECT name_fr, unit, buy_price_ct FROM products WHERE id = ?').get(productId) as
+          | { name_fr: string; unit: string; buy_price_ct: number } | undefined;
+        if (!prod) throw new Error(`[db] claim product not found: ${productId}`);
+        if (!productName) productName = prod.name_fr;
+        unitCostCt = prod.buy_price_ct;
+      }
+      if (!productName) productName = '—';
+      const totalCostCt = Math.floor(unitCostCt * qty / 1000);
+      const now = new Date();
+      const year = now.getFullYear();
+      const number = `CLM-${year}-${String(bumpSeq(db, 'CLM', year)).padStart(6, '0')}`;
+      const id = (globalThis.crypto as Crypto | undefined)?.randomUUID?.() ?? `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+      db.prepare(
+        `INSERT INTO supplier_claims (id, claim_number, supplier_id, supplier_name,
+          product_id, product_name, qty_milli, unit, reason, note, total_cost_ct,
+          status, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)`,
+      ).run(id, number, supplierId, supplierName, productId, productName, qty,
+        (input.unit ?? '').trim() || 'pièce', input.reason, (input.note ?? '').trim(),
+        totalCostCt, actor, now.toISOString());
+      logAuditRow(db, { actor, action: 'claim.create', entity: 'supplier_claims', entityId: id, detail: `${number} ${supplierName} ${productName} x${qty} cost=${totalCostCt}` });
+      return { id, claim_number: number, total_cost_ct: totalCostCt };
+    },
+
+    settleSupplierClaim(id: string, resolution: ClaimResolution, decidedBy: string, decidedByRole: string): void {
+      if (!['CREDIT_NOTE', 'REPLACED', 'REFUNDED', 'REJECTED'].includes(resolution)) {
+        throw new Error(`[db] bad claim resolution: ${resolution}`);
+      }
+      if (decidedByRole !== 'manager' && decidedByRole !== 'owner') {
+        throw new Error('[db] settling a supplier claim needs a manager or owner');
+      }
+      const who = (decidedBy ?? '').trim();
+      if (!who) throw new Error('[db] claim decider is required');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const cl = db.prepare('SELECT id, claim_number, supplier_id, total_cost_ct, status FROM supplier_claims WHERE id = ?').get(id) as
+          | { id: string; claim_number: string; supplier_id: number; total_cost_ct: number; status: string } | undefined;
+        if (!cl) throw new Error(`[db] claim not found: ${id}`);
+        if (cl.status !== 'OPEN') throw new Error(`[db] claim ${cl.claim_number} is already settled`);
+        db.prepare(
+          `UPDATE supplier_claims SET status = 'SETTLED', resolution = ?, decided_by = ?, decided_at = ? WHERE id = ?`,
+        ).run(resolution, who, new Date().toISOString(), id);
+        // CREDIT_NOTE shrinks what we owe the supplier — exact, same txn.
+        // The DB suppliers registry is populated by no lane (flagged hole):
+        // a missing row is a loud refusal, never a silent absorption.
+        let extra = '';
+        if (resolution === 'CREDIT_NOTE' && cl.total_cost_ct > 0) {
+          const ch = db.prepare('UPDATE suppliers SET balance_due_ct = balance_due_ct - ? WHERE id = ?').run(cl.total_cost_ct, cl.supplier_id) as { changes: number };
+          if (ch.changes === 0) throw new Error(`[db] supplier #${cl.supplier_id} has no ledger row — register the supplier before booking the avoir`);
+          extra = ` avoir-${cl.total_cost_ct}`;
+        }
+        logAuditRow(db, {
+          actor: who, action: 'claim.settle', entity: 'supplier_claims', entityId: id,
+          detail: `${cl.claim_number} resolution=${resolution}${extra}`,
+        });
+        db.exec('COMMIT');
+      } catch (e) {
+        try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
+        throw e;
+      }
+    },
+
+    listSupplierClaims(status?: ClaimStatus, limit = 100): Record<string, unknown>[] {
+      const n = Math.max(1, Math.min(500, Math.floor(limit)));
+      if (status !== undefined && status !== 'OPEN' && status !== 'SETTLED') {
+        throw new Error(`[db] bad claim status filter: ${status}`);
+      }
+      return db.prepare(
+        `SELECT * FROM supplier_claims ${status ? 'WHERE status = ?' : ''} ORDER BY created_at DESC, claim_number DESC LIMIT ?`,
+      ).all(...(status ? [status, n] : [n])) as Record<string, unknown>[];
     },
 
     backupTo(destPath: string) {

@@ -16,7 +16,7 @@ import type {
 import { buildThermalSettlementQuittance, buildThermalZReport } from '../src/hardware/escpos.js';
 import { isValidPinFormat } from '../src/core/security.js';
 import { can, type Role } from '../src/core/rbac.js';
-import type { ReturnReasonCode, ReturnStatus, ReturnDisposition } from '../src/types/index.js';
+import type { ReturnReasonCode, ReturnStatus, ReturnDisposition, ClaimStatus, ClaimResolution, ClaimReasonCode } from '../src/types/index.js';
 import { preflightCsv } from '../src/core/csv-importer.js';
 import { generateA4LabelsHtml, generateThermal80mmLabelsEscPos } from '../src/core/shelf-labels.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../src/core/reference-search.js';
@@ -258,6 +258,50 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }
+  });
+
+  // R-bridge — supplier claims over quarantined goods. POSTs need the
+  // loopback token (writes); GETs stay open like the rest of the read lane.
+  app.post('/api/claims', (req, res) => {
+    try {
+      const { supplier_id, supplier_name, product_id, qty_milli, unit, reason, note, actor } = req.body as {
+        supplier_id?: number; supplier_name?: string; product_id?: number | null; qty_milli?: number;
+        unit?: string; reason?: ClaimReasonCode; note?: string; actor?: string;
+      };
+      if (!supplier_id || !supplier_name || !qty_milli || !reason || !actor) {
+        res.status(400).json({ error: 'body must be {supplier_id, supplier_name, qty_milli, reason, actor}' });
+        return;
+      }
+      res.status(201).json(baraka.createSupplierClaim({
+        supplier_id, supplier_name, product_id: product_id ?? null, qty_milli,
+        unit, reason, note, actor,
+      }));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/claims', (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status as ClaimStatus : undefined;
+    res.json(baraka.listSupplierClaims(status));
+  });
+
+  app.post('/api/claims/:id/settle', (req, res) => {
+    try {
+      const id = String(req.params.id ?? '');
+      const { resolution, decided_by, decided_role } = req.body as { resolution?: ClaimResolution; decided_by?: string; decided_role?: string };
+      if (!id || !resolution || !decided_by || !decided_role) {
+        res.status(400).json({ error: 'body must be {resolution, decided_by, decided_role}' });
+        return;
+      }
+      res.json(baraka.settleSupplierClaim(id, resolution, decided_by, decided_role));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  app.get('/api/quarantine', (_req, res) => {
+    res.json(baraka.listQuarantine(200));
   });
 
   app.get('/api/audit', (req, res) => {

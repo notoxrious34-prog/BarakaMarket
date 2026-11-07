@@ -2,13 +2,18 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import { formatDZDFromCt } from '../../core/display';
-import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_DISPOSITIONS, DEFAULT_DISPOSITION } from '../../types/index';
-import type { ReturnReasonCode, ReturnStatus, ReturnDisposition } from '../../types/index';
+import { RETURN_REASONS, RETURN_TWO_PERSON_THRESHOLD_CT, RETURN_DISPOSITIONS, DEFAULT_DISPOSITION, CLAIM_REASONS } from '../../types/index';
+import type { ReturnReasonCode, ReturnStatus, ReturnDisposition, ClaimReasonCode, ClaimResolution } from '../../types/index';
 import {
   lookupReturnSale, createReturnDraft, approveReturn, rejectReturn, getReturn,
   listReturns, lastReturnLaneError,
 } from '../../core/returns-authority';
 import type { ReturnHead, ReturnSaleLookup } from '../../core/returns-authority';
+import {
+  createSupplierClaim, settleSupplierClaim, listSupplierClaims, listQuarantineRows,
+  lastClaimLaneError,
+} from '../../core/claims-authority';
+import type { ClaimHead, QuarantineRow } from '../../core/claims-authority';
 import { ReturnThermalTicket } from '../Receipts/ReturnThermalTicket';
 import { RotateCcw, Search, CheckCircle2, XCircle, Printer, RefreshCw } from 'lucide-react';
 
@@ -31,6 +36,21 @@ const STATUS_LABEL: Record<ReturnStatus, { ar: string; fr: string }> = {
   DRAFT: { ar: 'مسودة', fr: 'Brouillon' },
   APPROVED: { ar: 'مقبول', fr: 'Approuvé' },
   REJECTED: { ar: 'مرفوض', fr: 'Rejeté' },
+};
+
+const CLAIM_REASON_LABEL: Record<ClaimReasonCode, { ar: string; fr: string }> = {
+  DEFECT: { ar: 'عيب مصنعي', fr: 'Défaut' },
+  EXPIRED: { ar: 'منتهي الصلاحية', fr: 'Expiré' },
+  WRONG_DELIVERY: { ar: 'تسليم خاطئ', fr: 'Mauvaise livraison' },
+  SHORTAGE: { ar: 'نقص في الكمية', fr: 'Manquant' },
+  OTHER: { ar: 'أخرى', fr: 'Autre' },
+};
+
+const CLAIM_RES_LABEL: Record<ClaimResolution, { ar: string; fr: string }> = {
+  CREDIT_NOTE: { ar: 'إشعار دائن (avoir)', fr: 'Avoir' },
+  REPLACED: { ar: 'استبدال', fr: 'Échange' },
+  REFUNDED: { ar: 'استرجاع نقدي', fr: 'Remboursé' },
+  REJECTED: { ar: 'رفض المورّد', fr: 'Refus fournisseur' },
 };
 
 /** Lane refusal → cashier-facing message (the lane decides, the view translates). */
@@ -70,7 +90,7 @@ const toMilli = (v: number, unit: string): number =>
  * buttons by role and translates refusals.
  */
 export const ReturnsView: React.FC = () => {
-  const { session, language } = useApp();
+  const { session, language, suppliers } = useApp();
   const isAr = language === 'ar';
 
   const [lookupKey, setLookupKey] = useState('');
@@ -92,6 +112,28 @@ export const ReturnsView: React.FC = () => {
   const [approveItems, setApproveItems] = useState<{ id: number; name_fr: string; qty_milli: number; unit: string }[]>([]);
   const [disp, setDisp] = useState<Record<number, ReturnDisposition>>({});
 
+  // R-bridge: quarantine held for the rep + the claims filed over it.
+  const [quar, setQuar] = useState<QuarantineRow[]>([]);
+  const [claims, setClaims] = useState<ClaimHead[]>([]);
+  const [claimFilter, setClaimFilter] = useState<'' | 'OPEN' | 'SETTLED'>('');
+  const [claimFor, setClaimFor] = useState<number | null>(null);
+  const [claimSupplier, setClaimSupplier] = useState('');
+  const [claimReason, setClaimReason] = useState<ClaimReasonCode>('DEFECT');
+  const [claimNote, setClaimNote] = useState('');
+  const [settleId, setSettleId] = useState<string | null>(null);
+  const [settleRes, setSettleRes] = useState<ClaimResolution>('CREDIT_NOTE');
+  const refreshClaims = useCallback(async () => {
+    const [q, c] = await Promise.all([
+      listQuarantineRows(),
+      listSupplierClaims(claimFilter || undefined),
+    ]);
+    if (q) setQuar(q);
+    if (c) setClaims(c);
+    else if (c === null) setMsg({ kind: 'err', text: mapReturnError(lastClaimLaneError(), isAr) });
+  }, [claimFilter, isAr]);
+
+  useEffect(() => { void refreshClaims(); }, [refreshClaims]);
+
   const refresh = useCallback(async () => {
     setListing(true);
     const list = await listReturns(filter || undefined);
@@ -111,6 +153,38 @@ export const ReturnsView: React.FC = () => {
   }
   const canCreate = can(session.role, 'returns.create');
   const canDecide = can(session.role, 'returns.approve');
+  const canClaim = can(session.role, 'claims.create');
+  const canSettleClaim = can(session.role, 'claims.settle');
+
+  const doClaim = async (row: QuarantineRow) => {
+    const sid = Number(claimSupplier);
+    if (!Number.isInteger(sid) || sid <= 0) {
+      setMsg({ kind: 'err', text: isAr ? 'اختر المورّد من القائمة' : 'Choisissez le fournisseur' });
+      return;
+    }
+    const sup = suppliers.find(s => s.id === sid);
+    setBusy(true);
+    const out = await createSupplierClaim({
+      supplier_id: sid, supplier_name: sup?.name ?? `#${sid}`,
+      product_id: row.product_id, qty_milli: row.qty_milli,
+      reason: claimReason, note: claimNote.trim() || undefined, actor: session.username,
+    });
+    setBusy(false);
+    if (!out) { setMsg({ kind: 'err', text: mapReturnError(lastClaimLaneError(), isAr) }); return; }
+    setClaimFor(null); setClaimSupplier(''); setClaimNote('');
+    setMsg({ kind: 'ok', text: isAr ? `مطالبة ${out.claim_number} مسجلة` : `Réclamation ${out.claim_number} créée` });
+    void refreshClaims();
+  };
+
+  const doSettleClaim = async (id: string) => {
+    setBusy(true);
+    const ok = await settleSupplierClaim(id, settleRes, session.username, session.role);
+    setBusy(false);
+    if (!ok) { setMsg({ kind: 'err', text: mapReturnError(lastClaimLaneError(), isAr) }); return; }
+    setSettleId(null);
+    setMsg({ kind: 'ok', text: isAr ? 'سُوّيت المطالبة' : 'Réclamation soldée' });
+    void refreshClaims();
+  };
 
   const doLookup = async () => {
     setLooking(true); setLookupMsg(null); setLookup(null); setPicked({});
@@ -397,6 +471,113 @@ export const ReturnsView: React.FC = () => {
             </div>
           ))}
         </div>
+      </section>
+
+      {/* R-bridge: quarantine held for the rep + supplier claims over it. */}
+      <section className="bg-[#111722] border border-[#1e293b] rounded-2xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-black text-slate-200">
+            {isAr ? 'الحجر الصحي والمطالبات (المورّدون)' : 'Quarantaine & réclamations'}
+          </h3>
+          <button type="button" onClick={() => void refreshClaims()}
+            className="p-2 rounded-lg border border-[#2b3a4f] text-slate-300 hover:text-white" title={isAr ? 'تحديث' : 'Actualiser'}>
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+        {quar.length === 0 && (
+          <p className="text-xs text-slate-500">{isAr ? 'لا سلع محجوزة حالياً.' : 'Rien en quarantaine.'}</p>
+        )}
+        {quar.map((q, i) => (
+          <div key={`${q.return_number}-${i}`} className="bg-[#0b0f17] border border-[#2b3a4f] rounded-xl p-3 space-y-2">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span className="font-black text-slate-100">{q.name_fr}</span>
+              <span className="font-mono text-amber-300" dir="ltr">{fmtUnitQty(q.qty_milli, q.unit)} {q.unit}</span>
+              <span className="text-slate-500 font-mono" dir="ltr">{q.return_number}</span>
+            </div>
+            {canClaim && claimFor === i ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <select value={claimSupplier} onChange={e => setClaimSupplier(e.target.value)}
+                  className="bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-2 text-xs focus:outline-none focus:border-amber-500">
+                  <option value="">{isAr ? '— المورّد —' : '— Fournisseur —'}</option>
+                  {suppliers.map(s => <option key={s.id} value={s.id}>{s.name} #{s.id}</option>)}
+                </select>
+                <select value={claimReason} onChange={e => setClaimReason(e.target.value as ClaimReasonCode)}
+                  className="bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-2 text-xs focus:outline-none focus:border-amber-500">
+                  {CLAIM_REASONS.map(r => <option key={r} value={r}>{isAr ? CLAIM_REASON_LABEL[r].ar : CLAIM_REASON_LABEL[r].fr}</option>)}
+                </select>
+                <input value={claimNote} onChange={e => setClaimNote(e.target.value)} maxLength={140}
+                  placeholder={isAr ? 'ملاحظة (اختيارية)' : 'Note (optionnelle)'}
+                  className="sm:col-span-2 bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-2 text-xs placeholder:text-slate-600 focus:outline-none focus:border-amber-500" />
+                <div className="sm:col-span-2 flex gap-2">
+                  <button type="button" onClick={() => void doClaim(q)} disabled={busy}
+                    className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-bold">
+                    {isAr ? 'تسجيل المطالبة' : 'Créer la réclamation'}
+                  </button>
+                  <button type="button" onClick={() => setClaimFor(null)}
+                    className="px-3 py-2 rounded-lg border border-[#2b3a4f] text-slate-300 text-xs font-bold">
+                    {isAr ? 'إلغاء' : 'Annuler'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              canClaim && (
+                <button type="button" onClick={() => { setClaimFor(i); setClaimSupplier(''); setClaimNote(''); setClaimReason('DEFECT'); }}
+                  className="px-3 py-1.5 rounded-lg border border-amber-700 text-amber-300 hover:bg-amber-950 text-xs font-bold">
+                  {isAr ? 'مطالبة المورّد' : 'Réclamer au fournisseur'}
+                </button>
+              )
+            )}
+          </div>
+        ))}
+        <div className="flex items-center gap-2 pt-1">
+          {(['', 'OPEN', 'SETTLED'] as const).map(f => (
+            <button key={f} type="button" onClick={() => setClaimFilter(f)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold ${claimFilter === f ? 'bg-amber-600 text-white' : 'bg-[#0b0f17] text-slate-400 border border-[#2b3a4f]'}`}>
+              {f === '' ? (isAr ? 'كل المطالبات' : 'Toutes') : f === 'OPEN' ? (isAr ? 'مفتوحة' : 'Ouvertes') : (isAr ? 'مسواة' : 'Soldées')}
+            </button>
+          ))}
+        </div>
+        {claims.map(c => (
+          <div key={c.id} className="bg-[#0b0f17] border border-[#2b3a4f] rounded-xl p-3 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              <span className="font-mono font-black text-amber-300" dir="ltr">{c.claim_number}</span>
+              <span className="font-bold text-slate-100">{c.supplier_name}</span>
+              <span className="text-slate-400">{c.product_name} · <span className="font-mono" dir="ltr">{fmtUnitQty(c.qty_milli, c.unit)}</span></span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-black ${c.status === 'OPEN' ? 'bg-amber-950 text-amber-300 border border-amber-800' : 'bg-emerald-950 text-emerald-300 border border-emerald-800'}`}>
+                {c.status === 'OPEN' ? (isAr ? 'مفتوحة' : 'Ouverte') : (isAr ? 'مسواة' : 'Soldée')}
+              </span>
+              {c.status === 'SETTLED' && c.resolution && (
+                <span className="text-slate-500 text-[11px]">{isAr ? CLAIM_RES_LABEL[c.resolution as ClaimResolution].ar : CLAIM_RES_LABEL[c.resolution as ClaimResolution].fr}</span>
+              )}
+              <span className="text-slate-500 font-mono" dir="ltr">{formatDZDFromCt(c.total_cost_ct)}</span>
+            </div>
+            {c.status === 'OPEN' && canSettleClaim && (settleId === c.id ? (
+              <div className="flex flex-col sm:flex-row gap-2">
+                <select value={settleRes} onChange={e => setSettleRes(e.target.value as ClaimResolution)}
+                  className="bg-[#111722] border border-[#2b3a4f] rounded-lg px-2 py-2 text-xs focus:outline-none focus:border-amber-500">
+                  {(['CREDIT_NOTE', 'REPLACED', 'REFUNDED', 'REJECTED'] as const).map(r => (
+                    <option key={r} value={r}>{isAr ? CLAIM_RES_LABEL[r].ar : CLAIM_RES_LABEL[r].fr}</option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => void doSettleClaim(c.id)} disabled={busy}
+                    className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold">
+                    {isAr ? 'تأكيد التسوية' : 'Solder'}
+                  </button>
+                  <button type="button" onClick={() => setSettleId(null)}
+                    className="px-3 py-2 rounded-lg border border-[#2b3a4f] text-slate-300 text-xs font-bold">
+                    {isAr ? 'إلغاء' : 'Annuler'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button type="button" onClick={() => { setSettleId(c.id); setSettleRes('CREDIT_NOTE'); }}
+                className="px-3 py-1.5 rounded-lg border border-emerald-700 text-emerald-300 hover:bg-emerald-950 text-xs font-bold">
+                {isAr ? 'تسوية' : 'Solder'}
+              </button>
+            ))}
+          </div>
+        ))}
       </section>
 
       {ticket && (

@@ -121,6 +121,22 @@ export const DEFAULT_DISPOSITION: Record<ReturnReasonCode, ReturnDisposition> = 
   EXPIRED: 'DESTROY', CHANGED_MIND: 'RESTOCK', OTHER: 'QUARANTINE',
 };
 
+/** R-bridge (supermarket): supplier-claim taxonomy — quarantined goods get a
+ * commercial way out (avoir / replacement / refund), tracked to settlement.
+ * supplier_id is app-level (the shop's working registry); no hard FK — the DB
+ * suppliers table is never populated by any lane (pre-existing hole, flagged). */
+export const CLAIM_REASONS = ['DEFECT', 'EXPIRED', 'WRONG_DELIVERY', 'SHORTAGE', 'OTHER'] as const;
+export type ClaimReasonCode = (typeof CLAIM_REASONS)[number];
+export type ClaimStatus = 'OPEN' | 'SETTLED';
+export const CLAIM_RESOLUTIONS = ['CREDIT_NOTE', 'REPLACED', 'REFUNDED', 'REJECTED'] as const;
+export type ClaimResolution = (typeof CLAIM_RESOLUTIONS)[number];
+export interface SupplierClaimInput {
+  supplier_id: number; supplier_name: string;
+  product_id?: number | null; product_name?: string;
+  qty_milli: number; unit?: string;
+  reason: ClaimReasonCode; note?: string; actor: string;
+}
+
 /** v1.5.1 (USERS-PLUS §1): mandatory freeze-reason taxonomy — a deactivation
  * without one is refused lane-side. Note (≤140) travels beside the code. */
 export const FREEZE_REASONS = ['RESIGNED', 'LEAVE', 'MISUSE', 'OTHER'] as const;

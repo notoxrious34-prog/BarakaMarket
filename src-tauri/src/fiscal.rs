@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 13;
+pub const LATEST_SCHEMA_VERSION: i64 = 14;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -260,7 +260,7 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         // 'RET', preserving every counter (never reseeds numbering).
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS seq_new (
-               kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET')),
+               kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET', 'CLM')),
                year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
                PRIMARY KEY (kind, year));
              INSERT OR IGNORE INTO seq_new (kind, year, last_n)
@@ -336,6 +336,56 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         }
         conn.execute_batch("PRAGMA user_version = 13;")
             .map_err(|e| e.to_string())?;
+    }
+    // v13 → v14 (R-bridge): quarantined goods get a commercial way out —
+    // supplier claims tracked from OPEN to a settled resolution.
+    if v < 14 {
+        // The seq CHECK lists the lanes explicitly — rebuild it to admit
+        // 'CLM', preserving every counter (never reseeds numbering).
+        let mut needs_seq = true;
+        if let Ok(sql) = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'seq'",
+            [],
+            |r| r.get::<_, Option<String>>(0),
+        ) {
+            if let Some(s) = sql {
+                needs_seq = !s.contains("'CLM'");
+            }
+        }
+        if needs_seq {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS seq_new (
+                   kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET', 'CLM')),
+                   year INTEGER NOT NULL, last_n INTEGER NOT NULL DEFAULT 0,
+                   PRIMARY KEY (kind, year));
+                 INSERT OR IGNORE INTO seq_new (kind, year, last_n)
+                   SELECT kind, year, last_n FROM seq;
+                 DROP TABLE IF EXISTS seq;
+                 ALTER TABLE seq_new RENAME TO seq;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS supplier_claims (
+              id TEXT PRIMARY KEY, claim_number TEXT NOT NULL UNIQUE,
+              supplier_id INTEGER NOT NULL, supplier_name TEXT NOT NULL DEFAULT '',
+              product_id INTEGER REFERENCES products (id) ON DELETE SET NULL,
+              product_name TEXT NOT NULL DEFAULT '',
+              qty_milli INTEGER NOT NULL CHECK (qty_milli > 0),
+              unit TEXT NOT NULL DEFAULT 'pièce',
+              reason TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+              total_cost_ct INTEGER NOT NULL DEFAULT 0 CHECK (total_cost_ct >= 0),
+              status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'SETTLED')),
+              resolution TEXT CHECK (resolution IN ('CREDIT_NOTE', 'REPLACED', 'REFUNDED', 'REJECTED')),
+              created_by TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              decided_by TEXT, decided_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_supplier_claims_supplier ON supplier_claims (supplier_id);
+            CREATE INDEX IF NOT EXISTS idx_supplier_claims_status ON supplier_claims (status);
+            PRAGMA user_version = 14;",
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1619,6 +1669,263 @@ pub fn return_reject(
     )?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "id": id, "status": "REJECTED" }))
+}
+
+/// R-bridge (supermarket): supplier claims over quarantined goods.
+/// Native twin of the TS claims lane — same guards, same numbering.
+pub fn claim_create(
+    conn: &mut Connection,
+    supplier_id: i64,
+    supplier_name: &str,
+    product_id: Option<i64>,
+    qty_milli: i64,
+    reason: &str,
+    note: &str,
+    actor: &str,
+) -> Result<Value, String> {
+    const REASONS: [&str; 5] = ["DEFECT", "EXPIRED", "WRONG_DELIVERY", "SHORTAGE", "OTHER"];
+    if supplier_id <= 0 {
+        return Err("[fiscal] supplier_id must be a positive integer".to_string());
+    }
+    let sname = supplier_name.trim();
+    if sname.is_empty() {
+        return Err("[fiscal] supplier_name snapshot is required".to_string());
+    }
+    if !REASONS.contains(&reason) {
+        return Err(format!("[fiscal] bad claim reason: {reason}"));
+    }
+    if qty_milli <= 0 {
+        return Err("[fiscal] qty_milli must be a positive integer".to_string());
+    }
+    let who = actor.trim();
+    if who.is_empty() {
+        return Err("[fiscal] claim actor is required".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let (pname, unit_cost_ct): (String, i64) = match product_id {
+        Some(p) => {
+            let row: Option<(String, String, i64)> = tx
+                .query_row(
+                    "SELECT name_fr, unit, buy_price_ct FROM products WHERE id = ?1",
+                    [p],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            match row {
+                Some((n, _, c)) => (n, c),
+                None => return Err(format!("[fiscal] claim product not found: {p}")),
+            }
+        }
+        None => ("—".to_string(), 0),
+    };
+    let total_cost_ct = unit_cost_ct * qty_milli / 1000;
+    let now = now_iso();
+    let year: i64 = now[0..4].parse().unwrap_or(2026);
+    let n = bump_seq(&tx, "CLM", year)?;
+    let number = format!("CLM-{year}-{n:06}");
+    let id = uuid::Uuid::new_v4().to_string();
+    tx.execute(
+        "INSERT INTO supplier_claims (id, claim_number, supplier_id, supplier_name,
+          product_id, product_name, qty_milli, unit, reason, note, total_cost_ct,
+          status, created_by, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pièce', ?8, ?9, ?10, 'OPEN', ?11, ?12)",
+        rusqlite::params![
+            id,
+            number,
+            supplier_id,
+            sname,
+            product_id,
+            pname,
+            qty_milli,
+            reason,
+            note.trim(),
+            total_cost_ct,
+            who,
+            now
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    audit_return(
+        &tx,
+        who,
+        "claim.create",
+        &id,
+        format!("{number} {sname} {pname} x{qty_milli} cost={total_cost_ct}"),
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "id": id, "claim_number": number, "total_cost_ct": total_cost_ct }))
+}
+
+pub fn claim_settle(
+    conn: &mut Connection,
+    id: &str,
+    resolution: &str,
+    decided_by: &str,
+    decided_role: &str,
+) -> Result<Value, String> {
+    const RESOLUTIONS: [&str; 4] = ["CREDIT_NOTE", "REPLACED", "REFUNDED", "REJECTED"];
+    if !RESOLUTIONS.contains(&resolution) {
+        return Err(format!("[fiscal] bad claim resolution: {resolution}"));
+    }
+    if decided_role != "manager" && decided_role != "owner" {
+        return Err("[fiscal] settling a supplier claim needs a manager or owner".to_string());
+    }
+    let who = decided_by.trim();
+    if who.is_empty() {
+        return Err("[fiscal] claim decider is required".to_string());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| e.to_string())?;
+    let (number, supplier_id, total_cost_ct, status): (String, i64, i64, String) = tx
+        .query_row(
+            "SELECT claim_number, supplier_id, total_cost_ct, status FROM supplier_claims WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|_| format!("[fiscal] claim not found: {id}"))?;
+    if status != "OPEN" {
+        return Err(format!("[fiscal] claim {number} is already settled"));
+    }
+    let now = now_iso();
+    tx.execute(
+        "UPDATE supplier_claims SET status = 'SETTLED', resolution = ?1, decided_by = ?2, decided_at = ?3
+         WHERE id = ?4",
+        rusqlite::params![resolution, who, now, id],
+    )
+    .map_err(|e| e.to_string())?;
+    let mut extra = String::new();
+    if resolution == "CREDIT_NOTE" && total_cost_ct > 0 {
+        let ch = tx
+            .execute(
+                "UPDATE suppliers SET balance_due_ct = balance_due_ct - ?1 WHERE id = ?2",
+                rusqlite::params![total_cost_ct, supplier_id],
+            )
+            .map_err(|e| e.to_string())?;
+        if ch == 0 {
+            return Err(format!(
+                "[fiscal] supplier #{supplier_id} has no ledger row — register the supplier before booking the avoir"
+            ));
+        }
+        extra = format!(" avoir-{total_cost_ct}");
+    }
+    audit_return(
+        &tx,
+        who,
+        "claim.settle",
+        id,
+        format!("{number} resolution={resolution}{extra}"),
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "id": id, "status": "SETTLED", "resolution": resolution }))
+}
+
+pub fn claim_list(conn: &Connection, status: Option<&str>) -> Result<Value, String> {
+    if let Some(s) = status {
+        if s != "OPEN" && s != "SETTLED" {
+            return Err(format!("[fiscal] bad claim status filter: {s}"));
+        }
+    }
+    let sql = format!(
+        "SELECT id, claim_number, supplier_id, supplier_name, product_id, product_name,
+          qty_milli, unit, reason, note, total_cost_ct, status, resolution,
+          created_by, created_at, decided_by, decided_at
+         FROM supplier_claims {} ORDER BY created_at DESC, claim_number DESC LIMIT 100",
+        status.map(|_| "WHERE status = ?1").unwrap_or("")
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let map_row = |r: &rusqlite::Row| {
+        Ok(serde_json::json!({
+            "id": r.get::<_, String>(0)?, "claim_number": r.get::<_, String>(1)?,
+            "supplier_id": r.get::<_, i64>(2)?, "supplier_name": r.get::<_, String>(3)?,
+            "product_id": r.get::<_, Option<i64>>(4)?, "product_name": r.get::<_, String>(5)?,
+            "qty_milli": r.get::<_, i64>(6)?, "unit": r.get::<_, String>(7)?,
+            "reason": r.get::<_, String>(8)?, "note": r.get::<_, String>(9)?,
+            "total_cost_ct": r.get::<_, i64>(10)?, "status": r.get::<_, String>(11)?,
+            "resolution": r.get::<_, Option<String>>(12)?,
+            "created_by": r.get::<_, String>(13)?, "created_at": r.get::<_, String>(14)?,
+            "decided_by": r.get::<_, Option<String>>(15)?, "decided_at": r.get::<_, Option<String>>(16)?,
+        }))
+    };
+    let mut out = Vec::new();
+    match status {
+        Some(s) => {
+            let rows = stmt.query_map([s], map_row).map_err(|e| e.to_string())?;
+            for row in rows {
+                out.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+        None => {
+            let rows = stmt
+                .query_map(rusqlite::params![], map_row)
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                out.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+/// Phase C (supermarket): DESTROY scrappage rows for the PERTE journal leg.
+/// Read-only, newest first.
+pub fn losses_list(conn: &Connection, limit: i64) -> Result<Value, String> {
+    let n = limit.clamp(1, 500);
+    let mut stmt = conn
+        .prepare(
+            "SELECT l.id, l.product_id, COALESCE(p.name_fr, '') AS product_name,
+              l.qty_milli, l.reason, l.unit_cost_ct, l.total_loss_ct, l.created_at
+             FROM inventory_losses l LEFT JOIN products p ON p.id = l.product_id
+             ORDER BY l.created_at DESC, l.id DESC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([n], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, i64>(0)?, "product_id": r.get::<_, Option<i64>>(1)?,
+                "product_name": r.get::<_, String>(2)?, "qty_milli": r.get::<_, i64>(3)?,
+                "reason": r.get::<_, String>(4)?, "unit_cost_ct": r.get::<_, i64>(5)?,
+                "total_loss_ct": r.get::<_, i64>(6)?, "created_at": r.get::<_, String>(7)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+pub fn quarantine_list(conn: &Connection, limit: i64) -> Result<Value, String> {
+    let n = limit.clamp(1, 500);
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.return_number, r.invoice_number, r.reason, r.decided_at,
+              ri.name_fr, ri.qty_milli, ri.unit, ri.product_id, ri.line_ttc_ct
+             FROM return_items ri JOIN returns r ON r.id = ri.return_id
+             WHERE r.status = 'APPROVED' AND ri.disposition = 'QUARANTINE'
+             ORDER BY r.decided_at DESC, ri.id ASC LIMIT ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([n], |r| {
+            Ok(serde_json::json!({
+                "return_number": r.get::<_, String>(0)?, "invoice_number": r.get::<_, String>(1)?,
+                "reason": r.get::<_, String>(2)?, "decided_at": r.get::<_, Option<String>>(3)?,
+                "name_fr": r.get::<_, String>(4)?, "qty_milli": r.get::<_, i64>(5)?,
+                "unit": r.get::<_, String>(6)?, "product_id": r.get::<_, Option<i64>>(7)?,
+                "line_ttc_ct": r.get::<_, i64>(8)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| e.to_string())?);
+    }
+    Ok(serde_json::Value::Array(out))
 }
 
 pub fn return_get(conn: &Connection, id: &str) -> Result<Value, String> {
@@ -4183,6 +4490,67 @@ mod tests {
         let err = void_sale(&mut db2, "s1", "trop tard", "karim").unwrap_err();
         assert!(err.contains("approved returns"), "err: {err}");
         assert_eq!(bal(&mut db2), 177600 - 36000);
+    }
+
+    #[test]
+    fn r_bridge_claim_files_valued_and_settles_with_avoir() {
+        // R-bridge: a claim files with buy-cost valuation and a CLM number;
+        // settle needs manager+; CREDIT_NOTE books the avoir on the supplier
+        // ledger, refusing loudly when the ledger row is missing.
+        let mut db = memdb();
+        let c = claim_create(
+            &mut db,
+            9,
+            "SOUMAM",
+            Some(1),
+            2000,
+            "DEFECT",
+            "gonflées",
+            "lina",
+        )
+        .unwrap();
+        assert_eq!(c["total_cost_ct"], 24000); // 2000 milli at buy 12000
+        let num = c["claim_number"].as_str().unwrap().to_string();
+        assert!(num.starts_with("CLM-"), "num: {num}");
+        let id = c["id"].as_str().unwrap().to_string();
+        let err = claim_settle(&mut db, &id, "REPLACED", "yacine", "cashier").unwrap_err();
+        assert!(err.contains("manager or owner"), "err: {err}");
+        let s = claim_settle(&mut db, &id, "REPLACED", "karim", "manager").unwrap();
+        assert_eq!(s["status"], "SETTLED");
+        let err2 = claim_settle(&mut db, &id, "REFUNDED", "karim", "manager").unwrap_err();
+        assert!(err2.contains("already settled"), "err: {err2}");
+
+        // CREDIT_NOTE without a supplier ledger row refuses (loud, not silent).
+        let c2 = claim_create(&mut db, 9, "SOUMAM", Some(1), 1000, "EXPIRED", "", "lina").unwrap();
+        let id2 = c2["id"].as_str().unwrap().to_string();
+        let err3 = claim_settle(&mut db, &id2, "CREDIT_NOTE", "karim", "manager").unwrap_err();
+        assert!(err3.contains("no ledger row"), "err: {err3}");
+        db.execute(
+            "INSERT INTO suppliers (id, name, balance_due_ct) VALUES (9, 'SOUMAM', 500000)",
+            [],
+        )
+        .unwrap();
+        claim_settle(&mut db, &id2, "CREDIT_NOTE", "karim", "manager").unwrap();
+        let bal: i64 = db
+            .query_row(
+                "SELECT balance_due_ct FROM suppliers WHERE id = 9",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bal, 500000 - 12000);
+        let open: Vec<Value> = claim_list(&db, Some("OPEN"))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(open.len(), 0);
+        let settled: Vec<Value> = claim_list(&db, Some("SETTLED"))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(settled.len(), 2);
     }
 
     #[test]

@@ -84,6 +84,34 @@ CREATE INDEX IF NOT EXISTS idx_inventory_losses_product ON inventory_losses (pro
 CREATE INDEX IF NOT EXISTS idx_inventory_losses_created ON inventory_losses (created_at);
 CREATE INDEX IF NOT EXISTS idx_products_expiry ON products (expiry_date) WHERE has_expiry = 1;
 
+/* R-bridge (supermarket): supplier claims over quarantined goods.
+ * supplier_id is deliberately NOT a hard FK: it mirrors the shop's working
+ * supplier registry (app-level list); the DB suppliers table is never
+ * populated by any lane (pre-existing hole — flagged, not silently worked
+ * around). The name snapshot keeps the claim readable even if the registry
+ * row is renamed later. */
+CREATE TABLE IF NOT EXISTS supplier_claims (
+  id              TEXT PRIMARY KEY,
+  claim_number    TEXT NOT NULL UNIQUE,
+  supplier_id     INTEGER NOT NULL,
+  supplier_name   TEXT NOT NULL DEFAULT '',
+  product_id      INTEGER REFERENCES products (id) ON DELETE SET NULL,
+  product_name    TEXT NOT NULL DEFAULT '',
+  qty_milli       INTEGER NOT NULL CHECK (qty_milli > 0),
+  unit            TEXT NOT NULL DEFAULT 'pièce',
+  reason          TEXT NOT NULL,
+  note            TEXT NOT NULL DEFAULT '',
+  total_cost_ct   INTEGER NOT NULL DEFAULT 0 CHECK (total_cost_ct >= 0),
+  status          TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'SETTLED')),
+  resolution      TEXT CHECK (resolution IN ('CREDIT_NOTE', 'REPLACED', 'REFUNDED', 'REJECTED')),
+  created_by      TEXT NOT NULL DEFAULT '',
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  decided_by      TEXT,
+  decided_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_claims_supplier ON supplier_claims (supplier_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_claims_status ON supplier_claims (status);
+
 CREATE TABLE IF NOT EXISTS clients (
   id                  INTEGER PRIMARY KEY,
   name                TEXT    NOT NULL,
@@ -115,7 +143,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
 
 -- Atomic invoice/ticket/quittance counters. Bump via single UPDATE..RETURNING (one statement = atomic).
 CREATE TABLE IF NOT EXISTS seq (
-  kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET')),
+  kind TEXT NOT NULL CHECK (kind IN ('FACT', 'T', 'Q', 'Z', 'RET', 'CLM')),
   year   INTEGER NOT NULL,
   last_n INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (kind, year)
