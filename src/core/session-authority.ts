@@ -162,11 +162,15 @@ function isSessionUser(v: unknown): v is SessionUser {
 
 /** Owner-gated creation (invoke-first, loopback fallback). Null on any
  *  refusal — read `lastUserLaneError()` for the reason (taken, validation,
- *  owner-gate, offline). Never throws. */
+ *  owner-gate, offline). Never throws.
+ *  v1.5.1 B2-5: `opts.ownerConfirmPin` (the requesting owner's own current
+ *  PIN) is REQUIRED when `input.role === 'owner'` — presence proof + double
+ *  audit; lanes re-check. */
 export async function createSessionUser(
   input: { username: string; display_name?: string; role: Role; pin: string },
   requesterRole: Role,
   actor: string,
+  opts?: { ownerConfirmPin?: string },
 ): Promise<SessionUser | null> {
   userLaneError = null;
   if (isTauriRuntime()) {
@@ -179,12 +183,13 @@ export async function createSessionUser(
       pin: input.pin,
       requesterRole,
       actor,
+      confirmPin: opts?.ownerConfirmPin ?? '',
     });
     if (n.ok && isSessionUser(n.value)) return n.value;
     userLaneError = (n.ok ? '' : n.error) || 'native lane refused';
     return null;
   }
-  const l = await postUserLoopback<SessionUser>('/api/users', { ...input, requesterRole, actor });
+  const l = await postUserLoopback<SessionUser>('/api/users', { ...input, requesterRole, actor, confirmPin: opts?.ownerConfirmPin });
   if (l.ok && isSessionUser(l.value)) return l.value;
   userLaneError = (l.ok ? '' : l.error) || 'server refused';
   return null;

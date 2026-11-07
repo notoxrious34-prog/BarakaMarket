@@ -493,6 +493,33 @@ test('api: v1.5.1 §4 rotation window — GET default, POST owner-gated + audite
   assert.equal(back.status, 200);
 });
 
+test('api: v1.5.1 B2-5 — second owner needs the requesting owner PIN, doubly audited', async () => {
+  const post = async (p: string, body: unknown) =>
+    fetch(`${base}${p}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const base1 = { username: 'boss2', display_name: 'Boss Two', role: 'owner', pin: '9999', requesterRole: 'owner', actor: 'owner' };
+  // No confirm / wrong confirm / non-owner confirmer — all 400, all audited.
+  const none = await post('/api/users', base1);
+  assert.equal(none.status, 400);
+  const wrong = await post('/api/users', { ...base1, confirmPin: '0000' });
+  assert.equal(wrong.status, 400);
+  const stranger = await post('/api/users', { ...base1, actor: 'rim', confirmPin: '5151' });
+  assert.equal(stranger.status, 400);
+  // Correct owner PIN — 201, forced-change armed, double audit row.
+  const ok = await post('/api/users', { ...base1, confirmPin: '1234' });
+  assert.equal(ok.status, 201);
+  const created = (await ok.json()) as { id: number; username: string; role: string; must_change_pin: number };
+  assert.equal(created.username, 'boss2');
+  assert.equal(created.role, 'owner');
+  assert.equal(created.must_change_pin, 1);
+  const live = (await (await post('/api/users/verify', { username: 'boss2', pin: '9999' })).json()) as { ok: boolean };
+  assert.equal(live.ok, true);
+  const logged = await (await fetch(`${base}/api/audit?limit=100`)).json() as { action: string; detail: string; entity_id: string }[];
+  const conf = logged.filter(a => a.action === 'owner.confirm' && a.detail.includes('second-owner:boss2'));
+  assert.equal(conf.filter(a => a.detail.endsWith(' ok')).length, 1);
+  assert.ok(conf.filter(a => a.detail.endsWith('rejected')).length >= 3, 'every refusal audited');
+  assert.ok(logged.some(a => a.action === 'user.create' && a.entity_id === 'boss2'), 'creation itself audited');
+});
+
 test('api: T8 self-auth posts work WITHOUT the loopback token; the rest stay gated', async () => {
   // Negative path: _rawFetch bypasses the file's token-injecting fetch shim.
   const bare = (p: string, body: unknown) =>

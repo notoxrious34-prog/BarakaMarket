@@ -162,8 +162,21 @@ test('T8: create/list/deactivate/changePin with audit trail', () => {
       assert.ok((fresh.user.rotation_days_left ?? 0) > 80);
     }
     assert.ok(b.listUsers().find(u => u.id === m.id)!.pin_changed_at, 'clock visible in list');
+    // v1.5.1 B2-5: second owner needs the requesting owner's own current
+    // PIN — missing/wrong/non-owner refused (audited), correct doubly logged.
+    assert.throws(() => b.createUser({ username: 'boss2', role: 'owner', pin: '9999' }, 'owner'), /second-owner/);
+    assert.throws(() => b.createUser({ username: 'boss2', role: 'owner', pin: '9999' }, 'owner', { ownerConfirmPin: '0000' }), /second-owner/);
+    assert.throws(() => b.createUser({ username: 'boss2', role: 'owner', pin: '9999' }, 'sara', { ownerConfirmPin: '1234' }), /second-owner/);
+    const boss = b.createUser({ username: 'boss2', display_name: 'Boss Two', role: 'owner', pin: '9999' }, 'owner', { ownerConfirmPin: '1234' });
+    assert.equal(boss.username, 'boss2');
+    assert.equal(boss.role, 'owner');
+    assert.equal(boss.must_change_pin, 1);
+    assert.equal(b.verifyUser('boss2', '9999').ok, true);
+    const confAudit = b.listAudit(100).filter(a => a.action === 'owner.confirm' && (a.detail ?? '').includes('second-owner:boss2'));
+    assert.equal(confAudit.filter(a => (a.detail ?? '').endsWith(' ok')).length, 1);
+    assert.ok(confAudit.some(a => (a.detail ?? '').endsWith('rejected')), 'refusals audited');
     const audit = b.listAudit(50).map(a => a.action);
-    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change', 'pin.reset', 'users.rotation_config'] as const) {
+    for (const a of ['user.create', 'login.ok', 'login.fail', 'user.deactivate', 'pin.change', 'pin.reset', 'users.rotation_config', 'owner.confirm'] as const) {
       assert.ok(audit.includes(a), `audit must contain ${a}`);
     }
     b.close();

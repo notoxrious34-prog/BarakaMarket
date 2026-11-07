@@ -59,6 +59,9 @@ export const UsersManagerView: React.FC = () => {
   const [resetConfirm, setResetConfirm] = useState('');
   // §3 completion: temp-PIN lifespan (PLAN binds expiry — auto-dies).
   const [resetHours, setResetHours] = useState<'8' | '24' | '48'>('24');
+  // v1.5.1 B2-5: second owner needs the requesting owner's own current PIN
+  // (presence proof) — replaces the single window.confirm, doubly audited.
+  const [ownerPin, setOwnerPin] = useState('');
   // v1.5.1 §4: rotation window (days) — owner config, re-armed per login.
   const [rotDays, setRotDays] = useState<number>(90);
   const [rotInput, setRotInput] = useState('90');
@@ -109,6 +112,7 @@ export const UsersManagerView: React.FC = () => {
     if (e.includes('never reset')) {
       return ar ? 'حساب المالك لا يُصفَّر أبداً — غيّر رمزك بالرمز الحالي.' : 'Le code gérant ne se réinitialise jamais — changez-le avec l’ancien code.';
     }
+    if (e.includes('second-owner')) return ar ? 'مالك ثانٍ: رمز التأكيد مرفوض — أدخل رمزك أنت.' : 'Second gérant : code de confirmation refusé — tapez VOTRE code.';
     if (e.includes('taken')) return ar ? 'الاسم محجوز — اختر اسماً آخر.' : 'Nom déjà pris — choisissez un autre nom.';
     if (e.includes('bad username') || e.includes('username')) {
       return ar ? 'اسم المستخدم: 3-20 (حروف لاتينية/أرقام/._-)' : 'Nom d’utilisateur : 3-20 (a-z 0-9 . _ -)';
@@ -148,13 +152,11 @@ export const UsersManagerView: React.FC = () => {
       setMsg({ kind: 'err', text: ar ? 'التأكيد لا يطابق الرمز — أعد الإدخال' : 'La confirmation ne correspond pas — recommencez' });
       return;
     }
-    if (form.role === 'owner') {
-      const ok = window.confirm(
-        ar
-          ? `إنشاء مالك ثانٍ (${username}) بصلاحيات كاملة؟ يُسجَّل في التدقيق.`
-          : `Créer un second gérant (${username}) avec tous les droits ? Tracé en audit.`,
-      );
-      if (!ok) return;
+    // v1.5.1 B2-5: second owner needs the REQUESTING owner's own current
+    // PIN typed in (presence proof, doubly audited) — no more blind confirm.
+    if (form.role === 'owner' && !isValidPinFormat(ownerPin)) {
+      setMsg({ kind: 'err', text: ar ? 'مالك ثانٍ: أدخل رمزك أنت للتأكيد (4-8 أرقام)' : 'Second gérant : tapez VOTRE code pour confirmer (4-8 chiffres)' });
+      return;
     }
     setCreating(true);
     setMsg(null);
@@ -168,12 +170,14 @@ export const UsersManagerView: React.FC = () => {
         },
         session.role,
         session.username,
+        form.role === 'owner' ? { ownerConfirmPin: ownerPin } : undefined,
       );
       if (!u) {
         setMsg({ kind: 'err', text: mapLaneError(lastUserLaneError()) });
         return;
       }
       setForm(EMPTY_FORM);
+      setOwnerPin('');
       await refreshSessionUsers();
       setMsg({ kind: 'ok', text: ar ? `تم إنشاء ${u.username} — سيُطلب منه تغيير الرمز عند أول دخول` : `${u.username} créé — changement de code requis à la première connexion` });
     } finally {
@@ -311,8 +315,8 @@ export const UsersManagerView: React.FC = () => {
       </div>
       <p className="mb-3 text-[11px] text-slate-500">
         {ar
-          ? 'الإنشاء والتجميد للمالك فقط؛ التجميد بسبب وملاحظة إجباريين، كل حركة مسجلة في التدقيق، والحسابات الجديدة تغيّر رمزها عند أول دخول.'
-          : 'Création/gel réservés au gérant ; gel à motif + note obligatoires, chaque mouvement est audité, les nouveaux comptes changent leur code à la première connexion.'}
+          ? 'الإنشاء والتجميد للمالك فقط؛ المالك الثاني بتأكيد رمز مالك موجود وتوثيق مضاعف؛ التجميد بسبب وملاحظة إجباريين، كل حركة مسجلة في التدقيق، والحسابات الجديدة تغيّر رمزها عند أول دخول.'
+          : 'Création/gel réservés au gérant ; second gérant avec confirmation du code d’un gérant existant + double audit ; gel à motif + note obligatoires, chaque mouvement est audité, les nouveaux comptes changent leur code à la première connexion.'}
       </p>
       {lane === 'offline' && (
         <p className="mb-3 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-200" role="alert">
@@ -567,7 +571,7 @@ export const UsersManagerView: React.FC = () => {
           <span className="mb-1 block text-[11px] text-slate-400">{ar ? 'الدور' : 'Rôle'}</span>
           <select
             value={form.role}
-            onChange={e => setForm({ ...form, role: e.target.value as Role })}
+            onChange={e => { const r = e.target.value as Role; setForm({ ...form, role: r }); if (r !== 'owner') setOwnerPin(''); }}
             className="w-full rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-amber-400/60"
           >
             <option value="cashier">{ROLE_LABEL[loc].cashier}</option>
@@ -601,6 +605,21 @@ export const UsersManagerView: React.FC = () => {
             className="w-full rounded-lg bg-[#0b0f17] border border-slate-700 px-2 py-1.5 text-sm outline-none focus:border-amber-400/60"
           />
         </label>
+        {form.role === 'owner' && (
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-bold text-amber-300">{ar ? 'رمزك أنت للتأكيد (مالك موجود)' : 'VOTRE code (gérant existant)'}</span>
+            <input
+              value={ownerPin}
+              onChange={e => setOwnerPin(e.target.value.replace(/\D/g, '').slice(0, 8))}
+              placeholder="••••"
+              dir="ltr"
+              inputMode="numeric"
+              type={showPin ? 'text' : 'password'}
+              autoComplete="current-password"
+              className="w-full rounded-lg bg-[#0b0f17] border border-amber-500/50 px-2 py-1.5 text-sm outline-none focus:border-amber-400"
+            />
+          </label>
+        )}
         <div className="flex items-end gap-2">
           <button
             type="button"

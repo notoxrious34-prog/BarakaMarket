@@ -611,7 +611,7 @@ export interface BarakaDb {
   getMeta(key: string): string | null;
   setMeta(key: string, value: string): void;
   /** T8 (ADR-031) — users + security audit. */
-  createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string): SafeUser;
+  createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string, opts?: { ownerConfirmPin?: string }): SafeUser;
   verifyUser(username: string, pin: string): { ok: true; user: SafeUser } | { ok: false; locked: boolean };
   listUsers(): SafeUser[];
   setUserActive(id: number, active: boolean, actor: string, opts?: { reason?: string; note?: string | null }): void;
@@ -2375,11 +2375,27 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     setMeta(key: string, value: string) {
       db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value').run(key, value);
     },
-    createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string): SafeUser {
+    createUser(input: { username: string; display_name?: string; role: Role; pin: string }, actor: string, opts?: { ownerConfirmPin?: string }): SafeUser {
       const username = input.username.trim().toLowerCase();
       if (!/^[a-z0-9._-]{3,20}$/.test(username)) throw new Error('[db] bad username (3-20 chars: a-z 0-9 . _ -)');
       if (!isRole(input.role)) throw new Error(`[db] bad role: ${input.role}`);
       if (!isValidP(input.pin)) throw new Error('[db] PIN must be 4-8 numeric digits');
+      // v1.5.1 B2-5: a second owner needs a live owner confirmation — the
+      // requesting owner re-enters their OWN current PIN (presence proof
+      // against a walked-away terminal). No lockout counting here: it is a
+      // re-auth gesture, not a login; refusal is audited either way.
+      const confirmer = actor.trim().toLowerCase();
+      if (input.role === 'owner') {
+        const gate = db.prepare(
+          'SELECT pin_verifier FROM users WHERE username = ? AND role = ? AND active = 1',
+        ).get(confirmer, 'owner') as { pin_verifier: string } | undefined;
+        const conf = (opts?.ownerConfirmPin ?? '').trim();
+        if (!gate || !verifyPin(conf, gate.pin_verifier)) {
+          logAuditRow(db, { actor, action: 'owner.confirm', detail: `second-owner:${username} rejected` });
+          throw new Error('[db] second-owner creation needs the requesting owner PIN');
+        }
+        logAuditRow(db, { actor, action: 'owner.confirm', detail: `second-owner:${username} ok` });
+      }
       // T8b: provisioned names fall back to the login and never exceed the
       // list layout (40 chars); every new account starts forced-change so a
       // handed-out PIN never survives first login (same as the owner seed).

@@ -395,6 +395,7 @@ fn user_create(
     pin: String,
     requester_role: String,
     actor: String,
+    confirm_pin: String,
 ) -> Result<serde_json::Value, String> {
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
@@ -406,6 +407,7 @@ fn user_create(
         &pin,
         &requester_role,
         &actor,
+        &confirm_pin,
     )
 }
 

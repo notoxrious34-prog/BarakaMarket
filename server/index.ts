@@ -105,7 +105,12 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       }
       if (!username || !role || typeof pin !== 'string') { res.status(400).json({ error: 'body must be {username, role, pin}' }); return; }
       const actor = typeof req.body.actor === 'string' ? (req.body as { actor: string }).actor : 'local';
-      res.status(201).json(baraka.createUser({ username, display_name, role, pin }, actor));
+      // v1.5.1 B2-5: second-owner confirm PIN rides along (lane re-checks).
+      const confirmPin = (req.body as { confirmPin?: unknown }).confirmPin;
+      res.status(201).json(baraka.createUser(
+        { username, display_name, role, pin }, actor,
+        { ownerConfirmPin: typeof confirmPin === 'string' ? confirmPin : undefined },
+      ));
     } catch (e) {
       res.status(400).json({ error: (e as Error).message });
     }

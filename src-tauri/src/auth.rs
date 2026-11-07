@@ -487,6 +487,7 @@ pub fn user_create(
     pin: &str,
     requester_role: &str,
     actor: &str,
+    confirm_pin: &str,
 ) -> Result<Value, String> {
     if requester_role != "owner" {
         return Err("[auth] owner role required".to_string());
@@ -500,6 +501,40 @@ pub fn user_create(
     }
     if !verify_pin_format(pin) {
         return Err("[auth] PIN must be 4-8 numeric digits".to_string());
+    }
+    // v1.5.1 B2-5: a second owner needs a live owner confirmation — the
+    // requesting owner re-enters their OWN current PIN (presence proof
+    // against a walked-away terminal). No lockout counting: re-auth
+    // gesture, not a login; refusal is audited either way.
+    if role == "owner" {
+        let gate: Option<String> = conn
+            .query_row(
+                "SELECT pin_verifier FROM users WHERE username = ?1 AND role = 'owner' AND active = 1",
+                [actor.trim().to_lowercase()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .flatten();
+        let ok = match gate {
+            Some(v) => verify_pin_verifier(confirm_pin.trim(), &v),
+            None => false,
+        };
+        if !ok {
+            audit(
+                conn,
+                actor,
+                "owner.confirm",
+                &format!("second-owner:{name} rejected"),
+            );
+            return Err("[auth] second-owner creation needs the requesting owner PIN".to_string());
+        }
+        audit(
+            conn,
+            actor,
+            "owner.confirm",
+            &format!("second-owner:{name} ok"),
+        );
     }
     let dn_trimmed = display_name.trim();
     let dn: String = if dn_trimmed.is_empty() {
@@ -735,16 +770,24 @@ mod tests {
         // T8b: the exe lane accepts exactly what the TS DAL accepts.
         let db = memdb();
         let refused_owner =
-            super::user_create(&db, "sara", "Sara", "manager", "5678", "manager", "m");
+            super::user_create(&db, "sara", "Sara", "manager", "5678", "manager", "m", "");
         assert!(refused_owner.is_err());
-        assert!(super::user_create(&db, "x", "X", "cashier", "1111", "owner", "owner").is_err());
-        assert!(super::user_create(&db, "bob", "Bob", "super", "1111", "owner", "owner").is_err());
-        assert!(super::user_create(&db, "bob", "Bob", "cashier", "12", "owner", "owner").is_err());
-        let u =
-            super::user_create(&db, "Sara", "Sara", "manager", "5678", "owner", "owner").unwrap();
+        assert!(
+            super::user_create(&db, "x", "X", "cashier", "1111", "owner", "owner", "").is_err()
+        );
+        assert!(
+            super::user_create(&db, "bob", "Bob", "super", "1111", "owner", "owner", "").is_err()
+        );
+        assert!(
+            super::user_create(&db, "bob", "Bob", "cashier", "12", "owner", "owner", "").is_err()
+        );
+        let u = super::user_create(&db, "Sara", "Sara", "manager", "5678", "owner", "owner", "")
+            .unwrap();
         assert_eq!(u["username"], "sara");
         assert_eq!(u["must_change_pin"], 1);
-        assert!(super::user_create(&db, "sara", "S", "cashier", "1111", "owner", "owner").is_err());
+        assert!(
+            super::user_create(&db, "sara", "S", "cashier", "1111", "owner", "owner", "").is_err()
+        );
         let id = u["id"].as_i64().unwrap();
         assert_eq!(super::user_verify(&db, "sara", "5678").unwrap()["ok"], true);
         // v1.5.1 §1: freeze reason mandatory — empty/unknown refused.
@@ -895,5 +938,45 @@ mod tests {
         assert_eq!(due["ok"], true);
         assert_eq!(due["user"]["rotation_due"], true);
         assert!(due["user"]["rotation_days_left"].as_i64().unwrap() <= 0);
+        // v1.5.1 B2-5: second owner needs the requesting owner's own current
+        // PIN — missing/wrong/non-owner refused (audited), correct doubly logged.
+        assert!(super::user_create(
+            &db, "boss2", "Boss Two", "owner", "9999", "owner", "owner", ""
+        )
+        .is_err());
+        assert!(super::user_create(
+            &db, "boss2", "Boss Two", "owner", "9999", "owner", "owner", "0000"
+        )
+        .is_err());
+        assert!(super::user_create(
+            &db, "boss2", "Boss Two", "owner", "9999", "owner", "sara", "1234"
+        )
+        .is_err());
+        let boss = super::user_create(
+            &db, "boss2", "Boss Two", "owner", "9999", "owner", "owner", "1234",
+        )
+        .unwrap();
+        assert_eq!(boss["username"], "boss2");
+        assert_eq!(boss["must_change_pin"], 1);
+        assert_eq!(
+            super::user_verify(&db, "boss2", "9999").unwrap()["ok"],
+            true
+        );
+        let conf_ok: String = db
+            .query_row(
+                "SELECT detail FROM audit_log WHERE action = 'owner.confirm' AND detail LIKE 'second-owner:boss2%' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(conf_ok, "second-owner:boss2 ok");
+        let conf_no: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'owner.confirm' AND detail = 'second-owner:boss2 rejected'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(conf_no >= 3, "every refusal is audited");
     }
 }
