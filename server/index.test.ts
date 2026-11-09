@@ -653,3 +653,52 @@ test('api: B4 close-and-z with notes stores the gap reason in the z.close audit 
   const row = audit.find(a => a.action === 'z.close' && a.actor === 'b4-owner');
   assert.ok(row && row.detail.includes('reason=erreur de rendu'), 'gap reason persisted in audit');
 });
+
+test('api: v1.5.2 sales book — day list newest-first, bad day 400', async () => {
+  const mk = async (cashier: string) => {
+    const r = await fetch(`${base}/api/sales`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        header: { ...header, cashier_name: cashier, created_at: new Date().toISOString() },
+        items,
+      }),
+    });
+    assert.equal(r.status, 201);
+    return (await r.json()) as { id: string; invoice_number: string };
+  };
+  const a = await mk('SB-A');
+  const c = await mk('SB-C');
+  const day = new Date().toISOString().slice(0, 10);
+  // NOTE: day bucket is Africa/Algiers — CI midnight edges could shift; assert
+  // membership rather than exact set when the two sales straddle midnight.
+  const list = await (await fetch(`${base}/api/sales/day/${day}`)).json() as { id: string; invoice_number: string; total_ttc_ct: number; status: string }[];
+  assert.ok(Array.isArray(list) && list.length >= 2, 'day list carries the fresh sales');
+  const ids = list.map(x => x.id);
+  assert.ok(ids.includes(a.id) && ids.includes(c.id), 'both sales present');
+  assert.ok(list[0].invoice_number >= list[1].invoice_number, 'newest first');
+  assert.equal(typeof list[0].total_ttc_ct, 'number');
+  const bad = await fetch(`${base}/api/sales/day/nope`);
+  assert.equal(bad.status, 400);
+});
+
+test('api: v1.5.2 sales book — duplicata posts sale.duplicata audit, 404 unknown', async () => {
+  const ghost = await fetch(`${base}/api/sales/does-not-exist/duplicata`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ by: 'sb-owner' }),
+  });
+  assert.equal(ghost.status, 404);
+  const r = await fetch(`${base}/api/sales`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ header: { ...header, created_at: new Date().toISOString() }, items }),
+  });
+  assert.equal(r.status, 201);
+  const sale = (await r.json()) as { id: string };
+  const d = await fetch(`${base}/api/sales/${sale.id}/duplicata`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ by: 'sb-owner', reason: 'client perdu' }),
+  });
+  assert.equal(d.status, 200);
+  const audit = await (await fetch(`${base}/api/audit?limit=100`)).json() as { action: string; actor: string; detail: string; entity_id: string }[];
+  const row = audit.find(x => x.action === 'sale.duplicata' && x.actor === 'sb-owner');
+  assert.ok(row && row.entity_id === sale.id && row.detail.includes('client perdu'), 'duplicata audit row present with reason');
+});

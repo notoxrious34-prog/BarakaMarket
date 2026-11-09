@@ -17,6 +17,7 @@ import { TicketThermal80mm } from './components/Receipts/TicketThermal80mm';
 import { FactureReglementaireA4 } from './components/Receipts/FactureReglementaireA4';
 import { SettlementQuittanceTicket } from './components/Receipts/SettlementQuittanceTicket';
 import { ReturnsView } from './components/Returns/ReturnsView';
+import { SalesBookView } from './components/Sales/SalesBookView';
 import { StoreProfileSetupModal } from './components/Settings/StoreProfileSetupModal';
 
 const MainLayout: React.FC = () => {
@@ -72,6 +73,7 @@ const MainLayout: React.FC = () => {
         {activeView === 'reports' && <DailyZReportView />}
         {activeView === 'shifts' && <CashSessionsView />}
         {activeView === 'returns' && <ReturnsView />}
+        {activeView === 'sales' && <SalesBookView />}
         {activeView === 'license' && <LicenseManagerView />}
         {activeView === 'settings' && <SettingsView />}
       </main>

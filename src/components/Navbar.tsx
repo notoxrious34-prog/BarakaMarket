@@ -17,6 +17,7 @@ import {
   Truck,
   PieChart,
   Banknote,
+  Receipt,
   Sun,
   Moon,
   Lock,
@@ -80,12 +81,13 @@ export const Navbar: React.FC = () => {
   // T8 (ADR-031): the nav shows only what the session role may touch.
   // Defense in depth — every lane re-checks server-side; hiding buttons is UX.
   const role = session?.role ?? 'cashier';
-  const tabs: { view: 'pos' | 'products' | 'suppliers' | 'clients' | 'accounting' | 'reports' | 'shifts' | 'license' | 'returns'; perm: Permission; icon: React.ReactNode; label: string; title?: string; amber?: boolean }[] = [
+  const tabs: { view: 'pos' | 'products' | 'suppliers' | 'clients' | 'accounting' | 'reports' | 'shifts' | 'license' | 'returns' | 'sales'; perm: Permission; icon: React.ReactNode; label: string; title?: string; amber?: boolean }[] = [
     { view: 'pos', perm: 'sell', icon: <ShoppingCart className="w-4 h-4 flex-shrink-0" />, label: isAr ? 'الكاشير' : 'Caisse', title: isAr ? 'نقطة البيع (الكاشير)' : 'Point de vente (Caisse)' },
     { view: 'products', perm: 'products.edit', icon: <Package className="w-4 h-4" />, label: isAr ? 'المخزون' : 'Stock', title: isAr ? 'المخزون والمنتجات' : 'Stock & Produits' },
     { view: 'suppliers', perm: 'products.edit', icon: <Truck className="w-4 h-4 text-amber-400" />, label: isAr ? 'الموردون' : 'Fournisseurs', title: isAr ? 'الموردين والمشتريات' : 'Fournisseurs & Achats' },
     { view: 'clients', perm: 'settle', icon: <BookOpen className="w-4 h-4" />, label: isAr ? 'الديون (F9)' : 'Dettes (F9)', title: isAr ? 'دفتر الديون (الكريدي F9)' : 'Carnet de Dette (F9)' },
     { view: 'returns', perm: 'returns.create', icon: <RotateCcw className="w-4 h-4 text-amber-400" />, label: isAr ? 'الإرجاع' : 'Retours', title: isAr ? 'إرجاع سلعة (مسودة ← قرار ← وصل)' : 'Retour marchandise' },
+    { view: 'sales', perm: 'sell', icon: <Receipt className="w-4 h-4 text-emerald-400" />, label: isAr ? 'المبيعات' : 'Ventes', title: isAr ? 'دفتر المبيعات — كل وصل بتفاصيله + Duplicata' : 'Registre des ventes + duplicata' },
     { view: 'accounting', perm: 'accounting.view', icon: <PieChart className="w-4 h-4 text-emerald-400" />, label: isAr ? 'المحاسبة' : 'Compta', title: isAr ? 'الربط المحاسبي والمصالح' : 'Comptabilité SCF' },
     { view: 'reports', perm: 'accounting.view', icon: <FileText className="w-4 h-4" />, label: isAr ? 'تقرير Z' : 'Rapport Z', title: isAr ? 'تقرير Z اليومي' : 'Rapport Z journalier' },
     { view: 'shifts', perm: 'z.close', icon: <Banknote className="w-4 h-4 text-amber-400" />, label: isAr ? 'إغلاق' : 'Clôture', title: isAr ? 'إغلاق الصندوق وتقرير Z' : 'Caisse & Clôture / Z' },
@@ -96,7 +98,7 @@ export const Navbar: React.FC = () => {
 
   // NAVBAR-REDESIGN Phase 1: daily tasks stay visible; admin views collapse
   // into «المزيد». Same RBAC, same views — only the grouping changes.
-  const DAILY_VIEWS = new Set(['pos', 'products', 'suppliers', 'clients', 'returns']);
+  const DAILY_VIEWS = new Set(['pos', 'products', 'suppliers', 'clients', 'returns', 'sales']);
   const dailyTabs = visibleTabs.filter(t => DAILY_VIEWS.has(t.view));
   const adminTabs = visibleTabs.filter(t => !DAILY_VIEWS.has(t.view));
   const [showMore, setShowMore] = useState(false);

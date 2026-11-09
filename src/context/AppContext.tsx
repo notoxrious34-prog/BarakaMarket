@@ -77,7 +77,7 @@ interface AppContextType {
   storeProfile: StoreProfile;
   currentCart: SaleItem[];
   selectedClient: Client;
-  activeView: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns';
+  activeView: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns' | 'sales';
   currentPrintSale: Sale | null;
   printModalType: 'ticket' | 'facture' | null;
   language: 'ar' | 'fr';
@@ -96,7 +96,7 @@ interface AppContextType {
   lastSettlementQuittance: (DebtSettlement & { prev_balance: number; new_balance: number }) | null;
 
   // Actions
-  setActiveView: (view: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns') => void;
+  setActiveView: (view: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns' | 'sales') => void;
   toggleLanguage: () => void;
   toggleTheme: () => void;
   setSelectedClient: (client: Client) => void;
@@ -469,7 +469,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const [selectedClient, setSelectedClient] = useState<Client>(initialClients[0]);
-  const [activeView, setActiveView] = useState<'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns'>('pos');
+  const [activeView, setActiveView] = useState<'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns' | 'sales'>('pos');
   const [currentPrintSale, setCurrentPrintSale] = useState<Sale | null>(null);
   const [printModalType, setPrintModalType] = useState<'ticket' | 'facture' | null>(null);
   const [lastSettlementQuittance, setLastSettlementQuittance] = useState<

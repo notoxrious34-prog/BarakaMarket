@@ -624,6 +624,14 @@ export interface BarakaDb {
   recordSale(header: SaleHeaderInput, items: SaleItemInput[]): { id: string; invoice_number: string; ticket_number: string };
   getSale(id: string): Record<string, unknown>;
   getSaleOrNull(id: string): Record<string, unknown> | null;
+  /** v1.5.2 (SALES BOOK P1): every sale of one Algiers business day, newest
+   * first — the receipt-level bridge between POS and the journal/Z. Includes
+   * client name + an approved-return flag per row. */
+  listSalesByDay(day: string): {
+    id: string; invoice_number: string; ticket_number: string; created_at: string;
+    cashier_name: string; payment_method: string; total_ttc_ct: number; status: string;
+    client_name: string | null; has_approved_return: 0 | 1;
+  }[];
   /** v1.5.0 (RETURNS lookup): sale head + lines with APPROVED-returned and
    * remaining qty, found by UUID id OR FACT number. Null when unknown. */
   getSaleForReturn(key: string): {
@@ -2109,6 +2117,23 @@ export function openBarakaDb(dbPath: string): BarakaDb {
     getSaleOrNull(id: string): Record<string, unknown> | null {
       const row = db.prepare('SELECT * FROM sales WHERE id = ?').get(id) as Record<string, unknown> | undefined;
       return row ?? null;
+    },
+
+    listSalesByDay(day: string) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error('[db] listSalesByDay needs YYYY-MM-DD');
+      const { start, end } = fiscalDayBoundsUTC(day);
+      return db.prepare(
+        `SELECT s.id, s.invoice_number, s.ticket_number, s.created_at, s.cashier_name,
+           s.payment_method, s.total_ttc_ct, s.status, c.name AS client_name,
+           CASE WHEN EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id AND r.status = 'APPROVED') THEN 1 ELSE 0 END AS has_approved_return
+         FROM sales s LEFT JOIN clients c ON c.id = s.client_id
+         WHERE s.created_at >= ? AND s.created_at < ?
+         ORDER BY s.created_at DESC, s.id DESC`,
+      ).all(start, end) as {
+        id: string; invoice_number: string; ticket_number: string; created_at: string;
+        cashier_name: string; payment_method: string; total_ttc_ct: number; status: string;
+        client_name: string | null; has_approved_return: 0 | 1;
+      }[];
     },
 
     getSaleForReturn(key: string) {

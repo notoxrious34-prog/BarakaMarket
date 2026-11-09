@@ -96,7 +96,7 @@ export type AuditAction =
   | 'login.ok' | 'login.fail' | 'login.locked' | 'logout' | 'session.lock' | 'session.unlock'
   | 'user.create' | 'user.deactivate' | 'pin.change' | 'pin.reset' | 'users.rotation_config' | 'owner.confirm'
   | 'update.check' | 'update.install'
-  | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'z.close'
+  | 'sale.commit' | 'settlement.commit' | 'sale.void' | 'sale.duplicata' | 'z.close'
   | 'return.create' | 'return.approve' | 'return.reject'
   | 'claim.create' | 'claim.settle'
   | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'

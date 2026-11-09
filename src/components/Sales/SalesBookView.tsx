@@ -1,0 +1,310 @@
+/**
+ * Baraka Market — Sales book (v1.5.2, P1+P2).
+ * The receipt-level bridge: one business day of FACTs, newest first —
+ * search/jump by FACT, open a receipt for its lines + returned math,
+ * and print a governed DUPLICATA (audit row first, watermark on paper).
+ */
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  BookOpen, CalendarDays, ChevronLeft, ChevronRight, Copy, Printer,
+  Receipt, Search, Undo2, X,
+} from 'lucide-react';
+import { useApp } from '../../context/AppContext';
+import { formatDZD, formatDZDFromCt } from '../../core/display';
+import { fiscalDayISO } from '../../core/fiscal-day';
+import {
+  getSalesBookDetail, listSalesDay, recordDuplicata,
+  type SalesBookDetail, type SalesBookRow,
+} from '../../core/sales-book-authority';
+import { lookupReturnSale } from '../../core/returns-authority';
+import { TicketThermal80mm } from '../Receipts/TicketThermal80mm';
+import type { Sale } from '../../types';
+
+const PAY_LABEL: Record<string, { ar: string; fr: string }> = {
+  ESPECES: { ar: 'نقدًا', fr: 'Espèces' },
+  CIB: { ar: 'CIB', fr: 'CIB' },
+  DAHABIYA: { ar: 'ذهبية', fr: 'Dahabiya' },
+  CREDIT: { ar: 'كريدي', fr: 'Crédit' },
+};
+
+/** Lookup lines + full fiscal head → printable Sale (DZD units). */
+function detailToSale(d: SalesBookDetail): Sale {
+  const h = d.head;
+  const n = (k: string) => Number(h[k] ?? 0);
+  return {
+    id: String(h.id), invoice_number: String(h.invoice_number), ticket_number: String(h.ticket_number),
+    cashier_id: String(h.cashier_id ?? ''), cashier_name: String(h.cashier_name ?? ''),
+    client_id: h.client_id == null ? undefined : Number(h.client_id),
+    client_name: (h.client_name as string | null) ?? undefined,
+    items: d.items.map(it => ({
+      product_id: it.product_id ?? 0, barcode: it.barcode, name_fr: it.name_fr, name_ar: it.name_ar,
+      unit_price_ttc: it.unit_price_ct / 100, quantity: it.qty_milli / 1000,
+      unit: it.unit as 'PIECE' | 'KG' | 'LITRE', tva_rate: it.tva_rate as 0 | 9 | 19,
+      discount_percent: 0,
+      total_line_ht: 0, total_line_tva: 0, total_line_ttc: it.line_ttc_ct / 100,
+    })),
+    total_ht: n('total_ht_ct') / 100,
+    tva_breakdown: {
+      0: { rate: 0 as const, base_ht: n('tva0_base_ct') / 100, tva_amount: n('tva0_amt_ct') / 100, total_ttc: n('tva0_ttc_ct') / 100 },
+      9: { rate: 9 as const, base_ht: n('tva9_base_ct') / 100, tva_amount: n('tva9_amt_ct') / 100, total_ttc: n('tva9_ttc_ct') / 100 },
+      19: { rate: 19 as const, base_ht: n('tva19_base_ct') / 100, tva_amount: n('tva19_amt_ct') / 100, total_ttc: n('tva19_ttc_ct') / 100 },
+    },
+    total_tva: n('total_tva_ct') / 100, timbre_fiscal: n('timbre_ct') / 100, total_ttc: n('total_ttc_ct') / 100,
+    payment_method: h.payment_method as Sale['payment_method'],
+    amount_paid: n('amount_paid_ct') / 100, amount_returned: n('amount_returned_ct') / 100,
+    status: h.status as 'COMPLETED' | 'CANCELLED', created_at: String(h.created_at),
+    fiscal_regime: { tva_enabled: n('tva_enabled') !== 0, timbre_enabled: n('timbre_enabled') !== 0 },
+  };
+}
+
+export const SalesBookView: React.FC = () => {
+  const { language, session } = useApp();
+  const isAr = language === 'ar';
+  const actor = session?.username ?? '';
+
+  const [day, setDay] = useState(() => fiscalDayISO(new Date()));
+  const [rows, setRows] = useState<SalesBookRow[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [jump, setJump] = useState('');
+  const [detail, setDetail] = useState<SalesBookDetail | null>(null);
+  const [detailErr, setDetailErr] = useState<string | null>(null);
+  const [dupReason, setDupReason] = useState('');
+  const [dupBusy, setDupBusy] = useState(false);
+  const [dupSale, setDupSale] = useState<Sale | null>(null);
+
+  const load = useCallback(async (d: string) => {
+    setErr(null);
+    setRows(null);
+    const out = await listSalesDay(d);
+    if (!out) { const { lastSalesBookError } = await import('../../core/sales-book-authority'); setErr(lastSalesBookError()); return; }
+    setRows(out);
+  }, []);
+  useEffect(() => { void load(day); }, [day, load]);
+
+  const shiftDay = (delta: number) => {
+    const t = new Date(day + 'T12:00:00');
+    t.setDate(t.getDate() + delta);
+    setDay(fiscalDayISO(t));
+    setDetail(null);
+  };
+
+  const openDetail = async (id: string) => {
+    setDetailErr(null);
+    setDetail(null);
+    setDupSale(null);
+    const d = await getSalesBookDetail(id);
+    if (!d) { const { lastSalesBookError } = await import('../../core/sales-book-authority'); setDetailErr(lastSalesBookError()); return; }
+    setDetail(d);
+  };
+
+  const doJump = async () => {
+    const k = jump.trim();
+    if (!k) return;
+    setDetailErr(null);
+    const found = await lookupReturnSale(k);
+    if (!found) { setDetailErr(isAr ? 'لا وصل بهذا الرقم.' : 'Aucun ticket pour ce code.'); return; }
+    await openDetail(found.sale.id);
+    setJump('');
+  };
+
+  const doDuplicata = async () => {
+    if (!detail || dupBusy) return;
+    setDupBusy(true);
+    setDetailErr(null);
+    const ok = await recordDuplicata(String(detail.head.id), actor, dupReason.trim() || undefined);
+    setDupBusy(false);
+    if (!ok) {
+      const { lastSalesBookError } = await import('../../core/sales-book-authority');
+      const raw = lastSalesBookError() ?? '';
+      // Zero-Trust stays shut: map the transport refusal to a human sentence.
+      setDetailErr(
+        /401|token/i.test(raw)
+          ? (isAr ? 'تعذّر تسجيل الطبع: هذه الجلسة بلا تصريح كتابة — الطبع المحوكم في نسخة الصندوق المثبتة.' : 'Enregistrement impossible : session sans droit d’écriture — duplicata réservé à la caisse installée.')
+          : raw || (isAr ? 'تعذّر تسجيل الطبع.' : 'Enregistrement impossible.'),
+      );
+      return;
+    }
+    setDupSale(detailToSale(detail));
+  };
+
+  const summary = useMemo(() => {
+    if (!rows) return null;
+    const ok = rows.filter(r => r.status === 'COMPLETED');
+    return {
+      count: rows.length,
+      cancelled: rows.length - ok.length,
+      totalCt: ok.reduce((s, r) => s + r.total_ttc_ct, 0),
+    };
+  }, [rows]);
+
+  const timeOf = (iso: string) => {
+    const d = new Date(iso);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="space-y-4 text-slate-100">
+      {/* Hero — the receipt-level bridge. */}
+      <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 relative overflow-hidden">
+        <div className="absolute top-0 bottom-0 start-0 w-1 bg-emerald-500" />
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 flex items-center justify-center">
+            <BookOpen className="w-5 h-5" />
+          </div>
+          <div>
+            <h2 className="text-lg font-black text-white">
+              {isAr ? 'دفتر المبيعات — كل وصل بتفاصيله' : 'Registre des ventes — chaque ticket en détail'}
+            </h2>
+            <p className="text-xs text-slate-400">
+              {isAr ? 'الجسر بين الكاشير والمحاسبة: افتح أي FACT، راجع سطوره، اطبع Duplicata محوكمًا.' : 'Le pont caisse ↔ compta : ouvrez un FACT, vérifiez ses lignes, imprimez un duplicata gouverné.'}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 mt-4">
+          {[
+            { n: '01', t: isAr ? 'وصولات اليوم' : 'Tickets du jour' },
+            { n: '02', t: isAr ? 'تفاصيل الوصل' : 'Détail du ticket' },
+            { n: '03', t: isAr ? 'Duplicata محوكم' : 'Duplicata gouverné' },
+          ].map(s => (
+            <span key={s.n} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#0b0f17] border border-[#2b3a4f] text-slate-300">
+              <span className="font-mono text-emerald-400">{s.n}</span> {s.t}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* 01 · Day + jump. */}
+      <section className="bg-[#111722] border border-[#1e293b] rounded-2xl p-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">01</span>
+          <CalendarDays className="w-4 h-4 text-emerald-400" />
+          <h3 className="text-sm font-black text-white">{isAr ? 'وصولات اليوم' : 'Tickets du jour'}</h3>
+          {summary && (
+            <span className="ms-auto text-[11px] font-bold text-slate-400" dir="ltr">
+              {summary.count} · {formatDZDFromCt(summary.totalCt)}{summary.cancelled > 0 ? ` (${summary.cancelled} ✕)` : ''}
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => shiftDay(-1)} className="p-2 rounded-lg border border-[#2b3a4f] text-slate-300 hover:text-white" title={isAr ? 'اليوم السابق' : 'Jour précédent'}>
+            <ChevronRight className="w-4 h-4 rtl:rotate-0" />
+          </button>
+          <input type="date" value={day} max={fiscalDayISO(new Date())} onChange={e => { if (e.target.value) { setDay(e.target.value); setDetail(null); } }}
+            className="bg-[#0b0f17] border border-[#2b3a4f] rounded-lg px-2.5 py-2 text-sm text-slate-200 font-mono" dir="ltr" />
+          <button type="button" onClick={() => shiftDay(1)} disabled={day >= fiscalDayISO(new Date())} className="p-2 rounded-lg border border-[#2b3a4f] text-slate-300 hover:text-white disabled:opacity-30" title={isAr ? 'اليوم التالي' : 'Jour suivant'}>
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <button type="button" onClick={() => { setDay(fiscalDayISO(new Date())); setDetail(null); }} className="px-3 py-2 rounded-lg border border-[#2b3a4f] text-xs font-bold text-slate-300 hover:text-white">
+            {isAr ? 'اليوم' : "Aujourd'hui"}
+          </button>
+          <div className="relative ms-auto min-w-52 flex-1 sm:flex-none">
+            <Search className="w-4 h-4 absolute start-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+            <input value={jump} onChange={e => setJump(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void doJump(); }}
+              placeholder={isAr ? 'اقفز لـ FACT… (رقم/قصير/لاحقة)' : 'Aller au FACT…'}
+              className="w-full sm:w-64 bg-[#0b0f17] border border-[#2b3a4f] rounded-lg ps-8 pe-2 py-2 text-sm text-slate-200 placeholder:text-slate-600 outline-none focus:border-emerald-500 font-mono" dir="ltr" />
+          </div>
+        </div>
+        {err && <p className="text-xs text-red-300 font-bold">{err}</p>}
+        <div className="space-y-2">
+          {rows === null && !err && <p className="text-xs text-slate-500">{isAr ? 'جارٍ التحميل…' : 'Chargement…'}</p>}
+          {rows && rows.length === 0 && (
+            <p className="text-xs text-slate-500 border border-dashed border-[#2b3a4f] rounded-xl px-3 py-4 text-center">
+              {isAr ? 'لا مبيعات في هذا اليوم.' : 'Aucune vente ce jour.'}
+            </p>
+          )}
+          {rows?.map(r => (
+            <button key={r.id} type="button" onClick={() => void openDetail(r.id)}
+              className="w-full bg-[#0b0f17] border border-[#2b3a4f] hover:border-emerald-500/50 rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-start cursor-pointer">
+              <span className="font-mono font-bold text-emerald-300" dir="ltr">{r.invoice_number}</span>
+              <span className="font-mono text-slate-400 text-xs" dir="ltr">{timeOf(r.created_at)}</span>
+              <span className="text-xs text-slate-400">{r.cashier_name}</span>
+              {r.client_name && <span className="text-xs text-slate-500">· {r.client_name}</span>}
+              <span className="text-xs text-slate-400">{PAY_LABEL[r.payment_method]?.[isAr ? 'ar' : 'fr'] ?? r.payment_method}</span>
+              {r.status !== 'COMPLETED' && (
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-red-900 text-red-200">
+                  {isAr ? 'ملغاة' : 'ANNULÉE'}
+                </span>
+              )}
+              {r.has_approved_return === 1 && (
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-900 text-amber-200 flex items-center gap-1">
+                  <Undo2 className="w-3 h-3" /> AVOIR
+                </span>
+              )}
+              <span className="ms-auto font-bold text-white font-mono" dir="ltr">{formatDZDFromCt(r.total_ttc_ct)}</span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      {/* 02 · Receipt detail. */}
+      {(detail || detailErr) && (
+        <section className="bg-[#111722] border border-emerald-500/25 rounded-2xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">02</span>
+            <Receipt className="w-4 h-4 text-emerald-400" />
+            <h3 className="text-sm font-black text-white">{isAr ? 'تفاصيل الوصل' : 'Détail du ticket'}</h3>
+            <button type="button" onClick={() => { setDetail(null); setDetailErr(null); setDupSale(null); }}
+              className="ms-auto p-1.5 rounded-lg border border-[#2b3a4f] text-slate-400 hover:text-white"><X className="w-4 h-4" /></button>
+          </div>
+          {detailErr && <p className="text-xs text-red-300 font-bold">{detailErr}</p>}
+          {detail && (
+            <>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                <span className="font-mono font-bold text-emerald-300" dir="ltr">{String(detail.head.invoice_number)}</span>
+                <span className="font-mono text-slate-400 text-xs" dir="ltr">{String(detail.head.ticket_number)}</span>
+                <span className="text-xs text-slate-400">{String(detail.head.cashier_name)} · {new Date(String(detail.head.created_at)).toLocaleString(isAr ? 'ar-DZ' : 'fr-FR')}</span>
+                <span className="ms-auto font-bold text-white font-mono" dir="ltr">{formatDZDFromCt(Number(detail.head.total_ttc_ct))}</span>
+              </div>
+              <div className="space-y-1.5">
+                {detail.items.map(it => (
+                  <div key={it.sale_item_id} className="flex items-center gap-2 text-sm bg-[#0b0f17] border border-[#2b3a4f] rounded-lg px-3 py-1.5">
+                    <span className="text-slate-200 font-bold">{isAr ? it.name_ar || it.name_fr : it.name_fr}</span>
+                    <span className="text-xs text-slate-500 font-mono" dir="ltr">{(it.qty_milli / 1000)} × {formatDZD(it.unit_price_ct / 100, false)}</span>
+                    {it.returned_milli > 0 && (
+                      <span className="text-[11px] font-bold text-amber-300">
+                        {isAr ? `مُرجع ${(it.returned_milli / 1000)} / متبقٍ ${(it.remaining_milli / 1000)}` : `retourné ${it.returned_milli / 1000} / reste ${it.remaining_milli / 1000}`}
+                      </span>
+                    )}
+                    <span className="ms-auto font-mono text-slate-200" dir="ltr">{formatDZD(it.line_ttc_ct / 100, false)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+                {[['HT', 'total_ht_ct'], ['TVA', 'total_tva_ct'], ['Timbre', 'timbre_ct'], ['TTC', 'total_ttc_ct']].map(([k, f]) => (
+                  <div key={k} className="bg-[#0b0f17] border border-[#2b3a4f] rounded-lg px-2 py-1.5">
+                    <div className="text-slate-500 font-bold">{k}</div>
+                    <div className="font-mono font-bold text-white" dir="ltr">{formatDZDFromCt(Number(detail.head[f]))}</div>
+                  </div>
+                ))}
+              </div>
+              {/* 03 · Governed duplicata. */}
+              <div className="bg-[#0b0f17] border border-[#2b3a4f] rounded-xl p-3 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-200">
+                  <Copy className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="font-mono text-emerald-400">03</span>
+                  {isAr ? 'Duplicata محوكم — يُسجَّل في التدقيق قبل الطباعة' : 'Duplicata gouverné — audité avant impression'}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input value={dupReason} onChange={e => setDupReason(e.target.value.slice(0, 140))}
+                    placeholder={isAr ? 'سبب إعادة الطبع (اختياري)…' : 'Motif (optionnel)…'}
+                    className="flex-1 min-w-40 bg-[#162030] border border-[#2b3a4f] rounded-lg px-2.5 py-2 text-xs text-slate-200 placeholder:text-slate-600 outline-none focus:border-emerald-500" />
+                  <button type="button" onClick={() => void doDuplicata()} disabled={dupBusy}
+                    className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-black flex items-center gap-1.5 cursor-pointer">
+                    <Printer className="w-4 h-4" />
+                    {dupBusy ? '…' : (isAr ? 'طبع Duplicata' : 'Imprimer duplicata')}
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-500">{isAr ? `يُسجَّل باسم ${actor || '—'}. لا نسخ صامتة أبدًا.` : `Audité au nom de ${actor || '—'}. Jamais de copie silencieuse.`}</p>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {/* Governed reprint preview. */}
+      {dupSale && (
+        <TicketThermal80mm sale={dupSale} duplicata onClose={() => setDupSale(null)} />
+      )}
+    </div>
+  );
+};

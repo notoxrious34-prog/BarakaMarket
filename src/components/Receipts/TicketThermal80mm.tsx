@@ -10,9 +10,12 @@ import { regimeNoteFor } from '../../core/fiscal.centimes';
 interface TicketThermalProps {
   sale: Sale;
   onClose: () => void;
+  /** SALES BOOK P2: governed reprint — a DUPLICATA band is stamped
+   * on the ticket. The caller records the audit row BEFORE opening. */
+  duplicata?: boolean;
 }
 
-export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose }) => {
+export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose, duplicata = false }) => {
   const { storeProfile, language } = useApp();
   const regimeNote = regimeNoteFor(sale.fiscal_regime, language === 'ar');
   const [copied, setCopied] = useState(false);
@@ -122,6 +125,11 @@ export const TicketThermal80mm: React.FC<TicketThermalProps> = ({ sale, onClose 
           >
             {/* Store Header */}
             <div className="text-center space-y-0.5 border-b border-black pb-2">
+              {duplicata && (
+                <div className="font-black text-sm border-2 border-black px-1 py-0.5 mb-1 tracking-widest">
+                  {isAr ? '*** DUPLICATA — نسخة طبق الأصل ***' : '*** DUPLICATA — COPIE CONFORME ***'}
+                </div>
+              )}
               <div className="font-bold text-base tracking-wider uppercase">{storeProfile.store_name}</div>
               <div className="font-semibold text-xs">{storeProfile.company_owner}</div>
               <div className="text-[10px]">{storeProfile.address}</div>

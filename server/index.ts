@@ -348,6 +348,33 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     res.json(found);
   });
 
+  // v1.5.2 (SALES BOOK P1): every sale of one business day, newest first.
+  app.get('/api/sales/day/:day', (req, res) => {
+    try {
+      res.json(baraka.listSalesByDay(String(req.params.day ?? '')));
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
+  // v1.5.2 (SALES BOOK P2): governed duplicata — the reprint itself is
+  // client-side, but every reprint lands in the audit trail (actor + reason).
+  // No silent second copies, ever (Zero-Trust).
+  app.post('/api/sales/:id/duplicata', (req, res) => {
+    try {
+      const row = baraka.getSaleOrNull(req.params.id);
+      if (!row) { res.status(404).json({ error: 'sale not found' }); return; }
+      const { by, reason } = req.body as { by?: string; reason?: string };
+      baraka.logAudit({
+        actor: by || 'unknown', action: 'sale.duplicata', entity: 'sales',
+        entityId: req.params.id, detail: String(reason ?? '').slice(0, 140),
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   app.post('/api/sales/:id/void', (req, res) => {
     try {
       const { reason, by } = req.body as { reason: string; by?: string };
