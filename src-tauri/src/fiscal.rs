@@ -2196,7 +2196,8 @@ pub fn sales_book_day(conn: &Connection, day: &str) -> Result<Value, String> {
             "SELECT s.id, s.invoice_number, s.ticket_number, s.created_at, s.cashier_name,
                s.payment_method, s.total_ttc_ct, s.status, c.name AS client_name,
                CASE WHEN EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id AND r.status = 'APPROVED') THEN 1 ELSE 0 END AS has_approved_return,
-               COALESCE((SELECT SUM(r2.refund_ct) FROM returns r2 WHERE r2.sale_id = s.id AND r2.status = 'APPROVED'), 0) AS avoir_total_ct
+               COALESCE((SELECT SUM(r2.refund_ct) FROM returns r2 WHERE r2.sale_id = s.id AND r2.status = 'APPROVED'), 0) AS avoir_total_ct,
+               (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
              FROM sales s LEFT JOIN clients c ON c.id = s.client_id
              WHERE s.created_at >= ?1 AND s.created_at < ?2
              ORDER BY s.created_at DESC, s.id DESC",
@@ -2216,6 +2217,7 @@ pub fn sales_book_day(conn: &Connection, day: &str) -> Result<Value, String> {
                 "client_name": r.get::<_, Option<String>>(8)?,
                 "has_approved_return": r.get::<_, i64>(9)?,
                 "avoir_total_ct": r.get::<_, i64>(10)?,
+                "item_count": r.get::<_, i64>(11)?,
             }))
         })
         .map_err(|e| e.to_string())?;
@@ -4475,6 +4477,7 @@ mod tests {
         assert_eq!(day["rows"].as_array().unwrap().len(), 1);
         assert_eq!(day["rows"][0]["avoir_total_ct"], 0);
         assert_eq!(day["rows"][0]["has_approved_return"], 0);
+        assert_eq!(day["rows"][0]["item_count"], 4);
         assert_eq!(day["z"]["sales_count"], 1);
         assert_eq!(day["z"]["total_ttc_ct"], 179400);
         assert_eq!(day["z"]["total_especes_ct"], 179400);

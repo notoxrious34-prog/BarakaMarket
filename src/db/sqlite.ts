@@ -633,6 +633,8 @@ export interface BarakaDb {
     client_name: string | null; has_approved_return: 0 | 1;
     /** P3: approved AVOIR posted against this sale (TTC, timbre excluded). */
     avoir_total_ct: number;
+    /** v1.6.0: number of lines, for the master/detail table. */
+    item_count: number;
   }[];
   /** v1.5.0 (RETURNS lookup): sale head + lines with APPROVED-returned and
    * remaining qty, found by UUID id OR FACT number. Null when unknown. */
@@ -2128,7 +2130,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         `SELECT s.id, s.invoice_number, s.ticket_number, s.created_at, s.cashier_name,
            s.payment_method, s.total_ttc_ct, s.status, c.name AS client_name,
            CASE WHEN EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id AND r.status = 'APPROVED') THEN 1 ELSE 0 END AS has_approved_return,
-           COALESCE((SELECT SUM(r2.refund_ct) FROM returns r2 WHERE r2.sale_id = s.id AND r2.status = 'APPROVED'), 0) AS avoir_total_ct
+           COALESCE((SELECT SUM(r2.refund_ct) FROM returns r2 WHERE r2.sale_id = s.id AND r2.status = 'APPROVED'), 0) AS avoir_total_ct,
+           (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
          FROM sales s LEFT JOIN clients c ON c.id = s.client_id
          WHERE s.created_at >= ? AND s.created_at < ?
          ORDER BY s.created_at DESC, s.id DESC`,
@@ -2136,6 +2139,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         id: string; invoice_number: string; ticket_number: string; created_at: string;
         cashier_name: string; payment_method: string; total_ttc_ct: number; status: string;
         client_name: string | null; has_approved_return: 0 | 1; avoir_total_ct: number;
+        /** v1.6.0: number of lines, for the master/detail table. */
+        item_count: number;
       }[];
     },
 

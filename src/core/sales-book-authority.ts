@@ -29,6 +29,8 @@ export interface SalesBookRow {
   client_name: string | null; has_approved_return: 0 | 1;
   /** P3: approved AVOIR posted against this sale (TTC). Absent on old lanes → 0. */
   avoir_total_ct?: number;
+  /** v1.6.0: number of lines, for the master/detail table. */
+  item_count: number;
 }
 
 let salesBookError: string | null = null;
@@ -40,7 +42,8 @@ function isRow(v: unknown): v is SalesBookRow {
   if (typeof v !== 'object' || v === null) return false;
   const o = v as Record<string, unknown>;
   return typeof o.id === 'string' && typeof o.invoice_number === 'string'
-    && typeof o.created_at === 'string' && typeof o.total_ttc_ct === 'number';
+    && typeof o.created_at === 'string' && typeof o.total_ttc_ct === 'number'
+    && typeof o.item_count === 'number';
 }
 
 /** Every sale of one Algiers business day (YYYY-MM-DD), newest first.

@@ -63,6 +63,7 @@ test('v1.5.2: listSalesByDay — newest first, client name, CANCELLED visible, e
     assert.equal(rows[1].id, s1.id);
     assert.equal(rows[1].client_name, 'Karim');
     assert.equal(rows[1].has_approved_return, 0);
+    assert.equal(rows[1].item_count, 1, 'line count rides the row');
 
     assert.deepEqual(b.listSalesByDay('2000-01-01'), []);
     assert.throws(() => b.listSalesByDay('nope'), /YYYY-MM-DD/);
@@ -81,6 +82,7 @@ test('v1.5.2: listSalesByDay — approved return flips the AVOIR flag', () => {
     const rows = b.listSalesByDay(fiscalDayISO(new Date()));
     assert.equal(rows.length, 1);
     assert.equal(rows[0].has_approved_return, 1);
+    assert.equal(rows[0].item_count, 1);
   } finally { b.close(); }
 });
 
@@ -92,7 +94,7 @@ test('v1.5.2 P3: filterSalesBookRows — q/cashier/pay/flag/client (pure)', asyn
       id: 'x', invoice_number: 'FACT-2026-000001', ticket_number: 'T-1',
       created_at: '2026-11-10T10:00:00.000Z', cashier_name: 'Amine',
       payment_method: 'ESPECES', total_ttc_ct: 10000, status: 'COMPLETED',
-      client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, ...o,
+      client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, item_count: 2, ...o,
     });
   const rows = [
     R({ id: 'a', invoice_number: 'FACT-2026-000042', payment_method: 'CIB', client_name: 'Karim', has_approved_return: 1 as const, avoir_total_ct: 5000 }),
@@ -119,7 +121,7 @@ test('v1.5.2 P4: computeSalesBookHealth — cancelled apart, net = gross − avo
       id: 'x', invoice_number: 'F', ticket_number: 'T',
       created_at: '2026-11-10T10:00:00.000Z', cashier_name: 'Amine',
       payment_method: 'ESPECES', total_ttc_ct: 0, status: 'COMPLETED',
-      client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, ...o,
+      client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, item_count: 2, ...o,
     });
   const h = computeSalesBookHealth([
     R({ payment_method: 'ESPECES', total_ttc_ct: 37000, avoir_total_ct: 0 }),
@@ -142,7 +144,7 @@ test('v1.5.2 P3: buildSalesBookCsv — BOM + semicolons + DZD decimals (pure)', 
     id: 'x', invoice_number: 'FACT-2026-000042', ticket_number: 'T-42',
     created_at: '2026-11-10T10:05:00.000Z', cashier_name: 'Am;ine',
     payment_method: 'ESPECES', total_ttc_ct: 37000, status: 'COMPLETED',
-    client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0,
+    client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, item_count: 1,
   }];
   const fr = buildSalesBookCsv(rows, '2026-11-10', 'fr');
   assert.ok(fr.startsWith('﻿'), 'BOM first for Excel');
