@@ -239,7 +239,7 @@ export const DailyZReportView: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-80px)] bg-[#0b0f17] p-4 gap-6 overflow-y-auto">
+    <div className="flex flex-col lg:flex-row h-[calc(100dvh-80px)] bg-[#0b0f17] p-4 gap-6 overflow-y-auto">
       {/* Left: Interactive Dashboard & Fiscal Breakdown Summary */}
       <div className="flex-1 space-y-4">
         {/* Title */}

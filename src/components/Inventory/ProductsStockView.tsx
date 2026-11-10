@@ -297,7 +297,7 @@ export const ProductsStockView: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-80px)] bg-[#0b0f17] p-4 overflow-hidden">
+    <div className="flex flex-col h-[calc(100dvh-80px)] bg-[#0b0f17] p-4 overflow-hidden">
       {/* Top Bar: Stats & Filters */}
       <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 mb-4">
         <div className="flex flex-wrap items-center gap-2">

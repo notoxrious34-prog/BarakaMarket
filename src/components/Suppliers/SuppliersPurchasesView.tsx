@@ -339,7 +339,7 @@ export const SuppliersPurchasesView: React.FC = () => {
   const receptionTotalTTC = receptionItems.reduce((sum, item) => sum + item.total_line_ttc, 0);
 
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-80px)] bg-[#0b0f17] overflow-hidden">
+    <div className="flex flex-col lg:flex-row h-[calc(100dvh-80px)] bg-[#0b0f17] overflow-hidden">
       {/* Left Column: Suppliers Directory & Global Debt */}
       <div className="w-full lg:w-96 border-e border-[#1e293b] flex flex-col p-3 bg-[#0e141f]">
         {/* Supplier Total Debt Card */}

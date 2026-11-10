@@ -178,7 +178,7 @@ export const LoginScreen: React.FC = () => {
   const shown = mustChange ? (phase === 'new' ? newPin : confirmPin) : pin;
 
   return (
-    <div className="min-h-screen bg-[#0b0f17] text-slate-100 flex items-center justify-center font-sans select-none p-4 overflow-y-auto" dir={ar ? 'rtl' : 'ltr'}>
+    <div className="h-dvh bg-[#0b0f17] text-slate-100 flex items-center justify-center font-sans select-none p-4 overflow-y-auto" dir={ar ? 'rtl' : 'ltr'}>
       <div className="w-full max-w-sm rounded-2xl border border-amber-400/25 bg-[#0e141f] p-4 my-auto shadow-[0_0_60px_rgba(212,175,55,0.12)]">
         <div className="flex flex-col items-center gap-1 mb-3">
           <img src="/brand/baraka-emblem-256.png" alt="Baraka" className="w-14 h-14 rounded-xl object-cover drop-shadow-[0_0_18px_rgba(212,160,23,0.45)]" />

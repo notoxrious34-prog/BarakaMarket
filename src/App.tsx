@@ -62,10 +62,12 @@ const MainLayout: React.FC = () => {
   if (!session) return <LoginScreen />;
 
   return (
-    <div className="min-h-screen bg-[#0b0f17] text-slate-100 flex flex-col font-sans select-none antialiased">
+    <div className="h-dvh overflow-hidden bg-[#0b0f17] text-slate-100 flex flex-col font-sans select-none antialiased">
+      {/* TASK-MKT-002: h-dvh root lock — the page never grows past the viewport;
+          inner regions scroll (each view owns its overflow + min-h-0 chain). */}
       <Navbar />
 
-      <main className="flex-1 flex flex-col overflow-hidden">
+      <main className="flex-1 flex flex-col overflow-hidden min-h-0">
         {activeView === 'pos' && <PosView />}
         {activeView === 'products' && <ProductsStockView />}
         {activeView === 'suppliers' && <SuppliersPurchasesView />}

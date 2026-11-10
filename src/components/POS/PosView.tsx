@@ -213,7 +213,7 @@ export const PosView: React.FC = () => {
   }, [scanBarcode]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-80px)] bg-[#0b0f17] overflow-hidden">
+    <div className="flex flex-col h-[calc(100dvh-80px)] bg-[#0b0f17] overflow-hidden">
       {/* Authority banner: provisional ONLY in a loose browser without SQLite.
           In the Tauri desktop shell the fiscal state lives subtly in the
           status bar — never a conflicting full-width badge. */}

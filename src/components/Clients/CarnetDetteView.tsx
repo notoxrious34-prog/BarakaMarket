@@ -148,7 +148,7 @@ export const CarnetDetteView: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col lg:flex-row h-[calc(100vh-80px)] bg-[#0b0f17] overflow-hidden">
+    <div className="flex flex-col lg:flex-row h-[calc(100dvh-80px)] bg-[#0b0f17] overflow-hidden">
       {/* LEFT COLUMN: Client List & Global Summary */}
       <div className="w-full lg:w-96 border-e border-[#1e293b] flex flex-col p-3 bg-[#0e141f]">
         {/* Header: Total Outstanding Market Credit */}
