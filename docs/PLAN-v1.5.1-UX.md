@@ -82,3 +82,21 @@ avant/après + `git status` propre + commit conventionnel. Aucun `add -A`
 - Licence : nom affiché « Baraka DEV », contacts (tél + BarakaDev.34@outlook.com
   + Cité 17 Octobre, Bordj Bou Arréridj — Algérie), sans horaires, sans
   numéros RC/NIF, prix toujours hors produit.
+
+## 6. Extension 2026-11-10 — دفتر المبيعات v1.5.2 (P1–P4, ADR-043)
+
+- **P1 قائمة اليوم** (`sqlite.ts listSalesByDay` + `GET /api/sales/day/:day`): حدود
+  `fiscalDayBoundsUTC`، الأحدث أولًا، `client_name` عبر JOIN + علَم AVOIR +
+  إظهار CANCELLED. **P2 Duplicata محوكم** (`POST /api/sales/:id/duplicata` →
+  `sale.duplicata` بالفاعل/السبب قبل الطباعة + ختم DUPLICATA على الورق؛ رفض
+  ودود للجلسة بلا تصريح).
+- **P3 فلاتر + CSV** (توابع نقية في `sales-book-authority.ts` + اختبارات وحدوية):
+  بحث FACT/تذكرة متسامح، كاشير (مشتق من الصفوف)، طريقة دفع، شرائح
+  (الكل/AVOIR/ملغاة + زبون)، تصدير `ventes-{day}.csv` (FR/AR + BOM).
+  الترشيح في الذاكرة — سطح الخادم بلا تغيير.
+- **P4 بطاقة الصحة**: المجموع − AVOIR = الصافي + نقدي/بنكي+كريدي + شارة
+  مطابقة ضد `GET /api/z/summary` (نفس النافذة). الملغاة تُعَدّ خارج المجموع.
+- **الإثبات**: `lane-sb` (قائمة + تفاصيل + رفض محوكم + تذكرة مختومة) و`lane-p34`
+  (بطاقة + فلتر FACT + شريحة AVOIR + تنزيل CSV حقيقي) — داكن + فاتح PASS بلا أخطاء.
+  `sales-book.test.ts` 5/5 (يوم + AVOIR + فلاتر + صحة + CSV)؛ المجاميع رُوجعت يدويًا
+  (1630 − 180 = 1450: الإرجاع الجزئي 1000/2000 مللي بسعر 180 = 180.00 دج).
