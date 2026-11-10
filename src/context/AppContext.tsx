@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useMemo } from 'react';
+import { useCart } from './CartContext';
 import { computeHwid, collectBrowserFingerprint, validateLicense } from '../core/licensing';
 import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed, loadStoredLicense } from '../core/license-store';
 import { assessStoredLicense } from '../core/license-verify';
@@ -34,7 +35,7 @@ import {
   initialStoreProfile,
   initialSuppliers,
 } from '../data/seedData';
-import { calculateLineTotals, calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
+import { calculateSaleTotals, effectivePackPriceCt } from '../core/cart-bridge';
 import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calculateSaleTotalsCt, calculateLineTotalsCt, effectiveTvaRate } from '../core/fiscal.centimes';
 import { advancesForMonth, settleSalaryMath, applyAdvanceToBalance, applyPaydayToBalance } from '../core/payroll';
 import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, cashActiveNative, cashMoveNative, lastLaneError, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
@@ -75,7 +76,6 @@ interface AppContextType {
   salarySettlements: SalarySettlement[];
   heldCarts: HeldCart[];
   storeProfile: StoreProfile;
-  currentCart: SaleItem[];
   selectedClient: Client;
   activeView: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns' | 'sales';
   currentPrintSale: Sale | null;
@@ -100,10 +100,7 @@ interface AppContextType {
   toggleLanguage: () => void;
   toggleTheme: () => void;
   setSelectedClient: (client: Client) => void;
-  addToCart: (product: Product, quantity?: number, discountPercent?: number, pack?: { unitPriceTtc?: number; packMultiplier?: number; packName?: string; barcode?: string }) => void;
-  updateCartItemQty: (index: number, quantity: number) => void;
-  updateCartItemDiscount: (index: number, discountPercent: number) => void;
-  removeFromCart: (index: number) => void;
+  /** TASK-MKT-001: empties cart lines AND resets the client (kept in App). */
   clearCart: () => void;
   holdCurrentCart: (name?: string) => void;
   restoreHeldCart: (heldId: string) => void;
@@ -306,6 +303,9 @@ function nextBrowserSeq(kind: 'FACT' | 'T' | 'Q', year: number): number {
 const pad6 = (n: number) => String(n).padStart(6, '0');
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  // TASK-MKT-001: the live cart lives in the memoized CartContext (outer
+  // provider in App.tsx) so scans re-render only cart subscribers.
+  const cart = useCart();
   const [products, setProducts] = useState<Product[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
@@ -459,14 +459,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   });
 
-  const [currentCart, setCurrentCart] = useState<SaleItem[]>(() => {
-    try {
-      const draft = localStorage.getItem(STORAGE_KEYS.ACTIVE_DRAFT);
-      return draft ? JSON.parse(draft) : [];
-    } catch {
-      return [];
-    }
-  });
+  // TASK-MKT-001: currentCart state + draft persistence moved to CartContext.
+  // This provider consumes it via `cart` ( CartProvider wraps AppProvider ).
 
   const [selectedClient, setSelectedClient] = useState<Client>(initialClients[0]);
   const [activeView, setActiveView] = useState<'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns' | 'sales'>('pos');
@@ -763,9 +757,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.setItem(STORAGE_KEYS.STORE, JSON.stringify(storeProfile));
   }, [storeProfile]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ACTIVE_DRAFT, JSON.stringify(currentCart));
-  }, [currentCart]);
+  // TASK-MKT-001: cart draft persistence moved to CartContext with the state.
 
   const toggleLanguage = () => {
     setLanguage(prev => (prev === 'ar' ? 'fr' : 'ar'));
@@ -789,116 +781,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   }, [sales, purchases, products, clients, suppliers, settlements, supplierPayments, expenses]);
 
-  const addToCart = (product: Product, quantity = 1, discountPercent = 0, pack?: { unitPriceTtc?: number; packMultiplier?: number; packName?: string; barcode?: string }) => {
-    // ADR-004-MKT: pack rows carry their own unit price + multiplier; the
-    // scanned pack barcode is stored so sale_items records the exact label.
-    const unitPrice = pack?.unitPriceTtc ?? product.sell_price;
-    const rowBarcode = pack?.barcode ?? product.barcode;
-    const rowNameFr = pack?.packName ? `${product.name_fr} [${pack.packName}]` : product.name_fr;
-    setCurrentCart(prev => {
-      const existingIndex = prev.findIndex(item => item.product_id === product.id && item.unit_price_ttc === unitPrice && (item.packName ?? '') === (pack?.packName ?? ''));
-      if (existingIndex >= 0) {
-        const existing = prev[existingIndex];
-        const newQty = existing.quantity + quantity;
-        const lineTotals = calculateLineTotals(
-          unitPrice,
-          newQty,
-          product.tva_rate,
-          discountPercent || existing.discount_percent
-        );
-        const updated = [...prev];
-        updated[existingIndex] = {
-          ...existing,
-          quantity: newQty,
-          discount_percent: discountPercent || existing.discount_percent,
-          ...lineTotals,
-        };
-        return updated;
-      } else {
-        const lineTotals = calculateLineTotals(
-          unitPrice,
-          quantity,
-          product.tva_rate,
-          discountPercent
-        );
-        const newItem: SaleItem = {
-          product_id: product.id,
-          barcode: rowBarcode,
-          name_fr: rowNameFr,
-          name_ar: product.name_ar,
-          unit_price_ttc: unitPrice,
-          quantity,
-          unit: product.unit,
-          tva_rate: product.tva_rate,
-          discount_percent: discountPercent,
-          packMultiplier: pack?.packMultiplier,
-          packName: pack?.packName,
-          ...lineTotals,
-        };
-        return [...prev, newItem];
-      }
-    });
+  // TASK-MKT-001: cart mutators live in CartContext (memoized, stable).
+  // Thin wrappers keep internal call sites unchanged.
+  const addToCart: (
+    product: Product, quantity?: number, discountPercent?: number,
+    pack?: { unitPriceTtc?: number; packMultiplier?: number; packName?: string; barcode?: string },
+  ) => void = (product, quantity = 1, discountPercent = 0, pack) => {
+    cart.addToCart(product, quantity, discountPercent, pack);
   };
 
   const updateCartItemQty = (index: number, quantity: number) => {
-    if (quantity <= 0) {
-      removeFromCart(index);
-      return;
-    }
-    setCurrentCart(prev => {
-      const item = prev[index];
-      if (!item) return prev;
-      const lineTotals = calculateLineTotals(
-        item.unit_price_ttc,
-        quantity,
-        item.tva_rate,
-        item.discount_percent
-      );
-      const updated = [...prev];
-      updated[index] = {
-        ...item,
-        quantity,
-        ...lineTotals,
-      };
-      return updated;
-    });
+    cart.updateCartItemQty(index, quantity);
   };
 
   const updateCartItemDiscount = (index: number, discountPercent: number) => {
-    setCurrentCart(prev => {
-      const item = prev[index];
-      if (!item) return prev;
-      const lineTotals = calculateLineTotals(
-        item.unit_price_ttc,
-        item.quantity,
-        item.tva_rate,
-        discountPercent
-      );
-      const updated = [...prev];
-      updated[index] = {
-        ...item,
-        discount_percent: discountPercent,
-        ...lineTotals,
-      };
-      return updated;
-    });
+    cart.updateCartItemDiscount(index, discountPercent);
   };
 
   const removeFromCart = (index: number) => {
-    setCurrentCart(prev => prev.filter((_, i) => i !== index));
+    cart.removeFromCart(index);
   };
 
   const clearCart = () => {
-    setCurrentCart([]);
+    cart.clearCartLines();
     setSelectedClient(initialClients[0]);
   };
 
   const holdCurrentCart = (name?: string) => {
-    if (currentCart.length === 0) return;
+    if (cart.currentCart.length === 0) return;
     const newHeld: HeldCart = {
       id: `HOLD-${Date.now()}`,
       name: name || `Panier #${heldCarts.length + 1} - ${new Date().toLocaleTimeString()}`,
-      items: [...currentCart],
+      items: [...cart.currentCart],
       client_id: selectedClient?.id,
       timestamp: new Date().toLocaleTimeString(),
     };
@@ -909,7 +823,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const restoreHeldCart = (heldId: string) => {
     const target = heldCarts.find(h => h.id === heldId);
     if (!target) return;
-    setCurrentCart(target.items);
+    cart.replaceCart(target.items);
     if (target.client_id) {
       const cl = clients.find(c => c.id === target.client_id);
       if (cl) setSelectedClient(cl);
@@ -1027,7 +941,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amountPaid: number,
     isFactureReglementaire = false
   ): Sale => {
-    const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
+    const totals = calculateSaleTotals(cart.currentCart, paymentMethod, storeProfile);
     const dateNow = new Date();
     // T2 (ADR-023): the browser NEVER mints fiscal numbers. Provisional rows
     // carry DRAFT refs (obviously non-fiscal, unique per finalize) until the
@@ -1050,7 +964,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       client_ai: selectedClient.ai,
       client_address: selectedClient.address,
       // C2-fix: stamp the cost actually borne, before any later PMP drift.
-      items: currentCart.map(it => ({
+      items: cart.currentCart.map(it => ({
         ...it,
         unit_cost_ht: products.find(p => p.id === it.product_id)?.buy_price ?? it.unit_cost_ht,
       })),
@@ -1075,7 +989,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // Deduct stock quantities (ADR-004-MKT: packs drain multiplier x base units)
     setProducts(prev =>
       prev.map(p => {
-        const itemSold = currentCart.find(i => i.product_id === p.id);
+        const itemSold = cart.currentCart.find(i => i.product_id === p.id);
         if (itemSold) {
           const baseUnits = itemSold.quantity * (itemSold.packMultiplier ?? 1);
           const newQty = Math.max(0, Math.round((p.stock_qty - baseUnits) * 100) / 100);
@@ -1208,7 +1122,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // is the second wall (programmatic callers included).
     if (!sessionRef.current) throw new Error('[sale] login required');
     touchSession();
-    if (currentCart.length === 0) {
+    if (cart.currentCart.length === 0) {
       return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
     }
     // Minted once per finalize — the same key follows this sale through
@@ -1218,7 +1132,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Regime TVA off forces rate 0 at the source: lines, tiers, payload and
       // header stay mutually consistent (server re-verifies with the same flags).
       const regime = { tva_enabled: storeProfile.tva_enabled, timbre_enabled: storeProfile.timbre_enabled };
-      const ctItems = currentCart.map(it => {
+      const ctItems = cart.currentCart.map(it => {
         const eff = effectiveTvaRate(it.tva_rate, regime);
         const l = calculateLineTotalsCt(
           dzdToCentimes(it.unit_price_ttc), it.quantity, eff, it.discount_percent,
@@ -1237,7 +1151,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...regime,
       });
       const createdAt = new Date().toISOString();
-      const payloadItems = currentCart.map((it, i) => ({
+      const payloadItems = cart.currentCart.map((it, i) => ({
         product_id: it.product_id,
         barcode: it.barcode,
         name_fr: it.name_fr,
@@ -1295,7 +1209,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshOutbox(); // A1: badge + rows now
         return provisional;
       }
-      const totals = calculateSaleTotals(currentCart, paymentMethod, storeProfile);
+      const totals = calculateSaleTotals(cart.currentCart, paymentMethod, storeProfile);
       const authoritative: Sale = {
         id: out.id,
         invoice_number: out.invoice_number,
@@ -1304,7 +1218,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         client_id: selectedClient.id,
         client_name: selectedClient.name,
         // C2-fix: stamp the cost actually borne, before any later PMP drift.
-        items: currentCart.map(it => ({
+        items: cart.currentCart.map(it => ({
           ...it,
           unit_cost_ht: products.find(p => p.id === it.product_id)?.buy_price ?? it.unit_cost_ht,
         })),
@@ -1327,7 +1241,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       setProducts(prev =>
         prev.map(p => {
-          const itemSold = currentCart.find(i => i.product_id === p.id);
+          const itemSold = cart.currentCart.find(i => i.product_id === p.id);
           if (itemSold) {
             const newQty = Math.max(0, Math.round((p.stock_qty - itemSold.quantity) * 100) / 100);
             return { ...p, stock_qty: newQty };
@@ -2246,7 +2160,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         supplierPayments,
         heldCarts,
         storeProfile,
-        currentCart,
         selectedClient,
         activeView,
         currentPrintSale,
@@ -2263,10 +2176,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleLanguage,
         toggleTheme,
         setSelectedClient,
-        addToCart,
-        updateCartItemQty,
-        updateCartItemDiscount,
-        removeFromCart,
         clearCart,
         holdCurrentCart,
         restoreHeldCart,

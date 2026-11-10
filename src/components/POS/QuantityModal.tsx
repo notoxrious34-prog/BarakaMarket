@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useCart } from '../../context/CartContext';
 import { formatDZD } from '../../core/display';
 import { X, Check } from 'lucide-react';
 
@@ -10,7 +11,9 @@ interface Props {
 
 /** F2 — rapid quantity override for the active cart line. Enter applies, focus re-arms. */
 export const QuantityModal: React.FC<Props> = ({ itemIndex, onClose }) => {
-  const { currentCart, updateCartItemQty, language } = useApp();
+  const { language } = useApp();
+  // TASK-MKT-001: cart line from the isolated CartContext.
+  const { currentCart, updateCartItemQty } = useCart();
   const isAr = language === 'ar';
   const item = currentCart[itemIndex];
   const [val, setVal] = useState(item ? String(item.quantity) : '1');

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { CartProvider } from './context/CartContext';
 import { APP_VERSION } from './core/version';
 import { can } from './core/rbac';
 import { Navbar } from './components/Navbar';
@@ -206,8 +207,10 @@ const MainLayout: React.FC = () => {
 
 export default function App() {
   return (
-    <AppProvider>
-      <MainLayout />
-    </AppProvider>
+    <CartProvider>
+      <AppProvider>
+        <MainLayout />
+      </AppProvider>
+    </CartProvider>
   );
 }

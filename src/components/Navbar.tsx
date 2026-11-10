@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { useCart } from '../context/CartContext';
 import { can, type Permission } from '../core/rbac';
 import { RotateCcw } from 'lucide-react';
 import {
@@ -56,7 +57,6 @@ export const Navbar: React.FC = () => {
     toggleTheme,
     heldCarts,
     holdCurrentCart,
-    currentCart,
     restoreHeldCart,
     deleteHeldCart,
     session,
@@ -65,6 +65,8 @@ export const Navbar: React.FC = () => {
     rotationNotice,
     dismissRotationNotice,
   } = useApp();
+  // TASK-MKT-001: cart badge reads the isolated CartContext (no App re-sub).
+  const { currentCart } = useCart();
 
   const [showHeldDropdown, setShowHeldDropdown] = useState(false);
   // NAVBAR-REDESIGN Phase 2: live cashier clock (latin digits, explicit — never locale-shaped).

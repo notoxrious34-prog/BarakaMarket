@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useCart } from '../../context/CartContext';
 import { PaymentMethod } from '../../types';
 import { calculateSaleTotals } from '../../core/cart-bridge';
 import { formatDZD } from '../../core/display';
@@ -27,7 +28,6 @@ interface PaymentModalProps {
 
 export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
   const {
-    currentCart,
     selectedClient,
     clients,
     setSelectedClient,
@@ -38,6 +38,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
     storeProfile,
     language,
   } = useApp();
+  // TASK-MKT-001: cart totals from the isolated CartContext.
+  const { currentCart } = useCart();
 
   const isAr = language === 'ar';
 

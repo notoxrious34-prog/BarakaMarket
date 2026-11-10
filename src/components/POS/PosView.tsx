@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useCart } from '../../context/CartContext';
 import { initialCategories } from '../../data/seedData';
 import { Product, SaleItem } from '../../types';
 import { calculateSaleTotals } from '../../core/cart-bridge';
@@ -38,13 +39,8 @@ export const PosView: React.FC = () => {
   const {
     products,
     clients,
-    currentCart,
     selectedClient,
     setSelectedClient,
-    addToCart,
-    updateCartItemQty,
-    updateCartItemDiscount,
-    removeFromCart,
     clearCart,
     holdCurrentCart,
     heldCarts,
@@ -58,6 +54,14 @@ export const PosView: React.FC = () => {
     isTrialExpired,
     setActiveView,
   } = useApp();
+  // TASK-MKT-001: cart data + mutators from the isolated CartContext.
+  const {
+    currentCart,
+    addToCart,
+    updateCartItemQty,
+    updateCartItemDiscount,
+    removeFromCart,
+  } = useCart();
 
   const isAr = language === 'ar';
 

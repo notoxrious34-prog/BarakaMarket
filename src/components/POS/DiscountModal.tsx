@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useCart } from '../../context/CartContext';
 import { formatDZD } from '../../core/display';
 import { X, Check, Percent } from 'lucide-react';
 
@@ -13,7 +14,9 @@ interface Props {
  * via deterministic centimes math). Enter applies, focus re-arms.
  */
 export const DiscountModal: React.FC<Props> = ({ itemIndex, onClose }) => {
-  const { currentCart, updateCartItemDiscount, language } = useApp();
+  const { language } = useApp();
+  // TASK-MKT-001: cart line from the isolated CartContext.
+  const { currentCart, updateCartItemDiscount } = useCart();
   const isAr = language === 'ar';
   const item = currentCart[itemIndex];
   const [mode, setMode] = useState<'pct' | 'dzd'>('pct');

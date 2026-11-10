@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useCart } from '../../context/CartContext';
 import { formatDZD } from '../../core/display';
 import { X, Search } from 'lucide-react';
 
@@ -12,7 +13,9 @@ interface Props {
  * ArrowUp/Down navigation, Enter picks -> cart, focus re-arms to scanner.
  */
 export const CatalogSearchModal: React.FC<Props> = ({ onClose }) => {
-  const { products, addToCart, language } = useApp();
+  const { products, language } = useApp();
+  // TASK-MKT-001: picks land via the isolated CartContext.
+  const { addToCart } = useCart();
   const isAr = language === 'ar';
   const [q, setQ] = useState('');
   const [hi, setHi] = useState(0);
