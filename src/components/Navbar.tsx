@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useCart } from '../context/CartContext';
+import { NavbarClock } from './Navbar/NavbarClock';
 import { can, type Permission } from '../core/rbac';
 import { RotateCcw } from 'lucide-react';
 import {
@@ -69,14 +70,8 @@ export const Navbar: React.FC = () => {
   const { currentCart } = useCart();
 
   const [showHeldDropdown, setShowHeldDropdown] = useState(false);
-  // NAVBAR-REDESIGN Phase 2: live cashier clock (latin digits, explicit — never locale-shaped).
-  const [now, setNow] = useState(() => new Date());
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-  const dayStamp = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // TASK-MKT-003: the ticking clock lives in memoized <NavbarClock/> (own
+  // interval) — this shell no longer re-renders every second.
 
   const isAr = language === 'ar';
 
@@ -272,16 +267,8 @@ export const Navbar: React.FC = () => {
               </button>
             </span>
           )}
-          {/* NAVBAR-REDESIGN Phase 2: live cashier clock — the till's time reference. */}
-          <span
-            className="px-2.5 py-1.5 bg-[#162030] border border-[#2b3a4f] rounded-lg text-xs text-slate-200 flex items-center gap-1.5 tabular-nums"
-            dir="ltr"
-            title={isAr ? 'ساعة الصندوق' : 'Heure de caisse'}
-          >
-            <span className="font-semibold">{clock}</span>
-            <span className="text-slate-500">•</span>
-            <span className="text-slate-400">{dayStamp}</span>
-          </span>
+          {/* TASK-MKT-003: memoized clock island (own 1s tick). */}
+          <NavbarClock isAr={isAr} />
           {/* Day / Night Theme Toggle */}
           <button
             onClick={toggleTheme}
