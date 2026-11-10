@@ -128,3 +128,20 @@ avant/après + `git status` propre + commit conventionnel. Aucun `add -A`
   (أول/أوسط/أخير: تطابق الصف = اللوحة، اللوحة في الشاشة، تمرير الصفحة 0).
   ملاحظة المراجعة البصرية عن غياب التمييز حُسمت لصالح DOM (قراءة خاطئة
   لأرقام صغيرة) ثم عُززت بسحب الاختيار لمرأى القائمة.
+
+## 9. Apex 2026-11-10 — خارطة التميز v1.7.0 (MKT-001..005، بعد الحوكمة v4.0)
+
+- **MKT-001 (عزل السلة)**: `src/core/cart-state.ts` (نقي) + `CartContext`
+  مذكّر + ترحيل 6 واجهات؛ القياس الحي قبل/بعد `median 225ms ← 30ms`.
+- **MKT-002 (قفل الهندسة)**: `App.tsx` جذر `h-dvh` + `min-h-0`، 5 واجهات
+  `100dvh`، `LoginScreen` `h-dvh`، حارس `geometry-guard`؛ إثبات `1024×650`
+  (داكن + `html.light`): تمرير الصفحة 0.
+- **MKT-003 (عزل الساعة)**: `NavbarClock` مذكّرة بفاصلها + `cashier-clock.ts`
+  خالص مُختبر (3/3)؛ الساعة تتحرك في جزيرتها حيًا.
+- **MKT-004 (تقسيم POS)**: 4 جزر `memo` (`PosProductCard/PosCartLine/
+  PosFiscalTotals/PosShortcutsBar`) + حارس `pos-split-guard`؛ `PosView`
+  ‏746←534‏؛ الإثبات الحي الكامل (مسح/stepper/F3/دفع) أخضر.
+- **MKT-005 (أول submodule أصلي)**: `fiscal_sales_book.rs` (3 دوال + عقد
+  ذاتي)؛ `fiscal.rs` ‏5121←4970‏ بإعادة تصدير؛ `cargo 42/42` صفر warnings.
+- درس المسبارات: `browser.newPage()` يتجاهل `ctx` (لا viewport ولا
+  setup-flag) — دائمًا `ctx.newPage()` (سُجل في المهارة).
