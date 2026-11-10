@@ -2182,6 +2182,163 @@ pub fn sale_for_return(conn: &Connection, key: &str) -> Result<Value, String> {
     Ok(serde_json::json!({ "sale": h, "items": Value::Array(arr) }))
 }
 
+/// v1.5.3 (SALES BOOK): one business day for the installed shell, where no
+/// loopback server runs (T12 precedent — the exe never had this lane, so the
+/// book died with "lane unreachable"). Rows mirror TS listSalesByDay
+/// (incl. avoir_total_ct); `z` mirrors /api/z/summary (COMPLETED gross).
+pub fn sales_book_day(conn: &Connection, day: &str) -> Result<Value, String> {
+    if !valid_day(day) {
+        return Err("[fiscal] day must be YYYY-MM-DD".to_string());
+    }
+    let (wstart, wend) = day_bounds_utc(day)?;
+    let mut st = conn
+        .prepare(
+            "SELECT s.id, s.invoice_number, s.ticket_number, s.created_at, s.cashier_name,
+               s.payment_method, s.total_ttc_ct, s.status, c.name AS client_name,
+               CASE WHEN EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id AND r.status = 'APPROVED') THEN 1 ELSE 0 END AS has_approved_return,
+               COALESCE((SELECT SUM(r2.refund_ct) FROM returns r2 WHERE r2.sale_id = s.id AND r2.status = 'APPROVED'), 0) AS avoir_total_ct
+             FROM sales s LEFT JOIN clients c ON c.id = s.client_id
+             WHERE s.created_at >= ?1 AND s.created_at < ?2
+             ORDER BY s.created_at DESC, s.id DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let qrows = st
+        .query_map([&wstart, &wend], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "invoice_number": r.get::<_, String>(1)?,
+                "ticket_number": r.get::<_, String>(2)?,
+                "created_at": r.get::<_, String>(3)?,
+                "cashier_name": r.get::<_, String>(4)?,
+                "payment_method": r.get::<_, String>(5)?,
+                "total_ttc_ct": r.get::<_, i64>(6)?,
+                "status": r.get::<_, String>(7)?,
+                "client_name": r.get::<_, Option<String>>(8)?,
+                "has_approved_return": r.get::<_, i64>(9)?,
+                "avoir_total_ct": r.get::<_, i64>(10)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut arr = Vec::new();
+    for r in qrows {
+        arr.push(r.map_err(|e| e.to_string())?);
+    }
+    let zrow: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*),
+               SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END),
+               SUM(CASE WHEN payment_method IN ('CIB', 'DAHABIYA') THEN total_ttc_ct ELSE 0 END),
+               SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END),
+               SUM(total_ttc_ct)
+             FROM sales WHERE status = 'COMPLETED' AND created_at >= ?1 AND created_at < ?2",
+            [&wstart, &wend],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "rows": Value::Array(arr),
+        "z": {
+            "sales_count": zrow.0,
+            "total_especes_ct": zrow.1.unwrap_or(0),
+            "total_bank_ct": zrow.2.unwrap_or(0),
+            "total_credit_granted_ct": zrow.3.unwrap_or(0),
+            "total_ttc_ct": zrow.4.unwrap_or(0),
+        },
+    }))
+}
+
+/// v1.5.3 (SALES BOOK): full fiscal head of one sale for the detail view.
+/// Null when unknown (the view shows "sale not found", never a blank).
+pub fn sale_head(conn: &Connection, id: &str) -> Result<Value, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Ok(Value::Null);
+    }
+    let mut st = conn
+        .prepare(
+            "SELECT id, invoice_number, ticket_number, cashier_id, cashier_name,
+               client_id, client_name, total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
+               tva0_base_ct, tva0_amt_ct, tva0_ttc_ct,
+               tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
+               tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
+               payment_method, tva_enabled, timbre_enabled,
+               amount_paid_ct, amount_returned_ct, status, created_at
+             FROM sales WHERE id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = st
+        .query_map([id], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "invoice_number": r.get::<_, String>(1)?,
+                "ticket_number": r.get::<_, String>(2)?,
+                "cashier_id": r.get::<_, String>(3)?,
+                "cashier_name": r.get::<_, String>(4)?,
+                "client_id": r.get::<_, Option<i64>>(5)?,
+                "client_name": r.get::<_, Option<String>>(6)?,
+                "total_ht_ct": r.get::<_, i64>(7)?,
+                "total_tva_ct": r.get::<_, i64>(8)?,
+                "timbre_ct": r.get::<_, i64>(9)?,
+                "total_ttc_ct": r.get::<_, i64>(10)?,
+                "tva0_base_ct": r.get::<_, i64>(11)?,
+                "tva0_amt_ct": r.get::<_, i64>(12)?,
+                "tva0_ttc_ct": r.get::<_, i64>(13)?,
+                "tva9_base_ct": r.get::<_, i64>(14)?,
+                "tva9_amt_ct": r.get::<_, i64>(15)?,
+                "tva9_ttc_ct": r.get::<_, i64>(16)?,
+                "tva19_base_ct": r.get::<_, i64>(17)?,
+                "tva19_amt_ct": r.get::<_, i64>(18)?,
+                "tva19_ttc_ct": r.get::<_, i64>(19)?,
+                "payment_method": r.get::<_, String>(20)?,
+                "tva_enabled": r.get::<_, i64>(21)?,
+                "timbre_enabled": r.get::<_, i64>(22)?,
+                "amount_paid_ct": r.get::<_, i64>(23)?,
+                "amount_returned_ct": r.get::<_, i64>(24)?,
+                "status": r.get::<_, String>(25)?,
+                "created_at": r.get::<_, String>(26)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    match rows.next() {
+        Some(r) => Ok(r.map_err(|e| e.to_string())?),
+        None => Ok(Value::Null),
+    }
+}
+
+/// v1.5.3 (SALES BOOK P2): governed duplicata for the installed shell —
+/// the audit row lands in the same call (actor + reason), no silent copies.
+pub fn sale_duplicata(
+    conn: &Connection,
+    id: &str,
+    by: &str,
+    reason: &str,
+) -> Result<Value, String> {
+    let id = id.trim();
+    let actor = by.trim();
+    if id.is_empty() {
+        return Err("[fiscal] sale id required".to_string());
+    }
+    if actor.is_empty() {
+        return Err("[fiscal] actor required".to_string());
+    }
+    let exists: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sales WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        return Err("[fiscal] sale not found".to_string());
+    }
+    let detail: String = reason.chars().take(140).collect();
+    conn.execute(
+        "INSERT INTO audit_log (ts, actor, action, entity, entity_id, detail)
+         VALUES (datetime('now'), ?1, 'sale.duplicata', 'sales', ?2, ?3)",
+        rusqlite::params![actor, id, detail],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 /// #004 (Phase A): legal day close — recompute from the ledger, lock the
 /// day, chain the hash. Native twin of TS finalizeZReport (which additionally
 /// verifies caller-supplied totals against the same ledger query).
@@ -4304,6 +4461,73 @@ mod tests {
         assert_eq!(f2["items"][0]["returned_milli"], 2000);
         assert_eq!(f2["items"][0]["remaining_milli"], 0);
         assert_eq!(f2["items"][1]["remaining_milli"], 1000);
+    }
+
+    #[test]
+    fn sales_book_day_head_and_duplicata_for_the_installed_shell() {
+        // v1.5.3: the native sales-book lane (no loopback in the exe).
+        // Day rows carry the AVOIR sum, Z is the COMPLETED gross,
+        // sale_head reads the full fiscal head, duplicata writes the
+        // governed audit row; bad day is an Err, unknown head is Null.
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("BK-1")), &sale_items()).unwrap();
+        let day = sales_book_day(&db, "2026-11-01").unwrap();
+        assert_eq!(day["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(day["rows"][0]["avoir_total_ct"], 0);
+        assert_eq!(day["rows"][0]["has_approved_return"], 0);
+        assert_eq!(day["z"]["sales_count"], 1);
+        assert_eq!(day["z"]["total_ttc_ct"], 179400);
+        assert_eq!(day["z"]["total_especes_ct"], 179400);
+        assert!(sales_book_day(&db, "nope").is_err());
+        let h = sale_head(&db, "s1").unwrap();
+        assert_eq!(h["invoice_number"], "FACT-2026-000001");
+        assert_eq!(h["total_ttc_ct"], 179400);
+        assert_eq!(h["timbre_ct"], 1800);
+        assert!(sale_head(&db, "does-not-exist").unwrap().is_null());
+        assert!(sale_duplicata(&db, "does-not-exist", "boss", "x").is_err());
+        let d = sale_duplicata(&db, "s1", "boss", "client perdu").unwrap();
+        assert_eq!(d["ok"], true);
+        let row: (String, String, String) = db
+            .query_row(
+                "SELECT actor, action, entity_id FROM audit_log WHERE action = 'sale.duplicata'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "boss".to_string(),
+                "sale.duplicata".to_string(),
+                "s1".to_string()
+            )
+        );
+        // Approved return flips the row flag + sum (P4 card math).
+        let item_id: i64 = db
+            .query_row(
+                "SELECT id FROM sale_items WHERE sale_id = 's1' ORDER BY id ASC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let items = serde_json::json!([{ "saleItemId": item_id, "qty_milli": 2000 }]).to_string();
+        cash_open(&db, "sess-bk", "Amine", 1_000_000).unwrap();
+        let dr = return_create(
+            &mut db,
+            "s1",
+            &items,
+            "DEFECT",
+            None,
+            "lina",
+            Some("k-bk-1".to_string()),
+            "2026-11-01",
+        )
+        .unwrap();
+        let rid = dr["id"].as_str().unwrap().to_string();
+        return_approve(&mut db, &rid, "karim", "manager", "2026-11-01", None).unwrap();
+        let day2 = sales_book_day(&db, "2026-11-01").unwrap();
+        assert_eq!(day2["rows"][0]["has_approved_return"], 1);
+        assert!(day2["rows"][0]["avoir_total_ct"].as_i64().unwrap() > 0);
     }
 
     #[test]

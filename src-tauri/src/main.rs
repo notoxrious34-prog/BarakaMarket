@@ -298,6 +298,33 @@ fn return_list(status: Option<String>) -> Result<serde_json::Value, String> {
     fiscal::return_list(&conn, status)
 }
 
+/// v1.5.3 (SALES BOOK): a business day's rows + Z-side gross for the
+/// installed shell (no loopback there — T12 precedent). Null-free: bad day
+/// is an Err, unknown day is empty rows with zero Z.
+#[tauri::command]
+fn sales_book_day(day: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::sales_book_day(&conn, &day)
+}
+
+/// v1.5.3 (SALES BOOK): full fiscal head of one sale (null when unknown).
+#[tauri::command]
+fn sale_head(id: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::sale_head(&conn, &id)
+}
+
+/// v1.5.3 (SALES BOOK P2): governed duplicata — the sale.duplicata audit
+/// row lands in the same call; invoke IS the auth boundary, no token needed.
+#[tauri::command]
+fn sale_duplicata(id: String, by: String, reason: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    fiscal::sale_duplicata(&conn, &id, &by, &reason)
+}
+
 /// #003 (Phase A): day summary for the Z lane (read-only; lock lives in #004).
 #[tauri::command]
 fn daily_z(day: String) -> Result<serde_json::Value, String> {
@@ -648,6 +675,9 @@ fn main() {
             return_get,
             sale_for_return,
             return_list,
+            sales_book_day,
+            sale_head,
+            sale_duplicata,
             claim_create,
             claim_settle,
             claim_list,

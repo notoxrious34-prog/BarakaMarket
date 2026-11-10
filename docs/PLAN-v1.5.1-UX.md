@@ -100,3 +100,15 @@ avant/après + `git status` propre + commit conventionnel. Aucun `add -A`
   (بطاقة + فلتر FACT + شريحة AVOIR + تنزيل CSV حقيقي) — داكن + فاتح PASS بلا أخطاء.
   `sales-book.test.ts` 5/5 (يوم + AVOIR + فلاتر + صحة + CSV)؛ المجاميع رُوجعت يدويًا
   (1630 − 180 = 1450: الإرجاع الجزئي 1000/2000 مللي بسعر 180 = 180.00 دج).
+
+## 7. Correctif 2026-11-10 — دفتر المبيعات في الصندوق المثبت (v1.5.3, T12-bis)
+
+- **العرض الميداني**: النسخة المثبتة v1.5.2 تعرض `lane unreachable` في تبويب
+  المبيعات (لقطة المستخدم) — القراءة كانت عبر loopback فقط، ولا خادم loopback
+  داخل الـ exe. نفس عيب T12 حرفيًا.
+- **الإصلاح**: أوامر أصلية `sales_book_day` (صفوف اليوم + إجمالي Z) و`sale_head`
+  و`sale_duplicata` (التدقيق في نفس الاستدعاء) + تحويل كل دوال
+  `sales-book-authority` إلى invoke-first (loopback يبقى للتطوير فقط).
+  اختبار Rust جديد `sales_book_day_head_and_duplicata_for_the_installed_shell`.
+- **القاعدة الملزمة**: أي سطح جديد في التطبيق المثبت يجب أن يمتلك قناة invoke
+  أصلية منذ اليوم الأول — الـ loopback للمتصفح والتطوير فقط.
