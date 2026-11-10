@@ -85,6 +85,17 @@ export const SalesBookView: React.FC = () => {
     const d = await getSalesBookDetail(id);
     if (!d) { const { lastSalesBookError } = await import('../../core/sales-book-authority'); setDetailErr(lastSalesBookError()); return; }
     setDetail(d);
+    // Keep the selection mapped: bring the active row into the list's own
+    // view by scrolling the list container only — the page never moves.
+    requestAnimationFrame(() => {
+      const list = document.querySelector('[data-testid="sales-list"]');
+      const sel = list?.querySelector('[aria-current="true"]');
+      if (!list || !sel) return;
+      const lr = list.getBoundingClientRect();
+      const sr = (sel as HTMLElement).getBoundingClientRect();
+      if (sr.bottom > lr.bottom) list.scrollTop += sr.bottom - lr.bottom;
+      else if (sr.top < lr.top) list.scrollTop -= lr.top - sr.top;
+    });
   }, []);
 
   const load = useCallback(async (d: string) => {
@@ -352,7 +363,7 @@ export const SalesBookView: React.FC = () => {
                 <span className="block font-mono font-bold text-emerald-300 truncate" dir="ltr">{r.invoice_number}</span>
                 <span className="block text-xs text-slate-500 truncate">{r.cashier_name}{r.client_name ? ` · ${r.client_name}` : ''}</span>
               </span>
-              <span className="md:hidden font-bold text-white font-mono" dir="ltr">{formatDZDFromCt(r.total_ttc_ct)}</span>
+              <span className="md:hidden font-bold text-white font-mono tabular-nums" dir="ltr">{formatDZDFromCt(r.total_ttc_ct)}</span>
               <span className="hidden md:block font-mono text-slate-400 text-xs" dir="ltr">{timeOf(r.created_at)}</span>
               <span className="hidden md:block text-xs text-slate-400 truncate">{r.cashier_name}{r.client_name ? <span className="text-slate-500"> · {r.client_name}</span> : ''}</span>
               <span className="hidden md:flex text-xs text-slate-400 items-center gap-1">
@@ -369,7 +380,7 @@ export const SalesBookView: React.FC = () => {
                 )}
               </span>
               <span className="hidden md:block text-center font-mono text-slate-300 text-xs" dir="ltr">{r.item_count}</span>
-              <span className="hidden md:block text-end font-bold text-white font-mono" dir="ltr">{formatDZDFromCt(r.total_ttc_ct)}</span>
+              <span className="hidden md:block text-end font-bold text-white font-mono tabular-nums" dir="ltr">{formatDZDFromCt(r.total_ttc_ct)}</span>
             </button>
             );
           })}
