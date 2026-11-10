@@ -9,6 +9,7 @@ use std::{fs, path::PathBuf};
 
 mod auth;
 mod fiscal;
+mod fiscal_sales_book;
 mod product;
 
 /// Frozen fiscal schema — the SAME file the Node lane is tested against.

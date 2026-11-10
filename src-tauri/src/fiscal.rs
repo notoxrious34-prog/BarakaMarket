@@ -390,7 +390,7 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn valid_day(day: &str) -> bool {
+pub(crate) fn valid_day(day: &str) -> bool {
     day.len() == 10 && day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-'
 }
 
@@ -445,7 +445,7 @@ fn fmt_day(y: i64, m: i64, d: i64) -> String {
 }
 
 /// UTC instant bounds [start, end) covering one local Algiers day (ISO strings).
-fn day_bounds_utc(day: &str) -> Result<(String, String), String> {
+pub(crate) fn day_bounds_utc(day: &str) -> Result<(String, String), String> {
     let (y, m, d) = parse_day(day)?;
     let prev = days_from_civil(y, m, d) - 1;
     let (py, pm, pd) = civil_from_days(prev);
@@ -2186,160 +2186,9 @@ pub fn sale_for_return(conn: &Connection, key: &str) -> Result<Value, String> {
 /// loopback server runs (T12 precedent — the exe never had this lane, so the
 /// book died with "lane unreachable"). Rows mirror TS listSalesByDay
 /// (incl. avoir_total_ct); `z` mirrors /api/z/summary (COMPLETED gross).
-pub fn sales_book_day(conn: &Connection, day: &str) -> Result<Value, String> {
-    if !valid_day(day) {
-        return Err("[fiscal] day must be YYYY-MM-DD".to_string());
-    }
-    let (wstart, wend) = day_bounds_utc(day)?;
-    let mut st = conn
-        .prepare(
-            "SELECT s.id, s.invoice_number, s.ticket_number, s.created_at, s.cashier_name,
-               s.payment_method, s.total_ttc_ct, s.status, c.name AS client_name,
-               CASE WHEN EXISTS (SELECT 1 FROM returns r WHERE r.sale_id = s.id AND r.status = 'APPROVED') THEN 1 ELSE 0 END AS has_approved_return,
-               COALESCE((SELECT SUM(r2.refund_ct) FROM returns r2 WHERE r2.sale_id = s.id AND r2.status = 'APPROVED'), 0) AS avoir_total_ct,
-               (SELECT COUNT(*) FROM sale_items si WHERE si.sale_id = s.id) AS item_count
-             FROM sales s LEFT JOIN clients c ON c.id = s.client_id
-             WHERE s.created_at >= ?1 AND s.created_at < ?2
-             ORDER BY s.created_at DESC, s.id DESC",
-        )
-        .map_err(|e| e.to_string())?;
-    let qrows = st
-        .query_map([&wstart, &wend], |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, String>(0)?,
-                "invoice_number": r.get::<_, String>(1)?,
-                "ticket_number": r.get::<_, String>(2)?,
-                "created_at": r.get::<_, String>(3)?,
-                "cashier_name": r.get::<_, String>(4)?,
-                "payment_method": r.get::<_, String>(5)?,
-                "total_ttc_ct": r.get::<_, i64>(6)?,
-                "status": r.get::<_, String>(7)?,
-                "client_name": r.get::<_, Option<String>>(8)?,
-                "has_approved_return": r.get::<_, i64>(9)?,
-                "avoir_total_ct": r.get::<_, i64>(10)?,
-                "item_count": r.get::<_, i64>(11)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    let mut arr = Vec::new();
-    for r in qrows {
-        arr.push(r.map_err(|e| e.to_string())?);
-    }
-    let zrow: (i64, Option<i64>, Option<i64>, Option<i64>, Option<i64>) = conn
-        .query_row(
-            "SELECT COUNT(*),
-               SUM(CASE WHEN payment_method = 'ESPECES' THEN total_ttc_ct ELSE 0 END),
-               SUM(CASE WHEN payment_method IN ('CIB', 'DAHABIYA') THEN total_ttc_ct ELSE 0 END),
-               SUM(CASE WHEN payment_method = 'CREDIT' THEN total_ttc_ct ELSE 0 END),
-               SUM(total_ttc_ct)
-             FROM sales WHERE status = 'COMPLETED' AND created_at >= ?1 AND created_at < ?2",
-            [&wstart, &wend],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({
-        "rows": Value::Array(arr),
-        "z": {
-            "sales_count": zrow.0,
-            "total_especes_ct": zrow.1.unwrap_or(0),
-            "total_bank_ct": zrow.2.unwrap_or(0),
-            "total_credit_granted_ct": zrow.3.unwrap_or(0),
-            "total_ttc_ct": zrow.4.unwrap_or(0),
-        },
-    }))
-}
-
-/// v1.5.3 (SALES BOOK): full fiscal head of one sale for the detail view.
-/// Null when unknown (the view shows "sale not found", never a blank).
-pub fn sale_head(conn: &Connection, id: &str) -> Result<Value, String> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Ok(Value::Null);
-    }
-    let mut st = conn
-        .prepare(
-            "SELECT id, invoice_number, ticket_number, cashier_id, cashier_name,
-               client_id, client_name, total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
-               tva0_base_ct, tva0_amt_ct, tva0_ttc_ct,
-               tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
-               tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
-               payment_method, tva_enabled, timbre_enabled,
-               amount_paid_ct, amount_returned_ct, status, created_at
-             FROM sales WHERE id = ?1",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut rows = st
-        .query_map([id], |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, String>(0)?,
-                "invoice_number": r.get::<_, String>(1)?,
-                "ticket_number": r.get::<_, String>(2)?,
-                "cashier_id": r.get::<_, String>(3)?,
-                "cashier_name": r.get::<_, String>(4)?,
-                "client_id": r.get::<_, Option<i64>>(5)?,
-                "client_name": r.get::<_, Option<String>>(6)?,
-                "total_ht_ct": r.get::<_, i64>(7)?,
-                "total_tva_ct": r.get::<_, i64>(8)?,
-                "timbre_ct": r.get::<_, i64>(9)?,
-                "total_ttc_ct": r.get::<_, i64>(10)?,
-                "tva0_base_ct": r.get::<_, i64>(11)?,
-                "tva0_amt_ct": r.get::<_, i64>(12)?,
-                "tva0_ttc_ct": r.get::<_, i64>(13)?,
-                "tva9_base_ct": r.get::<_, i64>(14)?,
-                "tva9_amt_ct": r.get::<_, i64>(15)?,
-                "tva9_ttc_ct": r.get::<_, i64>(16)?,
-                "tva19_base_ct": r.get::<_, i64>(17)?,
-                "tva19_amt_ct": r.get::<_, i64>(18)?,
-                "tva19_ttc_ct": r.get::<_, i64>(19)?,
-                "payment_method": r.get::<_, String>(20)?,
-                "tva_enabled": r.get::<_, i64>(21)?,
-                "timbre_enabled": r.get::<_, i64>(22)?,
-                "amount_paid_ct": r.get::<_, i64>(23)?,
-                "amount_returned_ct": r.get::<_, i64>(24)?,
-                "status": r.get::<_, String>(25)?,
-                "created_at": r.get::<_, String>(26)?,
-            }))
-        })
-        .map_err(|e| e.to_string())?;
-    match rows.next() {
-        Some(r) => Ok(r.map_err(|e| e.to_string())?),
-        None => Ok(Value::Null),
-    }
-}
-
-/// v1.5.3 (SALES BOOK P2): governed duplicata for the installed shell —
-/// the audit row lands in the same call (actor + reason), no silent copies.
-pub fn sale_duplicata(
-    conn: &Connection,
-    id: &str,
-    by: &str,
-    reason: &str,
-) -> Result<Value, String> {
-    let id = id.trim();
-    let actor = by.trim();
-    if id.is_empty() {
-        return Err("[fiscal] sale id required".to_string());
-    }
-    if actor.is_empty() {
-        return Err("[fiscal] actor required".to_string());
-    }
-    let exists: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sales WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
-        .map_err(|e| e.to_string())?;
-    if exists == 0 {
-        return Err("[fiscal] sale not found".to_string());
-    }
-    let detail: String = reason.chars().take(140).collect();
-    conn.execute(
-        "INSERT INTO audit_log (ts, actor, action, entity, entity_id, detail)
-         VALUES (datetime('now'), ?1, 'sale.duplicata', 'sales', ?2, ?3)",
-        rusqlite::params![actor, id, detail],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "ok": true }))
-}
+/// TASK-MKT-005: sales-book domain now lives in fiscal_sales_book.rs —
+/// re-exported here so every `fiscal::…` call site is untouched.
+pub use crate::fiscal_sales_book::{sale_duplicata, sale_head, sales_book_day};
 
 /// #004 (Phase A): legal day close — recompute from the ledger, lock the
 /// day, chain the hash. Native twin of TS finalizeZReport (which additionally
