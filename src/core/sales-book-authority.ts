@@ -1,7 +1,8 @@
 /**
- * Baraka Market — Sales book authority (v1.5.2, P1+P2).
+ * Baraka Market — Sales book authority (v1.5.2, P1–P4).
  * The receipt-level bridge between POS and journal/Z: list one business day,
- * fetch a receipt head + returnable lines, record a governed duplicata.
+ * fetch a receipt head + returnable lines, record a governed duplicata,
+ * filter/aggregate/export the day (pure P3/P4 helpers) and cross-check Z.
  * Reads ride the open loopback lane (same as listReturns/listClaims);
  * the duplicata audit POST carries the loopback token.
  *
@@ -14,6 +15,8 @@ export interface SalesBookRow {
   id: string; invoice_number: string; ticket_number: string; created_at: string;
   cashier_name: string; payment_method: string; total_ttc_ct: number; status: string;
   client_name: string | null; has_approved_return: 0 | 1;
+  /** P3: approved AVOIR posted against this sale (TTC). Absent on old lanes → 0. */
+  avoir_total_ct?: number;
 }
 
 let salesBookError: string | null = null;
@@ -42,6 +45,110 @@ export async function listSalesDay(day: string): Promise<SalesBookRow[] | null> 
     salesBookError = 'lane unreachable';
     return null;
   }
+}
+
+/** P3 — client-side filters over one day's rows (pure, fully tested).
+ * The day payload stays bounded (hundreds of receipts); filtering in memory
+ * keeps the server surface minimal and the behaviour deterministic. */
+export interface SalesBookFilters {
+  /** FACT / ticket substring, digits tolerated (e.g. "42", "FACT-2026-000042"). */
+  q: string;
+  cashier: string;
+  pay: '' | 'ESPECES' | 'CIB' | 'DAHABIYA' | 'CREDIT';
+  /** '' = all, 'avoir' = has APPROVED return, 'cancelled' = CANCELLED rows. */
+  flag: '' | 'avoir' | 'cancelled';
+  /** '' = all, 'named' = registered client, 'walkin' = no client. */
+  client: '' | 'named' | 'walkin';
+}
+
+export const EMPTY_SALES_BOOK_FILTERS: SalesBookFilters = { q: '', cashier: '', pay: '', flag: '', client: '' };
+
+export function filterSalesBookRows(rows: SalesBookRow[], f: SalesBookFilters): SalesBookRow[] {
+  const q = f.q.trim().toUpperCase().replace(/\s+/g, '');
+  return rows.filter(r => {
+    if (q && !(`${r.invoice_number} ${r.ticket_number}`.toUpperCase().replace(/\s+/g, '').includes(q))) return false;
+    if (f.cashier && r.cashier_name !== f.cashier) return false;
+    if (f.pay && r.payment_method !== f.pay) return false;
+    if (f.flag === 'avoir' && r.has_approved_return !== 1) return false;
+    if (f.flag === 'cancelled' && r.status !== 'CANCELLED') return false;
+    if (f.client === 'named' && !r.client_name) return false;
+    if (f.client === 'walkin' && r.client_name) return false;
+    return true;
+  });
+}
+
+export function salesBookCashiers(rows: SalesBookRow[]): string[] {
+  return [...new Set(rows.map(r => r.cashier_name).filter(Boolean))].sort();
+}
+
+/** P4 — day health (pure): gross, AVOIR, net, cancelled, per-method split.
+ * CANCELLED rows are counted apart, never inside the gross (fiscal hygiene). */
+export interface SalesBookHealth {
+  count: number; cancelled: number;
+  gross_ct: number; avoir_ct: number; net_ct: number;
+  especes_ct: number; bank_ct: number; credit_ct: number;
+}
+
+export function computeSalesBookHealth(rows: SalesBookRow[]): SalesBookHealth {
+  const h: SalesBookHealth = { count: 0, cancelled: 0, gross_ct: 0, avoir_ct: 0, net_ct: 0, especes_ct: 0, bank_ct: 0, credit_ct: 0 };
+  for (const r of rows) {
+    if (r.status === 'CANCELLED') { h.cancelled += 1; continue; }
+    h.count += 1;
+    h.gross_ct += r.total_ttc_ct;
+    h.avoir_ct += r.avoir_total_ct ?? 0;
+    if (r.payment_method === 'ESPECES') h.especes_ct += r.total_ttc_ct;
+    else if (r.payment_method === 'CIB' || r.payment_method === 'DAHABIYA') h.bank_ct += r.total_ttc_ct;
+    else if (r.payment_method === 'CREDIT') h.credit_ct += r.total_ttc_ct;
+  }
+  h.net_ct = h.gross_ct - h.avoir_ct;
+  return h;
+}
+
+/** P4 — official Z-side day totals (same Algiers window, COMPLETED only).
+ * The health card nets against this: equal gross ⇒ the book matches accounting. */
+export interface ZDaySummary {
+  sales_count: number; total_ttc_ct: number; total_especes_ct: number;
+  total_bank_ct: number; total_credit_granted_ct: number;
+}
+
+function isZSummary(v: unknown): v is ZDaySummary {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.sales_count === 'number' && typeof o.total_ttc_ct === 'number';
+}
+
+export async function fetchZDaySummary(day: string): Promise<ZDaySummary | null> {
+  salesBookError = null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) { salesBookError = 'bad day, want YYYY-MM-DD'; return null; }
+  try {
+    const r = await fetch(`${LOOPBACK_BASE}/api/z/summary?date=${encodeURIComponent(day)}`);
+    if (!r.ok) { salesBookError = `HTTP ${r.status}`; return null; }
+    const j = (await r.json()) as unknown;
+    if (!isZSummary(j)) { salesBookError = 'bad z payload'; return null; }
+    return j;
+  } catch {
+    salesBookError = 'lane unreachable';
+    return null;
+  }
+}
+
+/** P3 — CSV export (pure): semicolon FR/AR headers + BOM, same convention
+ * as the audit-timeline exporter. One line per receipt, amounts in DZD. */
+export function buildSalesBookCsv(rows: SalesBookRow[], day: string, lang: 'ar' | 'fr'): string {
+  const dzd = (ct: number) => (ct / 100).toFixed(2).replace('.', ',');
+  const head = lang === 'ar'
+    ? 'الوصل;التذكرة;الساعة;الكاشير;الدفع;الزبون;المجموع (دج);AVOIR (دج);الحالة'
+    : 'Facture;Ticket;Heure;Caissier;Paiement;Client;Total (DZD);AVOIR (DZD);Statut';
+  const esc = (v: string | null) => {
+    const s = String(v ?? '');
+    return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = rows.map(r => [
+    esc(r.invoice_number), esc(r.ticket_number), esc(r.created_at.slice(11, 16)),
+    esc(r.cashier_name), esc(r.payment_method), esc(r.client_name ?? (lang === 'ar' ? 'عابر' : 'Passage')),
+    dzd(r.total_ttc_ct), dzd(r.avoir_total_ct ?? 0), esc(r.status),
+  ].join(';'));
+  return `﻿${head}\n${lines.join('\n')}\n`;
 }
 
 /** Full receipt detail: fiscal head (every sales column) + returnable lines

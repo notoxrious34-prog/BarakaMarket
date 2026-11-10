@@ -83,3 +83,72 @@ test('v1.5.2: listSalesByDay — approved return flips the AVOIR flag', () => {
     assert.equal(rows[0].has_approved_return, 1);
   } finally { b.close(); }
 });
+
+test('v1.5.2 P3: filterSalesBookRows — q/cashier/pay/flag/client (pure)', async () => {
+  const { filterSalesBookRows, salesBookCashiers, EMPTY_SALES_BOOK_FILTERS } =
+    await import('../core/sales-book-authority.js');
+  const R = (o: Partial<import('../core/sales-book-authority.js').SalesBookRow>) =>
+    ({
+      id: 'x', invoice_number: 'FACT-2026-000001', ticket_number: 'T-1',
+      created_at: '2026-11-10T10:00:00.000Z', cashier_name: 'Amine',
+      payment_method: 'ESPECES', total_ttc_ct: 10000, status: 'COMPLETED',
+      client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, ...o,
+    });
+  const rows = [
+    R({ id: 'a', invoice_number: 'FACT-2026-000042', payment_method: 'CIB', client_name: 'Karim', has_approved_return: 1 as const, avoir_total_ct: 5000 }),
+    R({ id: 'b', invoice_number: 'FACT-2026-000043', cashier_name: 'Mounir', status: 'CANCELLED' }),
+    R({ id: 'c', invoice_number: 'FACT-2026-000044', payment_method: 'CREDIT', client_name: 'Sami' }),
+  ];
+  const F = (o: object) => ({ ...EMPTY_SALES_BOOK_FILTERS, ...o });
+  assert.equal(filterSalesBookRows(rows, F({ q: '42' })).length, 1);
+  assert.equal(filterSalesBookRows(rows, F({ q: 'fact-2026-000043' }))[0].id, 'b', 'case-insensitive');
+  assert.deepEqual(filterSalesBookRows(rows, F({ cashier: 'Mounir' })).map(r => r.id), ['b']);
+  assert.deepEqual(filterSalesBookRows(rows, F({ pay: 'CREDIT' })).map(r => r.id), ['c']);
+  assert.deepEqual(filterSalesBookRows(rows, F({ flag: 'avoir' })).map(r => r.id), ['a']);
+  assert.deepEqual(filterSalesBookRows(rows, F({ flag: 'cancelled' })).map(r => r.id), ['b']);
+  assert.deepEqual(filterSalesBookRows(rows, F({ client: 'named' })).map(r => r.id), ['a', 'c']);
+  assert.deepEqual(filterSalesBookRows(rows, F({ client: 'walkin' })).map(r => r.id), ['b']);
+  assert.equal(filterSalesBookRows(rows, F({})) .length, 3);
+  assert.deepEqual(salesBookCashiers(rows), ['Amine', 'Mounir']);
+});
+
+test('v1.5.2 P4: computeSalesBookHealth — cancelled apart, net = gross − avoir (pure)', async () => {
+  const { computeSalesBookHealth } = await import('../core/sales-book-authority.js');
+  const R = (o: Partial<import('../core/sales-book-authority.js').SalesBookRow>) =>
+    ({
+      id: 'x', invoice_number: 'F', ticket_number: 'T',
+      created_at: '2026-11-10T10:00:00.000Z', cashier_name: 'Amine',
+      payment_method: 'ESPECES', total_ttc_ct: 0, status: 'COMPLETED',
+      client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0, ...o,
+    });
+  const h = computeSalesBookHealth([
+    R({ payment_method: 'ESPECES', total_ttc_ct: 37000, avoir_total_ct: 0 }),
+    R({ payment_method: 'CIB', total_ttc_ct: 30000, avoir_total_ct: 10000, has_approved_return: 1 as const }),
+    R({ payment_method: 'ESPECES', total_ttc_ct: 5000, status: 'CANCELLED' }),
+  ]);
+  assert.equal(h.count, 2);
+  assert.equal(h.cancelled, 1, 'cancelled never inside the gross');
+  assert.equal(h.gross_ct, 67000);
+  assert.equal(h.avoir_ct, 10000);
+  assert.equal(h.net_ct, 57000);
+  assert.equal(h.especes_ct, 37000);
+  assert.equal(h.bank_ct, 30000);
+  assert.equal(h.credit_ct, 0);
+});
+
+test('v1.5.2 P3: buildSalesBookCsv — BOM + semicolons + DZD decimals (pure)', async () => {
+  const { buildSalesBookCsv } = await import('../core/sales-book-authority.js');
+  const rows = [{
+    id: 'x', invoice_number: 'FACT-2026-000042', ticket_number: 'T-42',
+    created_at: '2026-11-10T10:05:00.000Z', cashier_name: 'Am;ine',
+    payment_method: 'ESPECES', total_ttc_ct: 37000, status: 'COMPLETED',
+    client_name: null, has_approved_return: 0 as const, avoir_total_ct: 0,
+  }];
+  const fr = buildSalesBookCsv(rows, '2026-11-10', 'fr');
+  assert.ok(fr.startsWith('﻿'), 'BOM first for Excel');
+  assert.ok(fr.includes('Facture;Ticket;Heure'), 'FR header');
+  assert.ok(fr.includes('"Am;ine"'), 'semicolon quoting');
+  assert.ok(fr.includes('370,00'), 'DZD decimals with comma');
+  const ar = buildSalesBookCsv(rows, '2026-11-10', 'ar');
+  assert.ok(ar.includes('الوصل;التذكرة') && ar.includes('عابر'), 'AR header + walk-in label');
+});

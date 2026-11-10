@@ -1,20 +1,22 @@
 /**
- * Baraka Market — Sales book (v1.5.2, P1+P2).
+ * Baraka Market — Sales book (v1.5.2, P1–P4).
  * The receipt-level bridge: one business day of FACTs, newest first —
  * search/jump by FACT, open a receipt for its lines + returned math,
- * and print a governed DUPLICATA (audit row first, watermark on paper).
+ * print a governed DUPLICATA (audit row first, watermark on paper),
+ * filter/export the day (P3) and read its health vs accounting (P4).
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  BookOpen, CalendarDays, ChevronLeft, ChevronRight, Copy, Printer,
-  Receipt, Search, Undo2, X,
+  BookOpen, CalendarDays, ChevronLeft, ChevronRight, Copy, Download, Printer,
+  Receipt, Search, SlidersHorizontal, Undo2, X,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { formatDZD, formatDZDFromCt } from '../../core/display';
 import { fiscalDayISO } from '../../core/fiscal-day';
 import {
-  getSalesBookDetail, listSalesDay, recordDuplicata,
-  type SalesBookDetail, type SalesBookRow,
+  buildSalesBookCsv, computeSalesBookHealth, EMPTY_SALES_BOOK_FILTERS, fetchZDaySummary,
+  filterSalesBookRows, getSalesBookDetail, listSalesDay, recordDuplicata, salesBookCashiers,
+  type SalesBookDetail, type SalesBookFilters, type SalesBookRow, type ZDaySummary,
 } from '../../core/sales-book-authority';
 import { lookupReturnSale } from '../../core/returns-authority';
 import { TicketThermal80mm } from '../Receipts/TicketThermal80mm';
@@ -71,13 +73,17 @@ export const SalesBookView: React.FC = () => {
   const [dupReason, setDupReason] = useState('');
   const [dupBusy, setDupBusy] = useState(false);
   const [dupSale, setDupSale] = useState<Sale | null>(null);
+  const [filters, setFilters] = useState<SalesBookFilters>(EMPTY_SALES_BOOK_FILTERS);
+  const [z, setZ] = useState<ZDaySummary | null>(null);
 
   const load = useCallback(async (d: string) => {
     setErr(null);
     setRows(null);
-    const out = await listSalesDay(d);
+    setZ(null);
+    const [out, zsum] = await Promise.all([listSalesDay(d), fetchZDaySummary(d)]);
     if (!out) { const { lastSalesBookError } = await import('../../core/sales-book-authority'); setErr(lastSalesBookError()); return; }
     setRows(out);
+    setZ(zsum);
   }, []);
   useEffect(() => { void load(day); }, [day, load]);
 
@@ -127,15 +133,24 @@ export const SalesBookView: React.FC = () => {
     setDupSale(detailToSale(detail));
   };
 
-  const summary = useMemo(() => {
-    if (!rows) return null;
-    const ok = rows.filter(r => r.status === 'COMPLETED');
-    return {
-      count: rows.length,
-      cancelled: rows.length - ok.length,
-      totalCt: ok.reduce((s, r) => s + r.total_ttc_ct, 0),
-    };
-  }, [rows]);
+  const health = useMemo(() => (rows ? computeSalesBookHealth(rows) : null), [rows]);
+  const cashiers = useMemo(() => (rows ? salesBookCashiers(rows) : []), [rows]);
+  const filtered = useMemo(() => (rows ? filterSalesBookRows(rows, filters) : null), [rows, filters]);
+  const filtersActive = useMemo(() => JSON.stringify(filters) !== JSON.stringify(EMPTY_SALES_BOOK_FILTERS), [filters]);
+  const zMatch = health !== null && z !== null
+    && health.gross_ct === z.total_ttc_ct && health.count === z.sales_count;
+
+  const doExportCsv = () => {
+    if (!filtered || filtered.length === 0) return;
+    const blob = new Blob([buildSalesBookCsv(filtered, day, isAr ? 'ar' : 'fr')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `ventes-${day}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
 
   const timeOf = (iso: string) => {
     const d = new Date(iso);
@@ -165,6 +180,7 @@ export const SalesBookView: React.FC = () => {
             { n: '01', t: isAr ? 'وصولات اليوم' : 'Tickets du jour' },
             { n: '02', t: isAr ? 'تفاصيل الوصل' : 'Détail du ticket' },
             { n: '03', t: isAr ? 'Duplicata محوكم' : 'Duplicata gouverné' },
+            { n: '04', t: isAr ? 'فلاتر + صحة + تصدير' : 'Filtres + santé + export' },
           ].map(s => (
             <span key={s.n} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#0b0f17] border border-[#2b3a4f] text-slate-300">
               <span className="font-mono text-emerald-400">{s.n}</span> {s.t}
@@ -179,12 +195,35 @@ export const SalesBookView: React.FC = () => {
           <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">01</span>
           <CalendarDays className="w-4 h-4 text-emerald-400" />
           <h3 className="text-sm font-black text-white">{isAr ? 'وصولات اليوم' : 'Tickets du jour'}</h3>
-          {summary && (
+          {health && (
             <span className="ms-auto text-[11px] font-bold text-slate-400" dir="ltr">
-              {summary.count} · {formatDZDFromCt(summary.totalCt)}{summary.cancelled > 0 ? ` (${summary.cancelled} ✕)` : ''}
+              {health.count} · {formatDZDFromCt(health.net_ct)}{health.cancelled > 0 ? ` (${health.cancelled} ✕)` : ''}
+            </span>
+          )}
+          {z && health && (
+            <span className={`px-2 py-0.5 rounded-full text-[11px] font-black ${zMatch ? 'bg-emerald-900 text-emerald-200' : 'bg-amber-900 text-amber-200'}`}
+              title={isAr ? 'مقارنة مع المحاسبة (Z)' : 'Comparaison comptable (Z)'}>
+              {zMatch ? (isAr ? '✓ يطابق المحاسبة' : '✓ Conforme compta') : (isAr ? '! يختلف عن المحاسبة' : '! Écart compta')}
             </span>
           )}
         </div>
+        {/* P4 · Day health: gross − AVOIR = net, per-method split. */}
+        {health && (health.count > 0 || health.cancelled > 0) && (
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-center">
+            {[
+              { l: isAr ? 'المجموع' : 'Brut', v: health.gross_ct, c: 'text-white' },
+              { l: 'AVOIR', v: health.avoir_ct, c: 'text-amber-300' },
+              { l: isAr ? 'الصافي' : 'Net', v: health.net_ct, c: 'text-emerald-300' },
+              { l: isAr ? 'نقدي' : 'Espèces', v: health.especes_ct, c: 'text-slate-300' },
+              { l: isAr ? 'بنكي + كريدي' : 'Banque + crédit', v: health.bank_ct + health.credit_ct, c: 'text-slate-300' },
+            ].map(k => (
+              <div key={k.l} className="bg-[#0b0f17] border border-[#2b3a4f] rounded-xl px-2 py-2">
+                <div className="text-[11px] text-slate-500 font-bold">{k.l}</div>
+                <div className={`font-mono font-black text-sm ${k.c}`} dir="ltr">{formatDZDFromCt(k.v)}</div>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={() => shiftDay(-1)} className="p-2 rounded-lg border border-[#2b3a4f] text-slate-300 hover:text-white" title={isAr ? 'اليوم السابق' : 'Jour précédent'}>
             <ChevronRight className="w-4 h-4 rtl:rotate-0" />
@@ -205,6 +244,58 @@ export const SalesBookView: React.FC = () => {
           </div>
         </div>
         {err && <p className="text-xs text-red-300 font-bold">{err}</p>}
+        {/* P3 · Filters + CSV export. */}
+        {rows && rows.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 bg-[#0b0f17] border border-[#2b3a4f] rounded-xl px-3 py-2">
+            <SlidersHorizontal className="w-4 h-4 text-slate-500" />
+            <input value={filters.q} onChange={e => setFilters({ ...filters, q: e.target.value })}
+              placeholder={isAr ? 'بحث FACT… (42)' : 'Filtrer FACT…'}
+              className="w-36 bg-[#162030] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-slate-200 placeholder:text-slate-600 outline-none focus:border-emerald-500 font-mono" dir="ltr" />
+            <select value={filters.cashier} onChange={e => setFilters({ ...filters, cashier: e.target.value })}
+              className="bg-[#162030] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-slate-200 outline-none">
+              <option value="">{isAr ? 'كل الكاشير' : 'Tous caissiers'}</option>
+              {cashiers.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <select value={filters.pay} onChange={e => setFilters({ ...filters, pay: e.target.value as SalesBookFilters['pay'] })}
+              className="bg-[#162030] border border-[#2b3a4f] rounded-lg px-2 py-1.5 text-xs text-slate-200 outline-none">
+              <option value="">{isAr ? 'كل الدفع' : 'Tout paiement'}</option>
+              {(['ESPECES', 'CIB', 'DAHABIYA', 'CREDIT'] as const).map(p => (
+                <option key={p} value={p}>{PAY_LABEL[p]?.[isAr ? 'ar' : 'fr'] ?? p}</option>
+              ))}
+            </select>
+            {[
+              { v: '' as const, t: isAr ? 'الكل' : 'Tous' },
+              { v: 'avoir' as const, t: 'AVOIR' },
+              { v: 'cancelled' as const, t: isAr ? 'ملغاة' : 'Annulées' },
+            ].map(o => (
+              <button key={o.v || 'all'} type="button" onClick={() => setFilters({ ...filters, flag: o.v })}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border ${filters.flag === o.v ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-300' : 'border-[#2b3a4f] text-slate-400 hover:text-white'}`}>
+                {o.t}
+              </button>
+            ))}
+            {[
+              { v: '' as const, t: isAr ? 'زبون: الكل' : 'Client: tous' },
+              { v: 'named' as const, t: isAr ? 'مسجل' : 'Nommé' },
+              { v: 'walkin' as const, t: isAr ? 'عابر' : 'Passage' },
+            ].map(o => (
+              <button key={o.v || 'allc'} type="button" onClick={() => setFilters({ ...filters, client: o.v })}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border ${filters.client === o.v ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-300' : 'border-[#2b3a4f] text-slate-400 hover:text-white'}`}>
+                {o.t}
+              </button>
+            ))}
+            {filtersActive && (
+              <button type="button" onClick={() => setFilters(EMPTY_SALES_BOOK_FILTERS)}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-slate-500 hover:text-white underline">
+                {isAr ? 'مسح' : 'Effacer'}
+              </button>
+            )}
+            <button type="button" onClick={doExportCsv} disabled={!filtered || filtered.length === 0}
+              className="ms-auto px-3 py-1.5 rounded-lg bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-600/30 disabled:opacity-40 text-xs font-black flex items-center gap-1.5 cursor-pointer">
+              <Download className="w-3.5 h-3.5" />
+              CSV · {filtered?.length ?? 0}
+            </button>
+          </div>
+        )}
         <div className="space-y-2">
           {rows === null && !err && <p className="text-xs text-slate-500">{isAr ? 'جارٍ التحميل…' : 'Chargement…'}</p>}
           {rows && rows.length === 0 && (
@@ -212,7 +303,15 @@ export const SalesBookView: React.FC = () => {
               {isAr ? 'لا مبيعات في هذا اليوم.' : 'Aucune vente ce jour.'}
             </p>
           )}
-          {rows?.map(r => (
+          {filtered && filtered.length === 0 && rows && rows.length > 0 && (
+            <p className="text-xs text-slate-500 border border-dashed border-[#2b3a4f] rounded-xl px-3 py-4 text-center">
+              {isAr ? 'لا نتائج بهذه الفلاتر.' : 'Aucun résultat avec ces filtres.'}{' '}
+              <button type="button" onClick={() => setFilters(EMPTY_SALES_BOOK_FILTERS)} className="underline text-emerald-400">
+                {isAr ? 'مسح الفلاتر' : 'Effacer les filtres'}
+              </button>
+            </p>
+          )}
+          {filtered?.map(r => (
             <button key={r.id} type="button" onClick={() => void openDetail(r.id)}
               className="w-full bg-[#0b0f17] border border-[#2b3a4f] hover:border-emerald-500/50 rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-start cursor-pointer">
               <span className="font-mono font-bold text-emerald-300" dir="ltr">{r.invoice_number}</span>
