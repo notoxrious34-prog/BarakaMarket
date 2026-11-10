@@ -10,11 +10,8 @@ import {
   Search,
   Barcode,
   Trash2,
-  Plus,
-  Minus,
   Percent,
   User,
-  Scale,
   Sparkles,
   ShoppingBag,
   CreditCard,
@@ -30,6 +27,10 @@ import { QuantityModal } from './QuantityModal';
 import { DiscountModal } from './DiscountModal';
 import { CatalogSearchModal } from './CatalogSearchModal';
 import { QuickExpenseModal } from './QuickExpenseModal';
+import { PosShortcutsBar } from './PosShortcutsBar';
+import { PosFiscalTotals } from './PosFiscalTotals';
+import { PosCartLine } from './PosCartLine';
+import { PosProductCard } from './PosProductCard';
 import { useAutoFocusBarcode } from './useAutoFocusBarcode';
 import { attachScannerTrap } from '../../hardware/scanner';
 import { scanBeep, errorBuzz } from '../../hardware/sound';
@@ -303,113 +304,17 @@ export const PosView: React.FC = () => {
           ))}
         </div>
 
-        {/* Product Cards Grid */}
+        {/* Product Cards Grid — TASK-MKT-004: memoized cards. */}
         <div className="flex-1 min-h-0 overflow-y-auto pe-1 pb-1">
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
-            {filteredProducts.map(product => {
-              const isPerishableSoon =
-                product.has_expiry_date &&
-                product.expiry_date &&
-                new Date(product.expiry_date) < new Date(Date.now() + 15 * 24 * 3600 * 1000);
-
-              return (
-                <div
-                  key={product.id}
-                  onClick={() => addToCart(product, 1)}
-                  className="bg-[#111722] hover:bg-[#162030] border border-[#1e293b] hover:border-emerald-500/50 rounded-xl p-2.5 flex flex-col justify-between transition-all cursor-pointer shadow-sm hover:shadow-lg hover:shadow-emerald-950/20 group relative"
-                >
-                  {/* TVA Rate Badge */}
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span
-                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
-                        product.tva_rate === 0
-                          ? 'bg-sky-950/80 text-sky-400 border border-sky-800/40'
-                          : product.tva_rate === 9
-                          ? 'bg-amber-950/80 text-amber-400 border border-amber-800/40'
-                          : 'bg-purple-950/80 text-purple-400 border border-purple-800/40'
-                      }`}
-                    >
-                      TVA {product.tva_rate}%
-                    </span>
-
-                    {product.is_scale_product && (
-                      <span className="text-[10px] bg-emerald-950/80 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/40 flex items-center gap-0.5">
-                        <Scale className="w-2.5 h-2.5" />
-                        <span>Kg</span>
-                      </span>
-                    )}
-                  </div>
-
-                  {/* Name FR & AR */}
-                  <div className="my-1">
-                    <h4 className="text-xs font-semibold text-slate-200 group-hover:text-emerald-400 transition-colors line-clamp-2">
-                      {isAr ? product.name_ar : product.name_fr}
-                    </h4>
-                    <p className="text-[10px] text-slate-400 line-clamp-1 mt-0.5">
-                      {isAr ? product.name_fr : product.name_ar}
-                    </p>
-                  </div>
-
-                  {/* Expiry Warning if near */}
-                  {isPerishableSoon && (
-                    <div className="text-[10px] font-bold uppercase tracking-wide bg-rose-600 text-white px-1.5 py-0.5 rounded shadow-sm mb-1 flex items-center gap-1">
-                      <span>{isAr ? 'قريب الانتهاء' : 'Date courte'}</span>
-                    </div>
-                  )}
-
-                  {/* Price & Stock */}
-                  <div className="mt-1 pt-1.5 border-t border-[#1e293b] flex items-center justify-between">
-                    <span className="text-sm font-bold text-emerald-400" dir="ltr">
-                      {formatDZD(product.sell_price, false)}
-                    </span>
-                    <span className="text-[10px] text-slate-400">
-                      {product.stock_qty} {product.unit === 'KG' ? 'kg' : 'u'}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
+            {filteredProducts.map(product => (
+              <PosProductCard key={product.id} product={product} isAr={isAr} onAdd={addToCart} />
+            ))}
           </div>
         </div>
 
-        {/* Keyboard Shortcuts Bottom Bar (Prompt Specification) */}
-        <div className="mt-2 pt-2 border-t border-[#1e293b] bg-[#070a0f] px-3 py-1.5 rounded-lg flex flex-wrap items-center justify-between text-[11px] text-slate-400 gap-2 flex-shrink-0">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-emerald-400 font-mono rounded border border-[#2b3a4f]">F1</kbd>
-              <span>{isAr ? 'البحث/الباركود' : 'Recherche/Code'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-violet-400 font-mono rounded border border-[#2b3a4f]">F2</kbd>
-              <span>{isAr ? 'الكمية' : 'Quantité'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-violet-400 font-mono rounded border border-[#2b3a4f]">F3</kbd>
-              <span>{isAr ? 'التخفيض' : 'Remise'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-amber-400 font-mono rounded border border-[#2b3a4f]">F4</kbd>
-              <span>{isAr ? 'تعليق الفاتورة' : 'Mettre attente'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-amber-400 font-mono rounded border border-[#2b3a4f]">F5</kbd>
-              <span>{isAr ? 'استرجاع الفاتورة' : 'Rappeler'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-sky-400 font-mono rounded border border-[#2b3a4f]">F6</kbd>
-              <span>{isAr ? 'الميزان' : 'Balance'}</span>
-            </span>
-            <span className="flex items-center gap-1">
-              <kbd className="px-1.5 py-0.5 bg-[#162030] text-rose-400 font-mono rounded border border-[#2b3a4f]">F9</kbd>
-              <span>{isAr ? 'الكريدي' : 'Crédit'}</span>
-            </span>
-          </div>
-
-          <div className="flex items-center gap-1 font-semibold text-emerald-400">
-            <kbd className="px-2 py-0.5 bg-emerald-950 text-emerald-300 font-mono rounded border border-emerald-700">Space</kbd>
-            <span>{isAr ? 'إتمام الدفع نقداً' : 'Paiement Rapide'}</span>
-          </div>
-        </div>
+        {/* Keyboard Shortcuts Bottom Bar (Prompt Specification) — TASK-MKT-004 island. */}
+        <PosShortcutsBar isAr={isAr} />
       </div>
 
       {/* RIGHT COLUMN: Active Ticket / Cart, Totals & Quick Checkout */}
@@ -452,7 +357,7 @@ export const PosView: React.FC = () => {
           )}
         </div>
 
-        {/* Cart Items List */}
+        {/* Cart Items List — TASK-MKT-004: memoized lines. */}
         <div className="flex-1 min-h-0 overflow-y-auto space-y-1.5 pe-1">
           {currentCart.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-500">
@@ -468,137 +373,20 @@ export const PosView: React.FC = () => {
             </div>
           ) : (
             currentCart.map((item, index) => (
-              <div
+              <PosCartLine
                 key={`${item.product_id}-${index}`}
-                className="bg-[#111722] border border-[#1e293b] rounded-xl p-2.5 flex items-center justify-between gap-2 shadow-sm hover:border-[#2d3f56] transition-all"
-              >
-                {/* Item Details */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-semibold text-slate-200 truncate">
-                      {isAr ? item.name_ar : item.name_fr}
-                    </span>
-                    <span
-                      className={`text-[9px] font-bold px-1 py-0.2 rounded ${
-                        item.tva_rate === 0
-                          ? 'bg-sky-950/80 text-sky-400'
-                          : item.tva_rate === 9
-                          ? 'bg-amber-950/80 text-amber-400'
-                          : 'bg-purple-950/80 text-purple-400'
-                      }`}
-                    >
-                      {item.tva_rate}%
-                    </span>
-                  </div>
-
-                  <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
-                    {/* B3: pure-LTR numeric run — no more DZD 080 1 jumble in RTL */}
-                    <span dir="ltr">
-                      {item.quantity} {item.unit === 'KG' ? 'kg' : 'x'} {formatDZD(item.unit_price_ttc, false)}
-                    </span>
-                    {item.discount_percent > 0 && (
-                      <span className="text-rose-400 font-semibold">
-                        -{item.discount_percent}%
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {/* Quantity Controls & Line Total — B3: stepper locked LTR (± never
-                    mirrors in RTL), qty is an inline numeric field: 12 bottles
-                    = type 12 + Enter, no modal round-trip. */}
-                <div className="flex items-center gap-2">
-                  <div dir="ltr" className="flex items-center bg-[#162030] rounded-lg border border-[#2b3a4f] p-0.5">
-                    <button
-                      onClick={() => updateCartItemQty(index, item.quantity - (item.unit === 'KG' ? 0.25 : 1))}
-                      className="w-6 h-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-[#233145] rounded cursor-pointer"
-                    >
-                      <Minus className="w-3 h-3" />
-                    </button>
-                    <input
-                      value={item.unit === 'KG' ? item.quantity.toFixed(2) : String(item.quantity)}
-                      inputMode="decimal"
-                      aria-label={isAr ? 'الكمية' : 'Quantité'}
-                      onChange={e => {
-                        const v = parseFloat(e.target.value.replace(',', '.'));
-                        if (Number.isNaN(v) || v < 0) return;
-                        updateCartItemQty(index, item.unit === 'KG' ? Math.round(v * 1000) / 1000 : Math.floor(v));
-                      }}
-                      className="w-10 text-center text-xs font-bold text-white bg-transparent outline-none border-b border-transparent focus:border-amber-400 [appearance:textfield]"
-                    />
-                    <button
-                      onClick={() => updateCartItemQty(index, item.quantity + (item.unit === 'KG' ? 0.25 : 1))}
-                      className="w-6 h-6 flex items-center justify-center text-slate-300 hover:text-white hover:bg-[#233145] rounded cursor-pointer"
-                    >
-                      <Plus className="w-3 h-3" />
-                    </button>
-                  </div>
-
-                  <div className="text-end min-w-[70px]">
-                    <div className="text-xs font-bold text-emerald-400">
-                      {formatDZD(item.total_line_ttc, false)}
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => removeFromCart(index)}
-                    className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
+                item={item}
+                index={index}
+                isAr={isAr}
+                onQty={updateCartItemQty}
+                onRemove={removeFromCart}
+              />
             ))
           )}
         </div>
 
-        {/* Fiscal Totals & Tax Breakdown Panel (Mandatory Algerian Fiscal Engine) */}
-        <div className="bg-[#111722] border border-[#1e293b] rounded-xl p-3 mt-2 shadow-inner">
-          <div className="space-y-1.5 text-xs text-slate-400 pb-2 border-b border-[#1e293b]">
-            <div className="flex justify-between">
-              <span>{isAr ? 'المجموع بدون رسوم (Sous-Total HT):' : 'Sous-Total HT :'}</span>
-              <span className="font-mono text-slate-200" dir="ltr">{formatDZD(cartTotals.total_ht)}</span>
-            </div>
-
-            {/* TVA breakdown by rate — zero rows hidden (B1: no +0.00 noise) */}
-            {cartTotals.tva_breakdown[9].tva_amount > 0 && (
-            <div className="flex justify-between text-[11px] text-slate-400 ps-2">
-              <span>TVA 9% ({isAr ? 'قاعدة:' : 'Base :'} <span dir="ltr">{formatDZD(cartTotals.tva_breakdown[9].base_ht, false)}</span>)</span>
-              <span className="font-mono text-amber-400" dir="ltr">+{formatDZD(cartTotals.tva_breakdown[9].tva_amount)}</span>
-            </div>
-            )}
-
-            {cartTotals.tva_breakdown[19].tva_amount > 0 && (
-            <div className="flex justify-between text-[11px] text-slate-400 ps-2">
-              <span>TVA 19% ({isAr ? 'قاعدة:' : 'Base :'} <span dir="ltr">{formatDZD(cartTotals.tva_breakdown[19].base_ht, false)}</span>)</span>
-              <span className="font-mono text-purple-400" dir="ltr">+{formatDZD(cartTotals.tva_breakdown[19].tva_amount)}</span>
-            </div>
-            )}
-
-            {cartTotals.timbre_fiscal > 0 && (
-            <div className="flex justify-between text-[11px] text-slate-400">
-              <span className="flex items-center gap-1">
-                <span>{isAr ? 'حق الطابع المالي (Timbre Espèces 1%):' : 'Droit de Timbre (Espèces 1%) :'}</span>
-              </span>
-              <span className="font-mono text-amber-300" dir="ltr">
-                +{formatDZD(cartTotals.timbre_fiscal)}
-              </span>
-            </div>
-            )}
-          </div>
-
-          {/* Grand Total TTC */}
-          <div className="pt-2 flex items-baseline justify-between">
-            <span className="text-sm font-bold text-white tracking-wide">
-              {isAr ? 'المجموع النهائي (TOTAL TTC):' : 'TOTAL À PAYER TTC :'}
-            </span>
-            <div className="text-end">
-              <span className="text-2xl font-black text-emerald-400 font-mono tracking-tight" dir="ltr">
-                {formatDZD(cartTotals.total_ttc, false)}
-              </span>
-            </div>
-          </div>
-        </div>
+        {/* Fiscal Totals & Tax Breakdown Panel (Mandatory Algerian Fiscal Engine) — TASK-MKT-004 island. */}
+        <PosFiscalTotals cartTotals={cartTotals} isAr={isAr} />
 
         {/* ADR-007-MKT: parked-sales controls live in the top navbar + F4/F5.
             The inline Attente/Rappeler pair was the 3rd duplicate — removed. */}
