@@ -1,5 +1,22 @@
 # CHANGELOG — Baraka Market
 
+## v1.8.0 (2026-11-11) — خمسة المكاتب Desk + تدقيق ما قبل النشر MKT-012
+
+**السياق**: بعد v1.7.0، أُعيد تصميم الوحدات الخمس بنظام Desk موحد
+(بطل + خطوات مرقمة + Master/Detail + شريط صحة + نوى خالصة)، ثم أُصلحت
+عيوب التمرير الحقيقية، ثم نُفذت قائمة الاعتماد البصرية (ليلي/نهاري/UHD):
+- **MKT-006 — Retours**: ثلاث جزر (`Lookup/Drafts/Claims`) + نواة `returns-health`.
+- **MKT-007 — Ventes**: ثلاث جزر (`Health/List/Detail`) + `sales-book-detail` + `useAsyncResource`.
+- **MKT-008 — Compta**: نواة `TillOutcome` (ثلاثية lane-down الصادقة).
+- **MKT-009 — Z**: `ZPrintPreview` + منتقي أيام + `z-dayrow` (ضد NaN).
+- **MKT-010 — Clôture**: `CloseSummary/CashCount` + `cash-snapshot` + `use-async`.
+- **MKT-011 — إصلاح Ventes الحقيقي**: الجذر يملك تمريره (TDD: فشل قبل، نجح بعد).
+- **ADR-045 — Retours Desk**: شبكة Master/Detail + رصيف قرار + اختيار تلقائي.
+- **MKT-012 — قائمة الاعتماد**: الجزر الفاتحة ميتة (L1–L4 + CTA الدافئ)،
+  تباين AA (خافت `#7d8da6`، تعبئات 700)، كثافة UHD حتمية (3840 → 10 أعمدة).
+- رسالة التحديث الودية (FR/AR) + إصلاح الطيّة في الرخصة.
+- **البوابات**: `tsc` + `473/473` + `cargo 42/42` (صفر warnings) + `lint` + `build` نظيفة.
+
 ## v1.7.0 (2026-11-10) — خارطة التميز Apex: عزل السلة + قفل الهندسة + عزل الساعة + تقسيم POS + أول submodule أصلي
 
 **السياق**: ترقية الحوكمة إلى `CONSTITUTION v4.0-APEX-MKT` (TASK-GOV-MKT-APEX-001)
