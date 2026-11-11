@@ -251,6 +251,52 @@ html.light .border-rose-800\/60, html.light .border-rose-800\/50, html.light .bo
   border-color: #fda4af !important;
 }
 
+/* MKT-012 (pre-publish audit 2026-11-11 — owner-approved اعتماد list).
+ * L1–L4 kill the last light islands; AA-* lift dark pairs to WCAG 2.1 AA.
+ * Guard: geometry-guard.test.ts › MKT-012 (RED before, GREEN after).
+ * Scope is STRICT: only utilities proven (by pairing grep) to carry white
+ * small text, or surfaces proven to strand dark text on dark fills. Tint
+ * utilities (/10 … /40 with colored text) and the black-text amber gradient
+ * CTA are deliberately untouched — documented residuals, not oversights. */
+html.light .bg-\[\#1e293b\] {
+  background-color: #ffffff !important;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05), 0 1px 2px -1px rgb(0 0 0 / 0.05);
+}
+html.light .bg-rose-950 {
+  background-color: rgb(255 241 242 / 0.9) !important;
+}
+html.light .bg-sky-950 {
+  background-color: rgb(240 249 255 / 0.9) !important;
+}
+html.light .text-amber-200 { color: #92400e !important; }
+/* AA-dark: slate-500 muted text fails on navy/card (3.77–4.03) → 5.33+. */
+.text-slate-500 { color: #7d8da6; }
+/* AA-fills: white small text on amber-600/emerald-600 fails (3.19/3.77) →
+   fills deepen one shade (5.02/5.48), white text + identity kept. */
+.bg-amber-600 { background-color: #b45309; }
+.bg-emerald-600 { background-color: #047857; }
+.bg-emerald-600\/90 { background-color: #047857; }
+.hover\:bg-amber-500:hover { background-color: #92400e; }
+.hover\:bg-emerald-500:hover { background-color: #065f46; }
+/* AA-gradients (white-text CTAs only): flatten the failing light ends. */
+.from-emerald-600 { --tw-gradient-from: #047857 !important; }
+.from-emerald-500 { --tw-gradient-from: #047857 !important; }
+.to-emerald-500 { --tw-gradient-to: #047857 !important; }
+.hover\:from-emerald-500:hover { --tw-gradient-from: #065f46 !important; }
+.hover\:to-emerald-400:hover { --tw-gradient-to: #065f46 !important; }
+.from-amber-600 { --tw-gradient-from: #b45309 !important; }
+/* AA-UHD (MKT-012): deterministic marker classes + plain media queries.
+ * (Tailwind v4.3.3 empirically does NOT emit min-[2560px]:* utilities in
+ * this pipeline — proven by live computed-style probe, 2026-11-11. Plain
+ * CSS is the single source of truth for ≥2560px, next to the v1.x 4K block.) */
+@media (min-width: 2560px) {
+  .pos-product-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 0.75rem; }
+  .desk-wide { max-width: 1760px; }
+}
+@media (min-width: 3840px) {
+  .pos-product-grid { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+}
+
 /* Print styling for Thermal Receipt (80mm) and Facture A4 */
 /* Lane B spooler: zero margins/headers for instant 80mm output (Gate-02 TASK 2). */
 @page {

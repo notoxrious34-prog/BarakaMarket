@@ -271,7 +271,7 @@ export const ReturnsView: React.FC = () => {
   // ADR-045: the desk root OWNS its scroll region (flex-1 min-h-0
   // overflow-y-auto, MKT-011) — the stacked desk clipped whole panels dead.
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 space-y-4 max-w-6xl mx-auto text-slate-100">
+    <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 space-y-4 max-w-6xl desk-wide mx-auto text-slate-100">
       {/* Institutional hero — the 4-gate pipeline at a glance. */}
       <div className="relative overflow-hidden bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-4 shadow-2xl">
         <div aria-hidden={true} className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />

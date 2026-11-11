@@ -306,7 +306,7 @@ export const PosView: React.FC = () => {
 
         {/* Product Cards Grid — TASK-MKT-004: memoized cards. */}
         <div className="flex-1 min-h-0 overflow-y-auto pe-1 pb-1">
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 pos-product-grid">
             {filteredProducts.map(product => (
               <PosProductCard key={product.id} product={product} isAr={isAr} onAdd={addToCart} />
             ))}

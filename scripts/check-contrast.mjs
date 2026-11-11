@@ -34,6 +34,13 @@ const pairs = [
   ['emerald-400 on navy (force-dark)', '#34d399', '#0b0f17'],
   ['amber-400 on navy (force-dark)', '#fbbf24', '#0b0f17'],
   ['slate-400 on navy (force-dark)', '#94a3b8', '#0b0f17'],
+  // MKT-012 (pre-publish audit): dark muted lifted + fills deepened.
+  ['slate-500 lifted on card (dark)', '#7d8da6', '#111722'],
+  ['slate-500 lifted on navy (dark)', '#7d8da6', '#0b0f17'],
+  ['white on amber-700 fill', '#ffffff', '#b45309'],
+  ['white on emerald-700 fill', '#ffffff', '#047857'],
+  ['amber-800 figure on pastel (L3)', '#92400e', '#fffbeb'],
+  ['rose-700 pill on pastel (L2)', '#be123c', '#fff1f2'],
 ];
 
 let fail = 0;
