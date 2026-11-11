@@ -87,9 +87,9 @@ export const LicenseManagerView: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 bg-[#0b0f17] p-6 overflow-y-auto space-y-6">
+    <div className="flex-1 bg-[#0b0f17] p-5 overflow-y-auto space-y-4">
       {/* ── 1 · Institutional hero — BarakaDEV first, never a price ── */}
-      <div className="relative overflow-hidden bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-6 md:p-8 shadow-2xl">
+      <div className="relative overflow-hidden bg-gradient-to-r from-[#111722] via-[#162030] to-[#111722] border border-[#1e293b] rounded-2xl p-5 md:p-6 shadow-2xl">
         {/* Gold hairline sheen */}
         <div aria-hidden={true} className="pointer-events-none absolute inset-x-6 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />
         {/* Watermark depth layer */}
@@ -99,12 +99,12 @@ export const LicenseManagerView: React.FC = () => {
           className="pointer-events-none absolute -end-16 -bottom-28 w-96 h-96 object-contain opacity-10 select-none"
           draggable={false}
         />
-        <div className="relative grid grid-cols-1 md:grid-cols-[auto_1fr_auto] items-center gap-6 md:gap-8">
+        <div className="relative grid grid-cols-1 md:grid-cols-[auto_1fr_auto] items-center gap-4 md:gap-6">
         {/* Floating emblem — no box, no ring: gold lives on the gradient */}
         <img
           src="/brand/baraka-emblem-512.png"
           alt="Baraka — بركة"
-          className="w-40 h-40 md:w-44 md:h-44 object-contain justify-self-center drop-shadow-[0_0_44px_rgba(212,175,55,0.6)]"
+          className="w-28 h-28 md:w-36 md:h-36 object-contain justify-self-center drop-shadow-[0_0_44px_rgba(212,175,55,0.6)]"
           draggable={false}
         />
         <div className="space-y-2.5 text-center md:text-start">
@@ -143,13 +143,13 @@ export const LicenseManagerView: React.FC = () => {
       </div>
 
       {/* ── 2 · Who stands behind the product ────────────────────────── */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
         {[
           { icon: Building2, t: isAr ? 'مطوّر جزائري' : 'Éditeur algérien', d: isAr ? 'تصميم وتطوير وصيانة محلية — فواتير بالدينار وعقود صيانة للمؤسسات.' : 'Conception locale — facturation en DZD, contrats de maintenance pour les enseignes.' },
           { icon: WifiOff, t: isAr ? 'استقلالية تامة' : 'Autonomie totale', d: isAr ? 'تفعيل وتشغيل دون إنترنت — لا اشتراكات، لا اعتماد على السحابة.' : 'Activation et exploitation sans internet — ni abonnement, ni dépendance cloud.' },
           { icon: FileCheck2, t: isAr ? 'امتثال محاسبي' : 'Conformité SCF', d: isAr ? 'يومية جبائية وسلاسل أرقام قابلة للتدقيق وفق النظام المحاسبي.' : 'Journal fiscal et chaînage vérifiable, alignés sur le SCF.' },
         ].map(c => (
-          <div key={c.t} className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 flex gap-3.5">
+          <div key={c.t} className="bg-[#111722] border border-[#1e293b] rounded-2xl p-4 flex gap-3">
             <c.icon className="w-7 h-7 shrink-0 text-amber-400" />
             <div>
               <div className="text-sm font-black text-white mb-1">{c.t}</div>
@@ -160,9 +160,9 @@ export const LicenseManagerView: React.FC = () => {
       </div>
 
       {/* ── 3 + 4 · Activation sanctuary + licence terms ─────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-4 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 items-start">
         <div className="bg-[#111722] border border-amber-500/25 rounded-2xl shadow-2xl overflow-hidden">
-          <div className="text-center px-6 pt-6 pb-4 border-b border-[#1e293b] relative">
+          <div className="text-center px-6 pt-4 pb-3 border-b border-[#1e293b] relative">
             <div aria-hidden={true} className="pointer-events-none absolute inset-x-16 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/80 to-transparent" />
             <div className="text-base md:text-lg font-black tracking-wide text-white">
               BARAKA MARKET — {isAr ? 'تفعيل النظام' : 'ACTIVATION DU SYSTÈME'}
@@ -170,7 +170,7 @@ export const LicenseManagerView: React.FC = () => {
             <div className="text-[11px] text-amber-300/90 mt-0.5">Baraka DEV</div>
           </div>
 
-          <div className="p-6 space-y-5">
+          <div className="p-5 space-y-4">
             {/* L1 + drift-lock: forged key → invalid; genuine key on another
                 machine (crypto OK, hwid drifted) → re-activate here. Legacy
                 no-hwid drift keeps the amber warning below (never a lock). */}
