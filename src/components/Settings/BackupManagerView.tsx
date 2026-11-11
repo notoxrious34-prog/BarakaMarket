@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { auditSessionEvent } from '../../core/session-authority.js';
-import { getLoopbackToken, backupCreateNative, backupListNative } from '../../core/fiscal-authority.js';
+import { getLoopbackToken, backupCreateNative, backupListNative, LOOPBACK_BASE } from '../../core/fiscal-authority.js';
 import { backupAgeLabel } from '../../core/backup-catalog.js';
 import { LocalSnapshotPanel } from '../Inventory/ProductToolModals';
 
-const API = 'http://127.0.0.1:3100';
+// P0d: single loopback source (LOOPBACK_BASE from fiscal-authority).
 
 interface BackupRow {
   id: string; filename: string; filePath: string; fileSizeBytes: number;
@@ -40,7 +40,7 @@ export const BackupManagerView: React.FC = () => {
       }
     } catch { /* fall through to loopback */ }
     try {
-      const r = await fetch(`${API}/api/backups`);
+      const r = await fetch(`${LOOPBACK_BASE}/api/backups`);
       if (!r.ok) throw new Error();
       setRows(await r.json());
       setLane('loopback');
@@ -97,7 +97,7 @@ export const BackupManagerView: React.FC = () => {
         await refresh();
         return;
       }
-      await run(`${API}/api/backups/create`, { label: 'manual-ui' }, isAr ? 'تم إنشاء النسخة' : 'Snapshot créé', 'backup.create');
+      await run(`${LOOPBACK_BASE}/api/backups/create`, { label: 'manual-ui' }, isAr ? 'تم إنشاء النسخة' : 'Snapshot créé', 'backup.create');
     } finally {
       setBusy(false);
     }
@@ -105,7 +105,7 @@ export const BackupManagerView: React.FC = () => {
 
   const download = (b: BackupRow, kind: 'db' | 'manifest') => {
     const a = document.createElement('a');
-    a.href = `${API}/api/backups/file?backupPath=${encodeURIComponent(b.filename)}&kind=${kind}`;
+    a.href = `${LOOPBACK_BASE}/api/backups/file?backupPath=${encodeURIComponent(b.filename)}&kind=${kind}`;
     a.download = kind === 'manifest' ? `${b.filename}.manifest.json` : b.filename;
     document.body.appendChild(a);
     a.click();
@@ -181,7 +181,7 @@ export const BackupManagerView: React.FC = () => {
             <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5">
               {lane === 'loopback' ? (
                 <>
-              <button disabled={busy} className="text-emerald-300 hover:text-emerald-200 cursor-pointer disabled:opacity-40" onClick={() => void run(`${API}/api/backups/verify`, { backupPath: b.filePath }, isAr ? 'النسخة سليمة' : 'Snapshot vérifié')}>
+              <button disabled={busy} className="text-emerald-300 hover:text-emerald-200 cursor-pointer disabled:opacity-40" onClick={() => void run(`${LOOPBACK_BASE}/api/backups/verify`, { backupPath: b.filePath }, isAr ? 'النسخة سليمة' : 'Snapshot vérifié')}>
                 {isAr ? 'تحقق' : 'Vérifier'}
               </button>
               <button disabled={busy} className="text-sky-300 hover:text-sky-200 cursor-pointer disabled:opacity-40" onClick={() => download(b, 'db')}>
@@ -190,7 +190,7 @@ export const BackupManagerView: React.FC = () => {
               <button disabled={busy} className="text-slate-400 hover:text-slate-200 cursor-pointer disabled:opacity-40" onClick={() => download(b, 'manifest')}>
                 manifest
               </button>
-              <button disabled={busy} className="text-amber-300 hover:text-amber-200 cursor-pointer disabled:opacity-40" onClick={() => { if (window.confirm(isAr ? `استعادة آمنة مع حجر صحي؟\n${b.filename}` : `Restauration avec quarantaine ?\n${b.filename}`)) void run(`${API}/api/backups/restore`, { backupPath: b.filePath }, isAr ? 'تمت الاستعادة' : 'Restauré', 'backup.restore'); }}>
+              <button disabled={busy} className="text-amber-300 hover:text-amber-200 cursor-pointer disabled:opacity-40" onClick={() => { if (window.confirm(isAr ? `استعادة آمنة مع حجر صحي؟\n${b.filename}` : `Restauration avec quarantaine ?\n${b.filename}`)) void run(`${LOOPBACK_BASE}/api/backups/restore`, { backupPath: b.filePath }, isAr ? 'تمت الاستعادة' : 'Restauré', 'backup.restore'); }}>
                 {isAr ? 'استعادة' : 'Restaurer'}
               </button>
                 </>

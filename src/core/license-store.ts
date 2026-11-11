@@ -5,6 +5,7 @@
  * @module core/license-store
  */
 import type { LicenseStatus } from './licensing';
+import { LOOPBACK_BASE } from './fiscal-authority';
 
 export interface StoredLicense {
   status: LicenseStatus;
@@ -80,7 +81,7 @@ export function saveStoredLicense(l: StoredLicense): void {
   try {
     const payload = JSON.stringify(l);
     if (payload.length > 512) return; // server meta cap: skip mirror, local copy stays
-    void fetch('http://127.0.0.1:3100/api/meta/license_state', {
+    void fetch(`${LOOPBACK_BASE}/api/meta/license_state`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ value: payload }),
@@ -95,7 +96,7 @@ export function saveStoredLicense(l: StoredLicense): void {
  */
 export async function restoreLicenseFromSqlite(currentHwid: string): Promise<StoredLicense | null> {
   try {
-    const res = await fetch('http://127.0.0.1:3100/api/meta/license_state', {
+    const res = await fetch(`${LOOPBACK_BASE}/api/meta/license_state`, {
       signal: AbortSignal.timeout(2000),
     });
     if (!res.ok) return null;

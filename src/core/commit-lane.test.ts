@@ -135,13 +135,24 @@ describe('commit lane (T4b)', () => {
     }
   });
 
-  it('#003: fetchDailyZ is native-only (browser lane returns null, no fetch)', async () => {
+  it('#003/P0b: fetchDailyZ hydrates from the loopback summary outside Tauri (was: null)', async () => {
+    // Supersedes the native-only contract: AUDIT-2026-11-11 HIGH (fake zeros).
     const realFetch = globalThis.fetch;
-    let called = false;
-    globalThis.fetch = (async () => { called = true; throw new Error('must not fetch'); }) as typeof fetch;
+    let seenUrl = '';
+    globalThis.fetch = (async (url: unknown) => {
+      seenUrl = String(url);
+      return new Response(JSON.stringify({
+        date: '2026-11-01', sales_count: 3, total_ht_ct: 9000, total_tva_ct: 0,
+        total_timbre_ct: 0, total_ttc_ct: 9000, total_especes_ct: 9000,
+        total_bank_ct: 0, total_credit_granted_ct: 0,
+      }), { status: 200 });
+    }) as typeof fetch;
     try {
-      assert.equal(await fetchDailyZ('2026-11-01'), null);
-      assert.equal(called, false);
+      const z = await fetchDailyZ('2026-11-01');
+      assert.ok(z, 'browser lane must hydrate from the lane, not null');
+      assert.equal(z!.sales_count, 3);
+      assert.equal(z!.total_ttc_ct, 9000);
+      assert.ok(seenUrl.endsWith('/api/z/summary?date=2026-11-01'), 'must hit the summary endpoint');
     } finally {
       globalThis.fetch = realFetch;
     }

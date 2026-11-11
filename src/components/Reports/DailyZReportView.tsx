@@ -3,7 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
-import { commitZClose, fetchDailyZ, zListNative } from '../../core/fiscal-authority';
+import { commitZClose, fetchDailyZ, zListNative, fetchLossesWindow, LOOPBACK_BASE } from '../../core/fiscal-authority';
 import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
 import { fiscalDayISO, fiscalDayBoundsUTC } from '../../core/fiscal-day';
 import { listReturns } from '../../core/returns-authority';
@@ -50,6 +50,9 @@ export const DailyZReportView: React.FC = () => {
   } | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeNote, setCloseNote] = useState('');
+  // P0b: lane-verified count — distinguishes "no sales" from "not loaded".
+  // null = lane unreachable here (honest unknown), never asserted as zero.
+  const [laneCount, setLaneCount] = useState<number | null>(null);
 
   // #004: probe the legal day-lock on mount. v1.4.9 (#PROD-LOCAL): the native
   // z_list is the registry in the installed app (reprint + chain after
@@ -80,23 +83,28 @@ export const DailyZReportView: React.FC = () => {
       return true;
     }).catch(() => false).then(nativeDone => {
       if (!alive || nativeDone) { return; }
-      fetch('http://127.0.0.1:3100/api/z/latest-hash')
+      // P0d: loopback parity lives in zListNative — no raw view-level fetch.
+      fetch(`${LOOPBACK_BASE}/api/z/latest-hash`)
       .then(r => (r.ok ? r.json() : null))
       .then((j: { prev_hash?: string } | null) => {
         if (alive && j?.prev_hash) setPrevHash(j.prev_hash);
       })
       .catch(() => {});
-      fetch('http://127.0.0.1:3100/api/z/list')
-      .then(r => (r.ok ? r.json() : null))
-      .then((rows: Array<Record<string, unknown>> | null) => {
-        if (!alive || !Array.isArray(rows)) return;
-        const day = rows.find(r => r.day === zReport.date && r.close_kind === 'DAY');
+      zListNative().then(z => {
+        if (!alive || !z) return;
+        if (z.prev_hash) setPrevHash(z.prev_hash);
+        const day = z.rows.find(r => r.day === zReport.date && r.close_kind === 'DAY');
         if (day && typeof day.report_number === 'string') applyStoredDay(day);
-      })
-      .catch(() => {});
+      }).catch(() => {});
     });
     fetchDailyZ(zReport.date)
-      .then(z => { if (alive && z?.closed) setDayLocked(true); })
+      .then(z => {
+        if (!alive) return;
+        if (z?.closed) setDayLocked(true);
+        // P0b: lane-verified count (null when the lane is down — unknown).
+        if (z && typeof z.sales_count === 'number') setLaneCount(z.sales_count);
+        else setLaneCount(null);
+      })
       .catch(() => {});
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -204,10 +212,10 @@ export const DailyZReportView: React.FC = () => {
         }
       } catch { /* memo fetch failure surfaces as a ledger mismatch, never a fake zero */ }
       try {
+        // P0d: lane-owned scrappage window (loopback-only by design).
         const { start, end } = fiscalDayBoundsUTC(zReport.date);
-        const lr = await fetch(`http://127.0.0.1:3100/api/losses?from=${encodeURIComponent(start)}&to=${encodeURIComponent(end)}&limit=500`);
-        const rows = lr.ok ? (await lr.json() as Array<{ created_at?: string; total_loss_ct?: number }>) : [];
-        for (const row of Array.isArray(rows) ? rows : []) {
+        const rows = await fetchLossesWindow(start, end);
+        for (const row of rows) {
           if (typeof row.created_at === 'string' && row.created_at >= start && row.created_at < end) {
             lossesCount += 1;
             lossesTotalCt += Number(row.total_loss_ct ?? 0);
@@ -254,6 +262,14 @@ export const DailyZReportView: React.FC = () => {
                 ? 'مطابق لمعايير المراقبة الجبائية للمديرية العامة للضرائب (DGI)'
                 : 'Conforme aux normes de contrôle fiscal DGI et traçabilité'}
             </p>
+            {/* P0b: lane-verified vs memory — never assert zeros as truth. */}
+            {laneCount !== null && laneCount !== zReport.sales_count && (
+              <p className="text-[11px] text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1 mt-1.5">
+                {isAr
+                  ? `تنبيه: الذاكرة المحلية تعرض ${zReport.sales_count} بينما الدفتر يؤكد ${laneCount} — الأرقام المعروضة غير مؤكدة بعد`
+                  : `Alerte : mémoire locale ${zReport.sales_count}, registre ${laneCount} — chiffres non confirmés`}
+              </p>
+            )}
           </div>
 
           <div className="flex items-center gap-2">

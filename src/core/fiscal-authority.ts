@@ -261,7 +261,26 @@ export async function backupListNative(): Promise<Array<Record<string, unknown>>
 /** v1.4.9 (#PROD-LOCAL): Z registry (rows + chain head), native-first. */
 export async function zListNative(): Promise<{ rows: Array<Record<string, unknown>>; prev_hash: string } | null> {
   const r = await invokeLane<{ rows?: Array<Record<string, unknown>>; prev_hash?: string }>('z_list', {});
-  return r && Array.isArray(r.rows) ? { rows: r.rows, prev_hash: typeof r.prev_hash === 'string' ? r.prev_hash : '' } : null;
+  if (r && Array.isArray(r.rows)) return { rows: r.rows, prev_hash: typeof r.prev_hash === 'string' ? r.prev_hash : '' };
+  // P0d: loopback parity (was: raw view-level fetch). prev_hash arrives via
+  // the dedicated latest-hash endpoint (kept separate, single-purpose).
+  const rows = await cashLoopback<Array<Record<string, unknown>>>('/api/z/list');
+  if (Array.isArray(rows)) return { rows, prev_hash: '' };
+  return null;
+}
+
+/** P0d: scrappage window for the Z memo — lane-owned, never view-fetched.
+ * Loopback-only by design: inside the shell the Rust lane recomputes the
+ * memo from its own ledger (caller figures are not trusted there); only the
+ * loopback POST carries caller figures, so only it needs this fetch. The
+ * installed app (no :3100) yields [] — identical to today's catch path. */
+export async function fetchLossesWindow(
+  start: string, end: string, limit = 500,
+): Promise<Array<{ created_at?: string; total_loss_ct?: number }>> {
+  const lb = await cashLoopback<Array<{ created_at?: string; total_loss_ct?: number }>>(
+    `/api/losses?from=${encodeURIComponent(start)}&to=${encodeURIComponent(end)}&limit=${limit}`,
+  );
+  return Array.isArray(lb) ? lb : [];
 }
 
 /** Last native/loopback refusal reason (set whenever a lane answers null). Never throws. */
@@ -529,12 +548,19 @@ export async function cashCloseNative(
 
 /**
  * #003 (Phase A): native-first day summary for the Z lane (read-only).
- * Browser lane returns null — local sales state owns the preview there.
+ * P0b (AUDIT-2026-11-11 HIGH): loopback fallback OUTSIDE Tauri — the browser
+ * lane hydrates from the lane too, never from context-memory zeros alone.
+ * Down lane → null (honest not-loaded), never a fake zero row.
  * #004 adds `closed`: true when a legal DAY close freezes the day.
  */
 export async function fetchDailyZ(
   day: string,
-): Promise<{ day: string; sales_count: number; total_ttc_ct: number; voids_count: number; closed: boolean } | null> {
+): Promise<{
+  day: string; sales_count: number; total_ttc_ct: number; voids_count: number;
+  closed: boolean; total_ht_ct?: number; total_tva_ct?: number;
+  total_timbre_ct?: number; total_especes_ct?: number; total_bank_ct?: number;
+  total_credit_granted_ct?: number;
+} | null> {
   const native = await invokeLane<{ day?: string; sales_count?: number; total_ttc_ct?: number; voids_count?: number; closed?: boolean }>(
     'daily_z', { day },
   );
@@ -543,6 +569,21 @@ export async function fetchDailyZ(
     && typeof native.total_ttc_ct === 'number' && typeof native.voids_count === 'number'
   ) {
     return { day, sales_count: native.sales_count, total_ttc_ct: native.total_ttc_ct, voids_count: native.voids_count, closed: native.closed === true };
+  }
+  // P0b: browser lane — same ledger, same shape (closed unknown here).
+  const lb = await cashLoopback<{
+    date?: string; sales_count?: number; total_ttc_ct?: number;
+    total_ht_ct?: number; total_tva_ct?: number; total_timbre_ct?: number;
+    total_especes_ct?: number; total_bank_ct?: number; total_credit_granted_ct?: number;
+  }>(`/api/z/summary?date=${encodeURIComponent(day)}`);
+  if (lb && lb.date === day && typeof lb.sales_count === 'number' && typeof lb.total_ttc_ct === 'number') {
+    return {
+      day, sales_count: lb.sales_count, total_ttc_ct: lb.total_ttc_ct,
+      voids_count: 0, closed: false, total_ht_ct: lb.total_ht_ct,
+      total_tva_ct: lb.total_tva_ct, total_timbre_ct: lb.total_timbre_ct,
+      total_especes_ct: lb.total_especes_ct, total_bank_ct: lb.total_bank_ct,
+      total_credit_granted_ct: lb.total_credit_granted_ct,
+    };
   }
   return null;
 }

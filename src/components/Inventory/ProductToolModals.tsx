@@ -9,9 +9,9 @@ import { generateEan13Svg } from '../../core/barcode-svg.js';
 import { REF_TO_PRODUCT_CATEGORY } from '../../core/reference-search.js';
 import { initialCategories } from '../../data/seedData';
 import { upsertProductsNative } from '../../core/product-authority';
-import { getLoopbackToken, recordLossNative } from '../../core/fiscal-authority.js';
+import { getLoopbackToken, recordLossNative, LOOPBACK_BASE } from '../../core/fiscal-authority.js';
 
-const LOOPBACK = 'http://127.0.0.1:3100';
+// P0d: single loopback source (was: hardcoded literal).
 
 const card = 'bg-[#101724] border border-[#1e293b] rounded-2xl p-4 w-full max-w-2xl max-h-[85vh] overflow-y-auto';
 const input = 'w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white';
@@ -249,7 +249,7 @@ export const LossModal: React.FC<{
     const token = await getLoopbackToken().catch(() => null);
     if (token) {
       try {
-        const r = await fetch(`${LOOPBACK}/api/losses`, {
+        const r = await fetch(`${LOOPBACK_BASE}/api/losses`, {
           method: 'POST',
           headers: { 'content-type': 'application/json', 'x-baraka-loopback': token },
           body: JSON.stringify({

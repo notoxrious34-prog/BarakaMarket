@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { initialCategories } from '../../data/seedData';
 import rawCatalog from '../../data/algerian-catalog.json';
+import { LOOPBACK_BASE } from '../../core/fiscal-authority';
 import { searchCatalog, REF_TO_PRODUCT_CATEGORY, ProductTemplate } from '../../core/reference-search.js';
 import { CsvImportModal, ShelfLabelsDialog, LossModal } from './ProductToolModals';
 import { upsertProductsNative, deleteProductNative } from '../../core/product-authority';
@@ -108,7 +109,7 @@ export const ProductsStockView: React.FC = () => {
     const t = setTimeout(() => {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), 1200);
-      fetch(`http://127.0.0.1:3100/api/reference/templates?q=${encodeURIComponent(nameFr.trim())}&limit=8`, { signal: ctrl.signal })
+      fetch(`${LOOPBACK_BASE}/api/reference/templates?q=${encodeURIComponent(nameFr.trim())}&limit=8`, { signal: ctrl.signal })
         .then(r => (r.ok ? r.json() : []))
         .then((rows: TemplateHit[]) => {
           clearTimeout(to);

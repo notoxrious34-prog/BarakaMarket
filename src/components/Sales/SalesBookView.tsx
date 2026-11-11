@@ -141,13 +141,9 @@ export const SalesBookView: React.FC = () => {
     setDupBusy(false);
     if (!ok) {
       const { lastSalesBookError } = await import('../../core/sales-book-authority');
-      const raw = lastSalesBookError() ?? '';
-      // Zero-Trust stays shut: map the transport refusal to a human sentence.
-      setDetailErr(
-        /401|token/i.test(raw)
-          ? (isAr ? 'تعذّر تسجيل الطبع: هذه الجلسة بلا تصريح كتابة — الطبع المحوكم في نسخة الصندوق المثبتة.' : 'Enregistrement impossible : session sans droit d’écriture — duplicata réservé à la caisse installée.')
-          : raw || (isAr ? 'تعذّر تسجيل الطبع.' : 'Enregistrement impossible.'),
-      );
+      // P0: unified lane-error translator (Zero-Trust stays shut).
+      const { friendlyLaneError } = await import('../../core/lane-error');
+      setDetailErr(friendlyLaneError(lastSalesBookError(), isAr));
       return;
     }
     setDupSale(detailToSale(detail));

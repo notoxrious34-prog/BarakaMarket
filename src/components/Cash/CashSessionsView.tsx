@@ -131,9 +131,10 @@ export const CashSessionsView: React.FC = () => {
       }
       await refresh();
     } catch (e) {
-      // No native lane and no loopback: dev preview without server, or a
-      // shell older than v1.4.6. Honest, in the user's language.
-      setMsg(`${isAr ? 'خطأ: ' : 'Erreur: '}${(e as Error).message}`);
+      // No native lane and no loopback: dev preview without server, or
+      // a shell older than v1.4.6. Honest, in the user's language (P0 unified).
+      const { friendlyLaneError } = await import('../../core/lane-error');
+      setMsg(friendlyLaneError((e as Error).message || 'CASH_LANE_DOWN', isAr));
     }
   };
 
