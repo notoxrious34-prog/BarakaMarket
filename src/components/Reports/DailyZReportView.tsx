@@ -5,13 +5,13 @@ import { formatDZD } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
 import { commitZClose, fetchDailyZ, zListNative, fetchLossesWindow, LOOPBACK_BASE } from '../../core/fiscal-authority';
 import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
+import { mapStoredDayRow } from '../../core/z-dayrow';
+import { ZPrintPreview } from './ZPrintPreview';
 import { fiscalDayISO, fiscalDayBoundsUTC } from '../../core/fiscal-day';
 import { listReturns } from '../../core/returns-authority';
-import { APP_VERSION } from '../../core/version';
 import {
   FileText,
   Printer,
-  Calendar,
   DollarSign,
   CreditCard,
   BookOpen,
@@ -48,36 +48,37 @@ export const DailyZReportView: React.FC = () => {
     esp: number; bank: number; cred: number; coll: number;
     first: string; last: string;
   } | null>(null);
+  // MKT-009 (MED): all stored DAY rows for day navigation (reprint).
+  const [dayRows, setDayRows] = useState<Record<string, unknown>[]>([]);
+  // MKT-009: viewed day — null = today (live). A stored day = locked reprint.
+  const [viewDay, setViewDay] = useState<string | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeNote, setCloseNote] = useState('');
   // P0b: lane-verified count — distinguishes "no sales" from "not loaded".
   // null = lane unreachable here (honest unknown), never asserted as zero.
   const [laneCount, setLaneCount] = useState<number | null>(null);
 
+  // #004/MKT-009: apply a stored DAY row as a locked reprint (component-level
+  // so the day navigator reuses the exact mount path — one mapping, no drift).
+  const applyStoredDay = (day: Record<string, unknown>) => {
+    setClosedRow({ report_number: String(day.report_number ?? ''), closing_time: String(day.closing_time ?? ''), hash: String(day.hash ?? ''), prev_hash: String(day.prev_hash ?? '') });
+    setDayRow(mapStoredDayRow(day));
+    setClosure({ report_number: String(day.report_number ?? ''), hash: String(day.hash ?? '') });
+    setPrevHash(String(day.prev_hash ?? ''));
+    setDayLocked(true);
+    setCloseNote(isAr ? 'اليوم مقفل قانونياً — إعادة طباعة من السجل' : 'Jour verrouillé — réimpression depuis le registre');
+  };
+
   // #004: probe the legal day-lock on mount. v1.4.9 (#PROD-LOCAL): the native
   // z_list is the registry in the installed app (reprint + chain after
   // restart); the :3100 fetches stay as the browser-dev fallback.
   useEffect(() => {
     let alive = true;
-    const applyStoredDay = (day: Record<string, unknown>) => {
-      setClosedRow({ report_number: String(day.report_number ?? ''), closing_time: String(day.closing_time ?? ''), hash: String(day.hash ?? ''), prev_hash: String(day.prev_hash ?? '') });
-      setDayRow({
-        salesCount: Number(day.total_sales_count), ht: Number(day.total_ht_ct), b0: Number(day.tva0_base_ct),
-        b9: Number(day.tva9_base_ct), a9: Number(day.tva9_amt_ct), b19: Number(day.tva19_base_ct),
-        a19: Number(day.tva19_amt_ct), tva: Number(day.total_tva_ct), timbre: Number(day.total_timbre_ct),
-        ttc: Number(day.total_ttc_ct), esp: Number(day.especes_gross_ct),
-        bank: Number(day.cib_total_ct) + Number(day.dahabiya_total_ct),
-        cred: Number(day.credit_granted_ct), coll: Number(day.credit_collected_ct),
-        first: String(day.first_invoice_number ?? ''), last: String(day.last_invoice_number ?? ''),
-      });
-      setClosure({ report_number: String(day.report_number ?? ''), hash: String(day.hash ?? '') });
-      setPrevHash(String(day.prev_hash ?? ''));
-      setDayLocked(true);
-      setCloseNote(isAr ? 'اليوم مقفل قانونياً — إعادة طباعة من السجل' : 'Jour verrouillé — réimpression depuis le registre');
-    };
     zListNative().then(z => {
       if (!alive || !z) return false;
       if (z.prev_hash) setPrevHash(z.prev_hash);
+      // MKT-009: keep every stored DAY row for the day navigator.
+      setDayRows(z.rows.filter(r => r.close_kind === 'DAY' && typeof r.report_number === 'string'));
       const day = z.rows.find(r => r.day === zReport.date && r.close_kind === 'DAY');
       if (day && typeof day.report_number === 'string') applyStoredDay(day);
       return true;
@@ -93,6 +94,8 @@ export const DailyZReportView: React.FC = () => {
       zListNative().then(z => {
         if (!alive || !z) return;
         if (z.prev_hash) setPrevHash(z.prev_hash);
+        // MKT-009: keep every stored DAY row for the day navigator.
+        setDayRows(z.rows.filter(r => r.close_kind === 'DAY' && typeof r.report_number === 'string'));
         const day = z.rows.find(r => r.day === zReport.date && r.close_kind === 'DAY');
         if (day && typeof day.report_number === 'string') applyStoredDay(day);
       }).catch(() => {});
@@ -170,13 +173,33 @@ export const DailyZReportView: React.FC = () => {
 
   // Z2/Z6-fix: ONE display rule — closed shows the stored server hash,
   // open shows a provisional preview over the DISPLAYED number.
+  // MKT-009: the viewed day drives the chain (stored totals when reprinting).
+  const viewDate = viewDay ?? zReport.date;
   const chainMeta = previewChainHash({
     closureHash: closure?.hash ?? null,
-    prevHash, reportNumber: tvReportNo, date: zReport.date,
-    totalTtcCt: ct.ttc, totalTimbreCt: ct.timbre,
+    prevHash, reportNumber: tvReportNo, date: viewDate,
+    totalTtcCt: dayRow?.ttc ?? ct.ttc, totalTimbreCt: dayRow?.timbre ?? ct.timbre,
   });
   const chainHash = chainMeta.hash;
-  const shortHash = (h: string) => `${h.slice(0, 10)}…${h.slice(-6)}`;
+
+  /** MKT-009 (MED): switch to a stored day — locked reprint, close disabled. */
+  const selectDay = (day: string): void => {
+    if (day === zReport.date) { backToToday(); return; }
+    const row = dayRows.find(r => String(r.day) === day);
+    if (!row) return;
+    setViewDay(day);
+    applyStoredDay(row);
+  };
+
+  /** MKT-009: back to today — live, unless today itself is legally locked. */
+  const backToToday = (): void => {
+    setViewDay(null);
+    const today = dayRows.find(r => String(r.day) === zReport.date);
+    if (today) { applyStoredDay(today); return; }
+    setDayRow(null); setClosedRow(null); setClosure(null);
+    setDayLocked(false);
+    setCloseNote('');
+  };
 
   const handlePrintZ = () => {
     window.print();
@@ -273,6 +296,18 @@ export const DailyZReportView: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2">
+          {/* MKT-009 (MED): day navigator — stored days reprint locked. */}
+          <select
+            value={viewDate}
+            onChange={e => selectDay(e.target.value)}
+            className="px-2 py-2 bg-[#111722] border border-[#2b3a4f] text-slate-200 rounded-xl text-[11px] font-mono cursor-pointer"
+            title={isAr ? 'اختر يوماً لإعادة طباعته من السجل' : 'Choisir un jour à réimprimer'}
+          >
+            <option value={zReport.date}>{isAr ? 'اليوم' : "Aujourd'hui"} · {zReport.date}</option>
+            {dayRows.filter(r => String(r.day) !== zReport.date).map(r => String(r.day)).map(d => (
+              <option key={d} value={d}>{d}</option>
+            ))}
+          </select>
           <div className="flex rounded-lg overflow-hidden border border-[#2b3a4f] text-[11px]">
             {(['80mm', 'A4'] as const).map(f => (
               <button key={f} onClick={() => setFormat(f)} className={`px-2.5 py-1.5 cursor-pointer ${format === f ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400'}`}>{f}</button>
@@ -512,154 +547,13 @@ export const DailyZReportView: React.FC = () => {
         </div>
       </div>
 
-      {/* Right: print preview — 80mm ESC/POS ticket or A4 audit sheet */}
-      <div className={`w-full ${format === 'A4' ? 'lg:flex-1' : 'lg:w-80'} flex flex-col items-center`}>
-        <span className="text-xs font-semibold text-slate-400 mb-2">
-          {format === 'A4'
-            ? (isAr ? 'ورقة التدقيق A4' : 'Feuille d\'audit A4')
-            : (isAr ? 'معاينة وصل الإغلاق (Ticket Z 80mm)' : 'Ticket Z ESC/POS 80mm')}
-        </span>
-
-        {format === 'A4' ? (
-        <div
-          id="printable-facture-a4"
-          dir="ltr"
-          className="w-full max-w-[640px] bg-white text-black p-8 font-mono text-xs leading-relaxed shadow-2xl border border-slate-300 select-text text-start"
-          style={{ fontFamily: "'Courier New', Courier, monospace" }}
-        >
-          <div className="text-center border-b-2 border-black pb-3">
-            <div className="font-bold text-lg uppercase">{storeProfile.store_name}</div>
-            <div className="text-xs">{storeProfile.company_owner} — {storeProfile.address}</div>
-            <div className="text-[11px]">RC: {storeProfile.rc_number} | NIF: {storeProfile.nif_number} | NIS: {storeProfile.nis_number} | AI: {storeProfile.ai_number}</div>
-            <div className="font-bold mt-2">RAPPORT Z DE CLÔTURE — {tvReportNo}{closure && ' (FINALISÉ)'}</div>
-            {!closure && (
-              <div className="text-[11px] font-bold">— PROVISOIRE / غير نهائي —</div>
-            )}
-            <div className="text-[11px]">Date: {zReport.date} — Clôture: {tvClosedAt} — Ventes: {tv.salesCount}</div>
-            <div className="text-[11px]">Factures: {tv.first} → {tv.last}</div>
-            </div>
-            <table className="w-full my-3 text-[11px]">
-              <tbody>
-                <tr className="border-b border-black"><td>Total HT</td><td className="text-end">{(tv.ht / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>TVA 0% — base</td><td className="text-end">{(tv.b0 / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>TVA 9% — base / montant</td><td className="text-end">{(tv.b9 / 100).toFixed(2)} / {(tv.a9 / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>TVA 19% — base / montant</td><td className="text-end">{(tv.b19 / 100).toFixed(2)} / {(tv.a19 / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>Total TVA</td><td className="text-end">{(tv.tva / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>Timbre fiscal (Art. 136)</td><td className="text-end">{(tv.timbre / 100).toFixed(2)} DZD</td></tr>
-                <tr className="font-bold"><td>TOTAL TTC</td><td className="text-end">{(tv.ttc / 100).toFixed(2)} DZD</td></tr>
-              </tbody>
-            </table>
-            <table className="w-full my-3 text-[11px]">
-              <tbody>
-                <tr className="border-b border-black"><td>Espèces (timbre inclus)</td><td className="text-end">{(tv.esp / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>CIB / Dahabiya</td><td className="text-end">{(tv.bank / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>Crédit accordé</td><td className="text-end">{(tv.cred / 100).toFixed(2)} DZD</td></tr>
-                <tr className="border-b border-black"><td>Crédit recouvré</td><td className="text-end">{(tv.coll / 100).toFixed(2)} DZD</td></tr>
-              </tbody>
-            </table>
-          <div className="text-[10px] break-all border-t border-black pt-2">
-            <div>prev_hash: {prevHash}</div>
-            <div className="font-bold">hash: {chainHash}</div>
-            {closeNote && <div>{closeNote}</div>}
-          </div>
-          <div className="grid grid-cols-2 gap-8 mt-8 text-[11px]">
-            <div className="border-t border-black pt-1 text-center">Signature caissier</div>
-            <div className="border-t border-black pt-1 text-center">Signature gérant + cachet</div>
-          </div>
-        </div>
-        ) : (
-        <div
-          id="printable-receipt"
-          dir="ltr"
-          className="w-full max-w-[300px] bg-white text-black p-4 font-mono text-[11px] leading-tight shadow-2xl border border-slate-300 select-text text-start"
-          style={{ fontFamily: "'Courier New', Courier, monospace" }}
-        >
-          <div className="text-center space-y-0.5 border-b border-black pb-2">
-            <div className="font-bold text-sm tracking-wider uppercase">{storeProfile.store_name}</div>
-            <div className="font-semibold text-xs">{storeProfile.company_owner}</div>
-            <div className="text-[10px]">{storeProfile.address}</div>
-            <div className="text-[9.5px]">RC: {storeProfile.rc_number} | NIF: {storeProfile.nif_number}</div>
-            <div className="text-[9.5px]">NIS: {storeProfile.nis_number} | AI: {storeProfile.ai_number}</div>
-          </div>
-
-          <div className="py-2 border-b border-black text-center">
-            <div className="font-bold text-sm uppercase">*** RAPPORT Z DE CAISSE ***</div>
-            <div className="text-[10px]">CLÔTURE JOURNALIÈRE FISCALE</div>
-            {!closure && (
-              <div className="text-[10px] font-bold">— PROVISOIRE / غير نهائي —</div>
-            )}
-            <div className="text-[10px] pt-1">
-              {tvReportNo}{closure && ' — FINALISÉ'}
-            </div>
-            <div className="text-[10px]">
-              Date: {zReport.date} - Heure: {tvClosedAt}
-            </div>
-            <div className="text-[9px] break-words">
-              {tv.first} → {tv.last}
-            </div>
-            {closeNote && <div className="text-[9px] font-bold">{closeNote}</div>}
-          </div>
-
-          <div className="py-2 border-b border-black space-y-1 text-[10px]">
-            <div className="flex justify-between">
-              <span>Nombre de Ventes:</span>
-              <span className="font-bold">{tv.salesCount}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Total HT:</span>
-              <span>{(tv.ht / 100).toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>TVA 9% (Base {(tv.b9 / 100).toFixed(2)}):</span>
-              <span>{(tv.a9 / 100).toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span>TVA 19% (Base {(tv.b19 / 100).toFixed(2)}):</span>
-              <span>{(tv.a19 / 100).toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between font-semibold">
-              <span>Timbre Fiscal (Espèces):</span>
-              <span>{(tv.timbre / 100).toFixed(2)}</span>
-            </div>
-            <div className="flex justify-between font-black text-xs pt-1 border-t border-black">
-              <span>TOTAL TTC:</span>
-              <span>{(tv.ttc / 100).toFixed(2)} DZD</span>
-            </div>
-          </div>
-
-          <div className="py-2 border-b border-black space-y-1 text-[10px]">
-            <div className="font-bold uppercase pb-0.5">Ventilation des Paiements:</div>
-            <div className="flex justify-between">
-              <span>Espèces:</span>
-              <span>{(tv.esp / 100).toFixed(2)} DZD</span>
-            </div>
-            <div className="flex justify-between">
-              <span>CIB / Dahabiya:</span>
-              <span>{(tv.bank / 100).toFixed(2)} DZD</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Crédit Client (Carnet):</span>
-              <span>{(tv.cred / 100).toFixed(2)} DZD</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Règlements Crédits Reçus:</span>
-              <span>{(tv.coll / 100).toFixed(2)} DZD</span>
-            </div>
-          </div>
-
-          <div className="py-2 border-b border-black space-y-1 text-[10px]">
-            <div className="font-bold uppercase pb-0.5">Chaîne Fiscale (SHA-256):</div>
-            <div className="break-all">prev: {shortHash(prevHash)}</div>
-            <div className="break-all font-bold">hash: {shortHash(chainHash)}</div>
-          </div>
-
-          <div className="text-center pt-2 space-y-0.5 text-[9px] text-slate-700">
-            <div>Signé par le Caissier & Gérant</div>
-            <div className="font-semibold text-slate-500 pt-1">Baraka Market v{APP_VERSION} by BarakaDEV</div>
-          </div>
-        </div>
-        )}
-      </div>
+      {/* MKT-009: print preview isolated in ZPrintPreview (memo). */}
+      <ZPrintPreview
+        format={format} isAr={isAr} tv={tv}
+        tvReportNo={tvReportNo} tvClosedAt={tvClosedAt}
+        closed={!!closure} chainHash={chainHash} prevHash={prevHash}
+        closeNote={closeNote} viewDate={viewDate} storeProfile={storeProfile}
+      />
     </div>
   );
 };
