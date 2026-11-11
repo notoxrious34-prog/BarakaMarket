@@ -3,7 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { APP_VERSION } from '../../core/version';
 import { isTauriRuntime } from '../../core/fiscal-authority';
 import {
-  checkForUpdate, relaunchApp, RELEASES_URL,
+  checkForUpdate, relaunchApp, RELEASES_URL, friendlyUpdateError,
   type PendingUpdate, type UpdateStatus,
 } from '../../core/update-lane';
 import { auditSessionEvent } from '../../core/session-authority';
@@ -67,7 +67,8 @@ export const UpdateManagerView: React.FC = () => {
       case 'found':
         return ar ? `نسخة جديدة ${s.latest} متوفرة` : `Nouvelle version ${s.latest} disponible`;
       case 'error':
-        return `${ar ? 'تعذّر التحقق' : 'Échec'}: ${s.detail ?? ''}`;
+        // Friendly first (audit 2026-11-11): the raw detail stays below.
+        return friendlyUpdateError(ar);
     }
   };
 
@@ -101,6 +102,11 @@ export const UpdateManagerView: React.FC = () => {
         )}
       </div>
       {status && <p className="mt-2 text-xs text-slate-300">{reasonText(status)}</p>}
+      {status?.reason === 'error' && status?.detail && (
+        <p className="mt-1 text-[10px] text-slate-500 font-mono" dir="ltr" title="Technical detail (support)">
+          {status.detail}
+        </p>
+      )}
       {status?.notes && (
         <pre className="mt-2 text-[11px] text-slate-400 whitespace-pre-wrap max-h-32 overflow-y-auto" dir="auto">
           {status.notes}

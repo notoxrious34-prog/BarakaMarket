@@ -16,6 +16,17 @@ export const RELEASES_URL = 'https://github.com/notoxrious34-prog/BarakaMarket/r
 
 export type UpdateReason = 'native-only' | 'up-to-date' | 'found' | 'error';
 
+/**
+ * Friendly connectivity guidance for update failures (audit 2026-11-11).
+ * Transport stalls surface as raw reqwest English — the cashier gets
+ * guidance; the raw detail is still shown small for support.
+ */
+export function friendlyUpdateError(ar: boolean): string {
+  return ar
+    ? 'تعذّر الوصول إلى خادم التحديث — تحقق من الاتصال بالإنترنت ثم أعد المحاولة، أو ثبّت النسخة يدويًا من صفحة الإصدارات (USB)'
+    : 'Serveur de mise à jour injoignable — vérifiez la connexion puis réessayez, ou installez via la page des versions (USB)';
+}
+
 export interface UpdateStatus {
   available: boolean;
   current: string;
