@@ -45,4 +45,11 @@ test('MKT-011: scroll-dead desks own their scroll region (audit 2026-11-11)', ()
     sales.includes('min-h-0 overflow-y-auto space-y-4'),
     'SalesBookView ROOT must own the scroll region (flex-1 min-h-0 overflow-y-auto space-y-4, like Accounting/Cash) — inner boxes alone left the Duplicata CTA clipped dead',
   );
+  // ADR-045 (approved): the Returns desk joins the same contract — 19 drafts
+  // clipped 3198px with zero scroll avenue (Retours audit 2026-11-11).
+  const ret = read('src/components/Returns/ReturnsView.tsx');
+  assert.ok(
+    ret.includes('min-h-0 overflow-y-auto'),
+    'ReturnsView ROOT must own the scroll region (flex-1 min-h-0 overflow-y-auto) — the stacked desk clipped whole panels dead',
+  );
 });
