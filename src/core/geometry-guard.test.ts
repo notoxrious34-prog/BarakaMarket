@@ -34,3 +34,15 @@ test('MKT-002: views size against the dynamic viewport (100dvh, never 100vh)', (
   const pos = read('src/components/POS/PosView.tsx');
   assert.ok(pos.includes('100dvh'), 'PosView must size against 100dvh');
 });
+
+test('MKT-011: scroll-dead desks own their scroll region (audit 2026-11-11)', () => {
+  // The h-dvh root lock + main[overflow-hidden] mean a view WITHOUT its own
+  // overflow-y-auto clips any overflowing content with NO user scroll avenue
+  // (document never scrolls; main is not user-scrollable). Ventes proved it:
+  // the Duplicata CTA sat 112px below the fold at 1024×650, unreachable.
+  const sales = read('src/components/Sales/SalesBookView.tsx');
+  assert.ok(
+    sales.includes('min-h-0 overflow-y-auto space-y-4'),
+    'SalesBookView ROOT must own the scroll region (flex-1 min-h-0 overflow-y-auto space-y-4, like Accounting/Cash) — inner boxes alone left the Duplicata CTA clipped dead',
+  );
+});

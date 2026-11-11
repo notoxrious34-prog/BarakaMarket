@@ -154,7 +154,11 @@ export const SalesBookView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4 text-slate-100">
+    // MKT-011: the desk root OWNS its scroll region (flex-1 min-h-0
+    // overflow-y-auto, like Accounting/Cash) — the h-dvh lock + main
+    // [overflow-hidden] leave no other user scroll avenue, so any content
+    // past the fold (Duplicata CTA, filters) was clipped dead.
+    <div className="flex-1 min-h-0 overflow-y-auto space-y-4 text-slate-100">
       {/* Hero — the receipt-level bridge. */}
       <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 relative overflow-hidden">
         <div className="absolute top-0 bottom-0 start-0 w-1 bg-emerald-500" />
