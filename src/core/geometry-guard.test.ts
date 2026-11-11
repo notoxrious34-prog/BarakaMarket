@@ -63,6 +63,12 @@ test('MKT-012: pre-publish audit fixes — light islands dead, dark AA, UHD dens
   assert.ok(ret.includes('desk-wide'), 'UHD: ReturnsView must carry the desk-wide marker');
   assert.ok(css.includes('.pos-product-grid { grid-template-columns: repeat(8'), 'UHD: 2560px media must set 8 POS columns');
   assert.ok(css.includes('.desk-wide { max-width: 1760px; }'), 'UHD: 2560px media must widen the desk');
+  // Residual (2026-11-11): the last white-text amber gradient CTA (scale
+  // simulator) + its hovers. Marker class keeps the black-text amber CTA
+  // untouched — same-utility global remaps would break it.
+  assert.ok(css.includes('.btn-warm-cta {'), 'AA-residual: warm CTA marker must own its gradient ends');
+  const sim = read('src/components/POS/ScaleSimulationModal.tsx');
+  assert.ok(sim.includes('btn-warm-cta'), 'AA-residual: scale CTA must carry the btn-warm-cta marker');
 });
 
 test('MKT-011: scroll-dead desks own their scroll region (audit 2026-11-11)', () => {

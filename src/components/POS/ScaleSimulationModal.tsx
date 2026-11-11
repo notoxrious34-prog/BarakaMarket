@@ -242,7 +242,7 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
           <button
             type="button"
             onClick={handleInjectToPos}
-            className="px-5 py-2.5 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 cursor-pointer"
+            className="px-5 py-2.5 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 cursor-pointer btn-warm-cta"
           >
             <Barcode className="w-4 h-4" />
             <span>{isAr ? 'تمرير كباركود للميزان (Scan)' : 'Scanner dans la Caisse'}</span>

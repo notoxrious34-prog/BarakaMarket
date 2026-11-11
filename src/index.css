@@ -285,6 +285,17 @@ html.light .text-amber-200 { color: #92400e !important; }
 .hover\:from-emerald-500:hover { --tw-gradient-from: #065f46 !important; }
 .hover\:to-emerald-400:hover { --tw-gradient-to: #065f46 !important; }
 .from-amber-600 { --tw-gradient-from: #b45309 !important; }
+/* AA-residual (2026-11-11): the last white-text amber gradient CTA owns its
+ * gradient ends via marker (700→800, white ≥7.0). The black-text amber CTA
+ * (from-amber-500/to-amber-400) is deliberately untouched. */
+.btn-warm-cta {
+  --tw-gradient-from: #b45309 !important;
+  --tw-gradient-to: #92400e !important;
+}
+.btn-warm-cta:hover {
+  --tw-gradient-from: #92400e !important;
+  --tw-gradient-to: #78350f !important;
+}
 /* AA-UHD (MKT-012): deterministic marker classes + plain media queries.
  * (Tailwind v4.3.3 empirically does NOT emit min-[2560px]:* utilities in
  * this pipeline — proven by live computed-style probe, 2026-11-11. Plain
