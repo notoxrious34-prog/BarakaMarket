@@ -150,6 +150,18 @@ export const AccountingJournalView: React.FC = () => {
               ? 'متابعة هوامش الربح، تقييم المخزون بـ PMP، الديون، الخزينة، ودفتر اليومية العامة'
               : 'Système Comptable Financier: Marges brutes, valorisation stock au PMP, créances et journal général'}
           </p>
+          {/* MKT-008: Desk steps — 01 نظرة / 02 اليومية / 03 المصاريف. */}
+          <div className="flex flex-wrap gap-2 mt-3">
+            {[
+              { n: '01', t: isAr ? 'نظرة مالية' : 'Vue financière' },
+              { n: '02', t: isAr ? 'اليومية العامة' : 'Journal général' },
+              { n: '03', t: isAr ? 'المصاريف والعمال' : 'Dépenses & employés' },
+            ].map(s => (
+              <span key={s.n} className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#111722] border border-[#2b3a4f] text-slate-300">
+                <span className="font-mono text-emerald-400">{s.n}</span> {s.t}
+              </span>
+            ))}
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
@@ -192,7 +204,7 @@ export const AccountingJournalView: React.FC = () => {
             : 'Retours/casse non chargés — journal sans jambes AVOIR/PERTE'}
         </div>
       )}
-      {/* Primary Financial KPI Cards */}
+      {/* 01 · Primary Financial KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Gross Margin */}
         <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-4 shadow-xl">
@@ -331,6 +343,7 @@ export const AccountingJournalView: React.FC = () => {
         <div className="flex items-center justify-between mb-4 border-b border-[#1e293b] pb-2">
           <div>
             <h3 className="text-sm font-bold text-white flex items-center gap-2">
+              <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">02</span>
               <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
               <span>{isAr ? 'دفتر اليومية العامة للعمليات المحاسبية (Journal Général SCF)' : 'Journal Général des Écritures Comptables'}</span>
             </h3>

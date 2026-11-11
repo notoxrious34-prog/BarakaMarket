@@ -567,6 +567,8 @@ export interface Expense {
   byUser: string;
   workerId?: number;   // set for SALAIRES / AVANCES
   tillPosted: boolean; // false when no cash session was open (hors-caisse)
+  /** MKT-008: three-state outcome — distinguishes lane-down from hors-caisse. */
+  tillOutcome?: 'posted' | 'no-session' | 'lane-down';
   createdAt: string;
 }
 

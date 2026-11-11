@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import type { ExpenseCategory } from '../../types';
+import { tillOutcomeLabel } from '../../core/till-outcome';
 
 const CATS: { v: ExpenseCategory; ar: string; fr: string }[] = [
   { v: 'LOYER', ar: 'كراء المحل', fr: 'Loyer' },
@@ -28,7 +29,7 @@ export const QuickExpenseModal: React.FC<{ onClose: () => void }> = ({ onClose }
     setMsg('');
     try {
       const exp = await recordExpense({ date: today, category, amountDzd: Number(amount), method, note: note || undefined });
-      setMsg(`${isAr ? 'سُجل' : 'Enregistré'} ${exp.id} — ${exp.tillPosted ? (isAr ? 'خرج من الصندوق ✓' : 'till ✓') : (isAr ? 'خارج الصندوق' : 'hors-caisse')}`);
+      setMsg(`${isAr ? 'سُجل' : 'Enregistré'} ${exp.id} — ${tillOutcomeLabel(exp.tillOutcome ?? (exp.tillPosted ? 'posted' : 'no-session'), isAr)}`);
       setAmount('');
       setNote('');
     } catch (e) {

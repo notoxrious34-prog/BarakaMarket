@@ -3,6 +3,8 @@ import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
 import { formatDZD } from '../../core/display';
 import type { ExpenseCategory } from '../../types';
+import { tillOutcomeLabel } from '../../core/till-outcome';
+import type { TillOutcome } from '../../core/till-outcome';
 
 const CATS: { v: ExpenseCategory; ar: string; fr: string }[] = [
   { v: 'LOYER', ar: 'كراء المحل', fr: 'Loyer' },
@@ -73,7 +75,10 @@ export const ExpensesWorkersView: React.FC = () => {
   return (
     <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 shadow-xl space-y-4">
       <div className="flex items-center justify-between border-b border-[#1e293b] pb-3">
-        <h3 className="text-sm font-bold text-white">{isAr ? 'مصاريف المحل وحسابات العمال' : 'Dépenses & Employés'}</h3>
+        <h3 className="text-sm font-bold text-white flex items-center gap-2">
+          <span className="font-mono text-[11px] font-black px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/25">03</span>
+          {isAr ? 'مصاريف المحل وحسابات العمال' : 'Dépenses & Employés'}
+        </h3>
         <div className="flex gap-1 bg-[#0b0f17] rounded-lg p-0.5">
           {(['depenses', 'employes'] as const).map(t => (
             <button key={t} onClick={() => setSub(t)}
@@ -116,7 +121,7 @@ export const ExpensesWorkersView: React.FC = () => {
           </div>
           <button disabled={busy} onClick={() => void run(
             () => recordExpense({ date: today, category: eCat, amountDzd: Number(eAmt), method: eMethod, note: eNote || undefined }),
-            r => `${isAr ? 'سُجل' : 'Enregistré'} ${(r as { id: string; tillPosted: boolean }).id} — ${(r as { tillPosted: boolean }).tillPosted ? (isAr ? 'خرج من الصندوق ✓' : 'till ✓') : (isAr ? 'خارج الصندوق' : 'hors-caisse')}`,
+            r => `${isAr ? 'سُجل' : 'Enregistré'} ${(r as { id: string }).id} — ${tillOutcomeLabel((r as { tillOutcome?: TillOutcome }).tillOutcome ?? ((r as { tillPosted: boolean }).tillPosted ? 'posted' : 'no-session'), isAr)}`,
           )} className={`${btn} bg-amber-600 hover:bg-amber-500 text-white`}>
             {isAr ? 'تسجيل المصروف' : 'Enregistrer la dépense'}
           </button>

@@ -61,6 +61,7 @@ const lsStore: StorageLike = {
 };
 import { centimesToDzd, dzdToCentimes } from '../core/money';
 import { calculateAccountingSummary, calculateNewPMP } from '../utils/accounting';
+import type { TillOutcome } from '../core/till-outcome';
 
 interface AppContextType {
   products: Product[];
@@ -1719,9 +1720,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     validateSupplierPayment(supplier.balance_due, amount);
     const rounded = Math.round(amount * 100) / 100;
     // M2-fix: cash leaves the drawer through the till lane (or honestly not).
-    const tillPosted = paymentMethod === 'ESPECES'
+    // Non-cash methods never touch the till: 'n/a' in the audit trail.
+    const tillOutcome: TillOutcome | 'n/a' = paymentMethod === 'ESPECES'
       ? await postTillExpense(dzdToCentimes(rounded), `supplier-pay ${supplier.name}`)
-      : false;
+      : 'n/a';
     const supplierName = supplier.name;
 
     const payment: SupplierPayment = {
@@ -1747,7 +1749,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setSupplierPayments(prev => [payment, ...prev]);
     await auditSessionEvent(s.username, 'supplier.pay',
-      `${supplierName} ${rounded} DZD ${paymentMethod} till:${tillPosted ? 'posted' : paymentMethod === 'ESPECES' ? 'hors-caisse' : 'n/a'}`);
+      `${supplierName} ${rounded} DZD ${paymentMethod} till:${tillOutcome}`);
     return payment;
   };
 
@@ -1845,16 +1847,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // v1.4.6 (#PROD-CASH): invoke-first till expense — the POS path was
   // fetch-only, so on user machines (no :3100) the till never saw till
   // expenses and the Z diff was wrong. Native lane owns the guards now.
-  const postTillExpense = async (amountCt: number, reason: string): Promise<boolean> => {
+  const postTillExpense = async (amountCt: number, reason: string): Promise<TillOutcome> => {
     try {
-      if (!Number.isInteger(amountCt) || amountCt <= 0) return false;
+      if (!Number.isInteger(amountCt) || amountCt <= 0) return 'lane-down';
       const active = await cashActiveNative();
       const sid = active?.session?.id;
-      if (!sid) return false;
+      if (!sid) return 'no-session';
       const row = await cashMoveNative(sid, 'EXPENSE', amountCt, reason?.trim() || 'dépense');
-      return !!row;
+      return row ? 'posted' : 'lane-down';
     } catch {
-      return false;
+      return 'lane-down';
     }
   };
 
@@ -1872,18 +1874,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const amountCt = dzdToCentimes(input.amountDzd);
     const id = `EXP-${Date.now().toString(36).toUpperCase()}${expenses.length.toString(36).toUpperCase()}`;
-    const tillPosted = input.method === 'ESPECES'
+    const tillOutcome: TillOutcome | 'method' = input.method === 'ESPECES'
       ? await postTillExpense(amountCt, `expense ${id} ${input.category}`)
-      : false;
+      : 'method'; // VIREMENT/CHEQUE never touch the till: method-level hors-caisse.
+    const tillPosted = tillOutcome === 'posted';
     const exp: Expense = {
       id, date: input.date, category: input.category, amountCt,
       method: input.method, note: input.note?.trim() || undefined,
       workerId: input.workerId, byUser: s.username, tillPosted,
+      tillOutcome: tillOutcome === 'method' ? undefined : tillOutcome,
       createdAt: new Date().toISOString(),
     };
     setExpenses(prev => [...prev, exp]);
     await auditSessionEvent(s.username, 'expense.add',
-      `expense ${id} ${input.category} ${amountCt}ct ${input.method} till:${tillPosted ? 'posted' : 'hors-caisse'}`);
+      `expense ${id} ${input.category} ${amountCt}ct ${input.method} till:${tillOutcome === 'method' ? 'hors-caisse' : tillOutcome}`);
     return exp;
   };
 
@@ -1919,18 +1923,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       workerId: w.id, date: input.date, amountCt,
       note: input.note?.trim() || undefined, byUser: s.username, createdAt: new Date().toISOString(),
     };
-    const tillPosted = await postTillExpense(amountCt, `advance ${advance.id} worker ${w.name}`);
+    const tillOutcome = await postTillExpense(amountCt, `advance ${advance.id} worker ${w.name}`);
     const exp: Expense = {
       id: `EXP-${Date.now().toString(36).toUpperCase()}A${expenses.length.toString(36).toUpperCase()}`,
       date: input.date, category: 'AVANCES', amountCt, method: 'ESPECES',
-      note: `سلفة: ${w.name}`, workerId: w.id, byUser: s.username, tillPosted,
+      note: `سلفة: ${w.name}`, workerId: w.id, byUser: s.username,
+      tillPosted: tillOutcome === 'posted', tillOutcome,
       createdAt: new Date().toISOString(),
     };
     setAdvances(prev => [...prev, advance]);
     setWorkers(prev => prev.map(x => (x.id === w.id ? { ...x, balanceCt: applyAdvanceToBalance(x.balanceCt, amountCt) } : x)));
     setExpenses(prev => [...prev, exp]);
     await auditSessionEvent(s.username, 'advance.add',
-      `advance ${advance.id} worker ${w.name} ${amountCt}ct till:${tillPosted ? 'posted' : 'hors-caisse'}`);
+      `advance ${advance.id} worker ${w.name} ${amountCt}ct till:${tillOutcome}`);
     return { advance, expense: exp };
   };
 
@@ -1944,9 +1949,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     const monthAdvancesCt = advancesForMonth(advances, w.id, input.month);
     const { netPaidCt, carryCt } = settleSalaryMath(w.baseSalaryCt, monthAdvancesCt);
-    const tillPosted = netPaidCt > 0
+    const tillOutcome: TillOutcome | 'zero' = netPaidCt > 0
       ? await postTillExpense(netPaidCt, `salary ${w.name} ${input.month}`)
-      : false;
+      : 'zero'; // net 0: no till movement by construction.
     const rec: SalarySettlement = {
       id: `SAL-${input.month}-${w.id}`,
       workerId: w.id, month: input.month, baseSalaryCt: w.baseSalaryCt,
@@ -1957,7 +1962,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const exp: Expense = {
         id: `EXP-${Date.now().toString(36).toUpperCase()}S${expenses.length.toString(36).toUpperCase()}`,
         date: `${input.month}-28`, category: 'SALAIRES', amountCt: netPaidCt, method: 'ESPECES',
-        note: `راتب ${input.month}: ${w.name}`, workerId: w.id, byUser: s.username, tillPosted,
+        note: `راتب ${input.month}: ${w.name}`, workerId: w.id, byUser: s.username,
+        tillPosted: tillOutcome === 'posted',
+        tillOutcome: tillOutcome === 'zero' ? undefined : tillOutcome,
         createdAt: new Date().toISOString(),
       };
       setExpenses(prev => [...prev, exp]);
