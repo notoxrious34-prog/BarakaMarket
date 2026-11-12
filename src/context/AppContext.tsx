@@ -843,7 +843,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // B3: `N*CODE` — one scan carries the quantity (12 bottles, 3 keys).
     // Scale labels define their own qty, so the prefix only applies to
     // unit / pack / alias / fuzzy resolutions below.
-    const { mult, core } = parseQtyPrefix(code);
+    const { mult, core, hadPrefix } = parseQtyPrefix(code);
 
     // ADR-003-MKT: universal scale labels PP IIIII VVVVV C (20/21/22/28/29,
     // checksum-gated). Weight -> kg qty; price -> qty back-calculated so the
@@ -876,12 +876,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const directProduct = products.find(p => p.barcode === core);
     if (directProduct) {
-      if (directProduct.is_scale_product && isHardwareScaleActive) {
+      // OWNER-2026-11-12: an explicitly typed prefix (`0,5*9305`) always
+      // wins — the cashier weighed it in their head, not on the plateau.
+      if (directProduct.is_scale_product && isHardwareScaleActive && !hadPrefix) {
         const weight = Math.round((scaleWeightGrams / 1000) * 1000) / 1000;
         addToCart(directProduct, weight);
         return {
           success: true,
-          message: `${directProduct.name_fr} (${weight} kg) pesé`,
+          message: `${directProduct.name_fr} (${Math.round(weight * 1000)} g) pesé`,
         };
       } else {
         addToCart(directProduct, mult);

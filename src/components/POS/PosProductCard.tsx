@@ -1,6 +1,6 @@
 import React, { memo } from 'react';
 import { Scale } from 'lucide-react';
-import { formatDZD } from '../../core/display';
+import { formatDZD, formatGrams } from '../../core/display';
 import type { Product } from '../../types';
 
 /**
@@ -42,7 +42,7 @@ export const PosProductCard: React.FC<PosProductCardProps> = memo(function PosPr
         {product.is_scale_product && (
           <span className="text-[10px] bg-emerald-950/80 text-emerald-400 px-1.5 py-0.5 rounded border border-emerald-800/40 flex items-center gap-0.5">
             <Scale className="w-2.5 h-2.5" />
-            <span>Kg</span>
+            <span>g</span>
           </span>
         )}
       </div>
@@ -70,7 +70,7 @@ export const PosProductCard: React.FC<PosProductCardProps> = memo(function PosPr
           {formatDZD(product.sell_price, false)}
         </span>
         <span className="text-[10px] text-slate-400">
-          {product.stock_qty} {product.unit === 'KG' ? 'kg' : 'u'}
+          {product.unit === 'KG' ? formatGrams(product.stock_qty) : `${product.stock_qty} u`}
         </span>
       </div>
     </div>

@@ -36,3 +36,13 @@ export function toDzd(ct: number): number {
   assertIntegerCentimes(ct, 'ct');
   return ct / CENTIMES_PER_DZD;
 }
+
+/**
+ * OWNER-2026-11-12 (Caisse): weighable quantities DISPLAY in grams.
+ * Display-only — storage/fiscal stay kg + integer milli-units.
+ * e.g. formatGrams(1.45) -> "1450 g" (latin g, LTR-safe).
+ */
+export function formatGrams(kg: number): string {
+  if (typeof kg !== 'number' || isNaN(kg)) return '0 g';
+  return `${Math.round(kg * 1000)} g`;
+}

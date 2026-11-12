@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Product, TVARate } from '../../types';
-import { formatDZD } from '../../core/display';
+import { formatDZD, formatGrams } from '../../core/display';
 import { expiryBucket } from '../../core/expiry-bucket';
 import {
   Package,
@@ -497,7 +497,7 @@ export const ProductsStockView: React.FC = () => {
                           lowStock ? 'text-rose-400 font-black' : 'text-slate-200'
                         }`}
                       >
-                        {p.stock_qty} {p.unit === 'KG' ? 'kg' : 'u'}
+                        {p.unit === 'KG' ? formatGrams(p.stock_qty) : `${p.stock_qty} u`}
                       </span>
                       {lowStock && (
                         <div className="text-[9px] text-rose-400 font-sans">

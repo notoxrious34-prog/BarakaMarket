@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Scale, Barcode, CheckCircle, X, ShoppingBag, Cable, Search, Minus, Plus } from 'lucide-react';
-import { formatDZD } from '../../core/display';
+import { formatDZD, formatGrams } from '../../core/display';
 import { connectLiveScale, type ScaleLiveStatus } from '../../hardware/scale';
 
 interface ScaleSimulationModalProps {
@@ -168,7 +168,7 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
               </div>
             </div>
             <div className="text-center text-5xl font-black font-mono text-emerald-400 tracking-tight" dir="ltr">
-              {weightKg.toFixed(3)} <span className="text-lg text-slate-400 font-normal">kg</span>
+              {formatGrams(weightKg)}
             </div>
 
             {/* Slider */}
@@ -191,7 +191,7 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
                   onClick={() => setWeightKg(w)}
                   className={`px-2 py-0.5 rounded text-xs font-mono border cursor-pointer ${weightKg === w ? 'bg-amber-600 border-amber-500 text-white' : 'bg-[#162030] hover:bg-[#233145] text-slate-300 border-[#2b3a4f]'}`}
                 >
-                  {w === 1.45 ? '1.450' : w} kg
+                  {w === 1.45 ? '1450' : Math.round(w * 1000)} g
                 </button>
               ))}
             </div>
@@ -204,7 +204,7 @@ export const ScaleSimulationModal: React.FC<ScaleSimulationModalProps> = ({ onCl
             >
               <Cable className="w-4 h-4" />
               {liveStatus === 'live'
-                ? (isAr ? `ميزان حي: ${(weightKg).toFixed(3)} kg ${liveStable ? '— ثابت' : '…'}` : `Live: ${weightKg.toFixed(3)} kg ${liveStable ? 'STABLE' : '…'}`)
+                ? (isAr ? `ميزان حي: ${formatGrams(weightKg)} ${liveStable ? '— ثابت' : '…'}` : `Live: ${formatGrams(weightKg)} ${liveStable ? 'STABLE' : '…'}`)
                 : liveStatus === 'connecting'
                   ? (isAr ? 'اختر منفذ الميزان…' : 'Pick the scale port…')
                   : liveStatus === 'unsupported'
