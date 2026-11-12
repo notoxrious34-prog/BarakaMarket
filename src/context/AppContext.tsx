@@ -1170,6 +1170,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authority]);
 
+  // v1.8.3: silent periodic re-drain — if the lane heals mid-session (admin
+  // relaunch, catalog re-mirror), the backlog commits WITHOUT any click.
+  // drainOutbox itself gates on the fiscal lane; the ref avoids stale closures.
+  const drainRef = useRef(drainOutbox);
+  drainRef.current = drainOutbox;
+  useEffect(() => {
+    if (outboxPending === 0) return undefined;
+    const t = setInterval(() => { void drainRef.current(); }, 60000);
+    return () => clearInterval(t);
+  }, [outboxPending]);
+
   /**
    * T4c (ADR-027): one-way catalog mirror, exe lane only, once per session.
    * Pushes the UI catalog into native SQLite so Rust sale commits decrement

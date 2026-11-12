@@ -194,6 +194,31 @@ test('db: ADR-047 — meta allow_negative_sale=0 restores the Tier-3 refusal', (
   b.close();
 });
 
+test('db: v1.8.3 — unknown-to-lane product COMMITS flagged (was_negative=1), never aborts replay', () => {
+  const b = openBarakaDb(':memory:'); // NOTE: no upsertProduct — the lane catalog is empty
+  const line = calculateLineTotalsCt(18000, 50, 0);
+  const t = calculateSaleTotalsCt([{ tva_rate: 0 as const, ...line }], 'ESPECES');
+  const out = b.recordSale(
+    {
+      cashier_id: 'C-1', cashier_name: 'Amine', payment_method: 'ESPECES',
+      amount_paid_ct: 1000000, amount_returned_ct: 91000, totals: t,
+      created_at: '2026-10-26T14:00:00.000Z',
+    },
+    [
+      { product_id: 987654321, barcode: 'ghost', name_fr: 'GHOST', name_ar: '', unit_price_ct: 18000, qty_milli: 50000, unit: 'PIECE', tva_rate: 0, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct },
+    ],
+  );
+  assert.match(out.invoice_number, /^FACT-/);
+  const row = b.getSale(out.id) as Record<string, unknown>;
+  assert.equal(row.was_negative, 1); // unknown = below-available (available 0), flagged
+  const audit = b.db.prepare("SELECT detail FROM audit_log WHERE action = 'sale.negative'").all() as { detail: string }[];
+  assert.equal(audit.length, 1);
+  assert.match(audit[0].detail, /available 0/);
+  const items = b.db.prepare('SELECT product_id FROM sale_items WHERE sale_id = ?').all(out.id) as { product_id: number | null }[];
+  assert.equal(items[0].product_id, null); // FK nulled — barcode/name truth carried
+  b.close();
+});
+
 test('db: voidSale keeps row CANCELLED + journal entry, excluded from active', () => {
   const b = openBarakaDb(':memory:');
   b.upsertProduct(PROD);

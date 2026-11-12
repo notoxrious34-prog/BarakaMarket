@@ -2080,16 +2080,21 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         })();
         const stockOf = db.prepare('SELECT stock_milli FROM products WHERE id = ?');
         let shortDesc: string | null = null;
+        const knownPids = new Set<number>();
         for (const it of items) {
           if (it.product_id == null) continue;
           const row = stockOf.get(it.product_id) as { stock_milli: number } | undefined;
-          if (row && it.qty_milli > row.stock_milli) {
+          if (row) knownPids.add(it.product_id);
+          // v1.8.3: unknown-to-lane product = below-available (available 0),
+          // flagged + journalled — never aborts the sale (parity with Rust).
+          const avail = row ? row.stock_milli : 0;
+          if (it.qty_milli > avail) {
             if (!allowNeg) {
               throw new Error(
-                `[db] STOCK_INSUFFICIENT product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${row.stock_milli} milli`,
+                `[db] STOCK_INSUFFICIENT product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${avail} milli`,
               );
             }
-            shortDesc = `product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${row.stock_milli} milli`;
+            shortDesc = `product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${avail} milli`;
           }
         }
         const invoice = `FACT-${year}-${pad6(bumpSeq(db, 'FACT', year))}`;
@@ -2122,9 +2127,12 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         );
         const decStock = db.prepare('UPDATE products SET stock_milli = stock_milli - ? WHERE id = ?');
         for (const it of items) {
-          insItem.run(id, it.product_id, it.barcode, it.name_fr, it.name_ar, it.unit_price_ct,
+          // v1.8.3: unknown-to-lane products NULL the FK (parity with Rust) —
+          // barcode/name truth is carried, the link is dropped, never aborts.
+          const pid = it.product_id != null && knownPids.has(it.product_id) ? it.product_id : null;
+          insItem.run(id, pid, it.barcode, it.name_fr, it.name_ar, it.unit_price_ct,
             it.qty_milli, it.unit, it.tva_rate, it.discount_bp, it.line_ht_ct, it.line_tva_ct, it.line_ttc_ct);
-          if (it.product_id !== null) decStock.run(it.qty_milli, it.product_id);
+          if (pid !== null) decStock.run(it.qty_milli, pid);
         }
         // B-credit (supermarket): a CREDIT sale posts the debt the moment it
         // commits — stored balance and derived statement stay symmetric, and

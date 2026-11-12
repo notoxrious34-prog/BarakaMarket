@@ -724,11 +724,15 @@ pub fn record_sale(
     for it in items {
         if let Some(p) = it["product_id"].as_i64() {
             let qty = ct(&it["qty_milli"], "qty_milli")?;
+            // v1.8.3: unknown-to-lane product = below-available (available 0),
+            // flagged + journalled — never aborts the sale (parity with TS).
+            // (Fixes Échec ×13 "Query returned no rows" on replay.)
             let stock: i64 = tx
                 .query_row("SELECT stock_milli FROM products WHERE id = ?1", [p], |r| {
                     r.get(0)
                 })
-                .map_err(|e| e.to_string())?;
+                .ok()
+                .unwrap_or(0);
             if qty > stock {
                 if !allow_neg {
                     let nm = it["name_fr"].as_str().unwrap_or("");
@@ -3693,6 +3697,35 @@ mod tests {
             .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(stock, 48000); // untouched
+    }
+
+    // v1.8.3: unknown-to-lane product COMMITS flagged — never aborts replay
+    // with "Query returned no rows" (the Échec ×13 root cause).
+    #[test]
+    fn v183_unknown_product_commits_flagged_never_aborts() {
+        let mut db = memdb();
+        let h = serde_json::json!({"id": "v183-ghost-1", "cashier_id": "C-1", "cashier_name": "Amine", "payment_method": "ESPECES", "amount_paid_ct": 1000000, "amount_returned_ct": 91000, "client_sale_id": "v183-ghost", "totals": {"total_ht_ct": 900000, "total_tva_ct": 0, "timbre_ct": 9000, "total_ttc_ct": 909000, "tva_breakdown": {"0": {"base_ht_ct": 900000, "tva_amount_ct": 0, "total_ttc_ct": 900000}, "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}, "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}}, "is_facture": 0, "created_at": "2026-11-12T14:00:00.000Z"});
+        let items = vec![
+            serde_json::json!({"product_id": 987654321, "barcode": "ghost", "name_fr": "GHOST", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 50000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 900000, "line_tva_ct": 0, "line_ttc_ct": 900000}),
+        ];
+        let out = record_sale(&mut db, &h, &items).expect("unknown product must commit flagged");
+        assert!(out["invoice_number"].as_str().unwrap().starts_with("FACT-"));
+        let flag: i64 = db
+            .query_row(
+                "SELECT was_negative FROM sales WHERE id = ?1",
+                [&out["id"].as_str().unwrap().to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flag, 1);
+        let audit: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'sale.negative'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit, 1);
     }
 
     #[test]
