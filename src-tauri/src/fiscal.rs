@@ -3660,6 +3660,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(audit, 1);
+        // ADR-047: the day disclosure carries the below-available sale.
+        let z = daily_z(&db, "2026-11-12").unwrap();
+        assert_eq!(z["short_count"], 1);
+        assert_eq!(z["short_total_ttc_ct"], 909000);
     }
 
     #[test]
