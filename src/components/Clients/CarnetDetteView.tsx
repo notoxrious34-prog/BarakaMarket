@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Client, PaymentMethod } from '../../types';
-import { formatDZD } from '../../core/display';
+import { formatDZD, formatDZDFromCt } from '../../core/display';
+import { calculateTimbreFiscalCt } from '../../core/fiscal.centimes';
+import { dzdToCentimes } from '../../core/money';
 import { cashChime } from '../../hardware/sound';
 import { kickDrawerViaLoopback } from '../../core/fiscal-authority';
 import { ClientAccountStatement } from './ClientAccountStatement';
@@ -27,7 +29,7 @@ import {
 } from 'lucide-react';
 
 export const CarnetDetteView: React.FC = () => {
-  const { clients, sales, settlements, addClient, updateClient, deleteClient, settleClientDebt, language } = useApp();
+  const { clients, sales, settlements, settleClientDebt, addClient, updateClient, deleteClient, storeProfile, language } = useApp();
   const isAr = language === 'ar';
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -42,6 +44,11 @@ export const CarnetDetteView: React.FC = () => {
   const [settlementAmount, setSettlementAmount] = useState<number>(0);
   const [settlementMethod, setSettlementMethod] = useState<PaymentMethod>('ESPECES');
   const [settlementNote, setSettlementNote] = useState('');
+  // OWNER-2026-11-12 (Dettes audit): Art.136 timbre is collected ON TOP —
+  // the modal must disclose what the cashier actually collects, live,
+  // through the same fiscal kernel the settlement commits.
+  const settleAmountCt = settlementAmount > 0 && Number.isFinite(settlementAmount) ? dzdToCentimes(settlementAmount) : 0;
+  const settleTimbreCt = calculateTimbreFiscalCt(settleAmountCt, settlementMethod, storeProfile);
   // D4-fix: settlement failures surface in-modal (login / overpay / lane).
   const [settleError, setSettleError] = useState('');
   // D6/D7-fix: client create/edit guard failures surface in-modal.
@@ -426,7 +433,7 @@ export const CarnetDetteView: React.FC = () => {
                 <div className="text-sm font-bold text-white mt-0.5">{liveSelected.name}</div>
                 <div className="text-xs text-rose-400 mt-0.5">
                   {isAr ? 'الدين الإجمالي المطلوب:' : 'Solde restant:'}{' '}
-                  <strong>{formatDZD(liveSelected.credit_balance, false)}</strong>
+                  <strong dir="ltr">{formatDZD(liveSelected.credit_balance, false)}</strong>
                 </div>
               </div>
 
@@ -444,6 +451,29 @@ export const CarnetDetteView: React.FC = () => {
                   className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-white font-mono text-lg font-bold outline-none focus:border-emerald-500"
                 />
               </div>
+
+              {/* OWNER-2026-11-12: live Art.136 disclosure — ESPECES collects
+                  amount + timbre; card methods collect the amount alone. */}
+              {settleTimbreCt > 0 && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl px-3 py-2 space-y-1">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-amber-300 font-semibold">
+                      {isAr ? 'طابع 1% (يُحصَّل فوق المبلغ):' : 'Timbre 1% (en sus) :'}
+                    </span>
+                    <span dir="ltr" className="font-mono font-bold text-amber-300">
+                      +{formatDZDFromCt(settleTimbreCt, false)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-200 font-bold">
+                      {isAr ? 'المجموع المحصّل:' : 'Total à encaisser :'}
+                    </span>
+                    <span dir="ltr" className="font-mono font-black text-emerald-300">
+                      {formatDZDFromCt(settleAmountCt + settleTimbreCt, false)}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-semibold text-slate-300 block mb-1">
