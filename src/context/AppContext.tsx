@@ -40,6 +40,7 @@ import { parseScaleBarcodeCt as parseScaleBarcode, calculateTimbreFiscalCt, calc
 import { advancesForMonth, settleSalaryMath, applyAdvanceToBalance, applyPaydayToBalance } from '../core/payroll';
 import { probeFiscalAuthority, commitSale, commitSettlement, commitVoid, commitZClose, fetchDailyZ, factoryResetNative, createSafetySnapshot, cashActiveNative, cashMoveNative, lastLaneError, type AuthorityStatus, type AuthorityHeaderInput, type AuthorityItemInput } from '../core/fiscal-authority';
 import { APP_VERSION } from '../core/version';
+import { checkForUpdate } from '../core/update-lane';
 import { detectVersionShift } from '../core/version-change';
 import { loginUser, listSessionUsers, changeSessionPin, auditSessionEvent, type SessionUser } from '../core/session-authority.js';
 import { restoreLocalSnapshotKeys } from '../core/local-snapshot.js';
@@ -100,6 +101,12 @@ interface AppContextType {
 
   // Actions
   setActiveView: (view: 'pos' | 'products' | 'clients' | 'suppliers' | 'accounting' | 'reports' | 'license' | 'settings' | 'shifts' | 'returns' | 'sales') => void;
+  /** ADR-048: silent update badge state + per-version dismissal. */
+  updateAvailable: { version: string; notes: string | null } | null;
+  dismissUpdateBadge: () => void;
+  /** ADR-048: footer badge → settings deep-link ('data' tab). Consumed once. */
+  settingsTabRequest: string | null;
+  setSettingsTabRequest: (t: string | null) => void;
   toggleLanguage: () => void;
   toggleTheme: () => void;
   setSelectedClient: (client: Client) => void;
@@ -495,6 +502,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (q.length === 0) setOutboxFailed(false);
   };
 
+  // ADR-048: silent update badge — Tauri shell only, boot + every 6h, one
+  // small JSON, failures silent. No audit row: only user-initiated checks
+  // audit (UpdateManagerView); a 6h heartbeat would spam the journal.
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; notes: string | null } | null>(null);
+  // Deep-link channel: footer badge → settings view, 'data' tab (MAJ).
+  const [settingsTabRequest, setSettingsTabRequest] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let alive = true;
+    const stampKey = 'baraka_update_stamp';
+    const dismissedKey = 'baraka_update_dismissed';
+    const poll = async () => {
+      try {
+        const last = Number(localStorage.getItem(stampKey) ?? 0);
+        if (Date.now() - last < 6 * 3600 * 1000) return;
+        const r = await checkForUpdate(APP_VERSION);
+        try { localStorage.setItem(stampKey, String(Date.now())); } catch { /* private mode */ }
+        if (!alive) return;
+        const dismissed = (() => { try { return localStorage.getItem(dismissedKey); } catch { return null; } })();
+        if (r.status.available && r.status.latest && r.status.latest !== dismissed) {
+          setUpdateAvailable({ version: r.status.latest, notes: r.status.notes });
+        }
+      } catch { /* silent: CDN hiccups never nag the cashier */ }
+    };
+    void poll();
+    const timer = setInterval(() => { void poll(); }, 6 * 3600 * 1000);
+    return () => { alive = false; clearInterval(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** ADR-048: per-version dismissal — the badge hides until a NEWER release. */
+  const dismissUpdateBadge = (): void => {
+    try {
+      if (updateAvailable) localStorage.setItem('baraka_update_dismissed', updateAvailable.version);
+    } catch { /* private mode */ }
+    setUpdateAvailable(null);
+  };
+
   // T8 (ADR-031): authenticated session. Persisted across reloads (never the
   // PIN — only the verified identity + timestamps). Owner order 2026-11-03:
   // manual lock only — no idle timeout (lastActivityAt still refreshes on
@@ -838,9 +883,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHeldCarts(prev => prev.filter(h => h.id !== heldId));
   };
 
-  // ADR-046 Tier 3 (APPROVED): the sale is refused EXPLICITLY at scan time —
-  // cumulative cart qty vs local stock, packs × multiplier, KG exact to the
-  // milli. The lanes re-verify authoritatively at commit (STOCK_INSUFFICIENT).
+  // ADR-047 (APPROVED, replaces ADR-046 Tier 3): sales below available stock
+  // are ALLOWED and flagged — the message is a warning, never a refusal.
+  // Cumulative cart qty vs local stock, packs × multiplier, KG exact to milli.
+  // The lanes re-verify authoritatively at commit and stamp was_negative.
   const stockShortMsg = (product: Product, addQty: number, packMult?: number | null): string | null => {
     const mult = packMult ?? 1;
     const line = cart.currentCart.find(i => i.product_id === product.id && (i.packMultiplier ?? 1) === mult);
@@ -851,7 +897,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!shortage) return null;
     const avail = product.unit === 'KG' ? formatGrams(shortage.available) : `${shortage.available} u`;
     // Scan feedback is French-only by convention (all scanBarcode messages).
-    return `Stock insuffisant: ${product.name_fr} — disponible: ${avail}`;
+    return `Vente à découvert: ${product.name_fr} (stock: ${avail})`;
   };
 
   const scanBarcode = (rawInput: string): { success: boolean; message: string } => {
@@ -878,20 +924,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const unitCt = Math.round(product.sell_price * 100);
           const qtyMilli = unitCt > 0 ? Math.round((scaleResult.priceCt * 1000) / unitCt) : 1000;
           const shortP = stockShortMsg(product, qtyMilli / 1000);
-          if (shortP) return { success: false, message: shortP };
           addToCart(product, qtyMilli / 1000);
           return {
             success: true,
-            message: `${product.name_fr} - ${(scaleResult.priceCt / 100).toFixed(2)} DZD (prix étiquette)`,
+            message: `${product.name_fr} - ${(scaleResult.priceCt / 100).toFixed(2)} DZD (prix étiquette)` + (shortP ? ` — ${shortP}` : ''),
           };
         }
         const grams = scaleResult.weightGrams ?? 1000;
         const shortW = stockShortMsg(product, grams / 1000);
-        if (shortW) return { success: false, message: shortW };
         addToCart(product, grams / 1000);
         return {
           success: true,
-          message: `${product.name_fr} - ${grams} g pesé (balance)`,
+          message: `${product.name_fr} - ${grams} g pesé (balance)` + (shortW ? ` — ${shortW}` : ''),
         };
       }
     }
@@ -903,19 +947,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (directProduct.is_scale_product && isHardwareScaleActive && !hadPrefix) {
         const weight = Math.round((scaleWeightGrams / 1000) * 1000) / 1000;
         const shortH = stockShortMsg(directProduct, weight);
-        if (shortH) return { success: false, message: shortH };
         addToCart(directProduct, weight);
         return {
           success: true,
-          message: `${directProduct.name_fr} (${Math.round(weight * 1000)} g) pesé`,
+          message: `${directProduct.name_fr} (${Math.round(weight * 1000)} g) pesé` + (shortH ? ` — ${shortH}` : ''),
         };
       } else {
         const shortU = stockShortMsg(directProduct, mult);
-        if (shortU) return { success: false, message: shortU };
         addToCart(directProduct, mult);
         return {
           success: true,
-          message: mult > 1 ? `${directProduct.name_fr} x${mult} ajouté` : `${directProduct.name_fr} ajouté`,
+          message: (mult > 1 ? `${directProduct.name_fr} x${mult} ajouté` : `${directProduct.name_fr} ajouté`) + (shortU ? ` — ${shortU}` : ''),
         };
       }
     }
@@ -933,7 +975,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         );
         if (multiplier > 1) {
           const shortPk = stockShortMsg(product, mult, multiplier);
-          if (shortPk) return { success: false, message: shortPk };
           addToCart(product, mult, 0, {
             unitPriceTtc: effectiveCt / 100,
             packMultiplier: multiplier,
@@ -942,13 +983,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
           return {
             success: true,
-            message: `${product.name_fr} [${alias.pack_name ?? `Pack x${multiplier}`}]${mult > 1 ? ` x${mult}` : ''} - ${(effectiveCt / 100).toFixed(2)} DZD ajouté`,
+            message: `${product.name_fr} [${alias.pack_name ?? `Pack x${multiplier}`}]${mult > 1 ? ` x${mult}` : ''} - ${(effectiveCt / 100).toFixed(2)} DZD ajouté` + (shortPk ? ` — ${shortPk}` : ''),
           };
         }
         const shortA = stockShortMsg(product, mult);
-        if (shortA) return { success: false, message: shortA };
         addToCart(product, mult, 0, { barcode: core });
-        return { success: true, message: mult > 1 ? `${product.name_fr} x${mult} ajouté` : `${product.name_fr} ajouté` };
+        return { success: true, message: (mult > 1 ? `${product.name_fr} x${mult} ajouté` : `${product.name_fr} ajouté`) + (shortA ? ` — ${shortA}` : '') };
       }
     }
 
@@ -960,9 +1000,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     if (fuzzy) {
       const shortF = stockShortMsg(fuzzy, mult);
-      if (shortF) return { success: false, message: shortF };
       addToCart(fuzzy, mult);
-      return { success: true, message: mult > 1 ? `${fuzzy.name_fr} x${mult} ajouté` : `${fuzzy.name_fr} ajouté` };
+      return { success: true, message: (mult > 1 ? `${fuzzy.name_fr} x${mult} ajouté` : `${fuzzy.name_fr} ajouté`) + (shortF ? ` — ${shortF}` : '') };
     }
 
     return {
@@ -1027,7 +1066,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const itemSold = cart.currentCart.find(i => i.product_id === p.id);
         if (itemSold) {
           const baseUnits = itemSold.quantity * (itemSold.packMultiplier ?? 1);
-          const newQty = Math.max(0, Math.round((p.stock_qty - baseUnits) * 100) / 100);
+          // ADR-047: arithmetic drain — the lane owns the truth, the local
+          // mirror may go negative (flagged was_negative at commit).
+          const newQty = Math.round((p.stock_qty - baseUnits) * 100) / 100;
           return { ...p, stock_qty: newQty };
         }
         return p;
@@ -1227,21 +1268,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         is_facture: isFactureReglementaire ? 1 : 0,
         created_at: createdAt,
       };
-      // ADR-046 Tier 3 (APPROVED): last local double-check before the
-      // authoritative lane commit — the lane re-verifies, but the cashier
-      // learns the available stock HERE, not after the ticket prints.
-      for (const it of cart.currentCart) {
-        const p = products.find(pp => pp.id === it.product_id);
-        if (!p) continue;
-        const s = checkStockAvailability(
-          [{ product_id: p.id, name_fr: p.name_fr, quantity: it.quantity, packMultiplier: it.packMultiplier }],
-          [{ id: p.id, stock_qty: p.stock_qty }],
-        );
-        if (s) {
-          const avail = p.unit === 'KG' ? formatGrams(s.available) : `${s.available} u`;
-          throw new Error(`Stock insuffisant: ${p.name_fr} — disponible: ${avail}`);
-        }
-      }
+      // ADR-047: no local stock block — the lane decides authoritatively at
+      // commit and stamps was_negative (scan already warned the cashier).
       // Degraded lane: no commit when the fiscal lane is unreachable (rush hour first).
       const out = authorityRef.current === 'FISCAL_SQLITE'
         ? await commitSale(fiscalHeader, payloadItems)
@@ -1293,7 +1321,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         prev.map(p => {
           const itemSold = cart.currentCart.find(i => i.product_id === p.id);
           if (itemSold) {
-            const newQty = Math.max(0, Math.round((p.stock_qty - itemSold.quantity) * 100) / 100);
+            // ADR-047: arithmetic drain (may go negative — see above).
+            const newQty = Math.round((p.stock_qty - itemSold.quantity) * 100) / 100;
             return { ...p, stock_qty: newQty };
           }
           return p;
@@ -2301,6 +2330,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         outboxEntries,
         refreshOutbox,
         discardOutboxEntry,
+        updateAvailable,
+        dismissUpdateBadge,
+        settingsTabRequest,
+        setSettingsTabRequest,
       }}
     >
       {children}

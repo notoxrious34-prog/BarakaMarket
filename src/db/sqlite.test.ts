@@ -144,10 +144,36 @@ test('db: recordSale with broken invariant throws + rolls back fully', () => {
   b.close();
 });
 
-test('db: ADR-046 Tier 3 — over-selling refuses with STOCK_INSUFFICIENT, stock untouched', () => {
+test('db: ADR-047 — over-selling COMMITS with was_negative=1, stock goes negative, audit trace', () => {
   const b = openBarakaDb(':memory:');
   b.upsertProduct(PROD); // stock 48.000
   // Consistent single line: 50 units x 18000ct, TVA 0 -> timbre 9000, TTC 909000.
+  const line = calculateLineTotalsCt(18000, 50, 0);
+  const t = calculateSaleTotalsCt([{ tva_rate: 0 as const, ...line }], 'ESPECES');
+  const out = b.recordSale(
+    {
+      cashier_id: 'C-1', cashier_name: 'Amine', payment_method: 'ESPECES',
+      amount_paid_ct: 1000000, amount_returned_ct: 91000, totals: t,
+      created_at: '2026-10-26T14:00:00.000Z',
+    },
+    [
+      { product_id: 1, barcode: 'a', name_fr: 'LAIT', name_ar: '', unit_price_ct: 18000, qty_milli: 50000, unit: 'PIECE', tva_rate: 0, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct },
+    ],
+  );
+  assert.match(out.invoice_number, /^FACT-/);
+  assert.equal(b.activeSalesCount(), 1);
+  assert.equal(b.getProduct(1).stock_milli, -2000); // 48000 - 50000: negative, never clamped
+  const row = b.getSale(out.id) as Record<string, unknown>;
+  assert.equal(row.was_negative, 1);
+  const audit = b.db.prepare("SELECT * FROM audit_log WHERE action = 'sale.negative'").all() as unknown[];
+  assert.equal(audit.length, 1);
+  b.close();
+});
+
+test('db: ADR-047 — meta allow_negative_sale=0 restores the Tier-3 refusal', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct(PROD); // stock 48.000
+  b.db.prepare("INSERT INTO meta (key, value) VALUES ('allow_negative_sale', '0')").run();
   const line = calculateLineTotalsCt(18000, 50, 0);
   const t = calculateSaleTotalsCt([{ tva_rate: 0 as const, ...line }], 'ESPECES');
   assert.throws(

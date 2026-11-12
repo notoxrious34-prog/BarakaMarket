@@ -187,7 +187,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 14;
+export const LATEST_SCHEMA_VERSION = 15;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -556,6 +556,16 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('CREATE INDEX IF NOT EXISTS idx_supplier_claims_status ON supplier_claims (status)');
     db.exec('PRAGMA user_version = 14');
     v = 14;
+  }
+  // v14 → v15 (ADR-047): allow-negative policy — sales carry was_negative,
+  // the global switch lives in meta KV (absent = allow, owner default ON).
+  if (v < 15) {
+    const cols = db.prepare('PRAGMA table_info(sales)').all() as { name: string }[];
+    if (!cols.some(c => c.name === 'was_negative')) {
+      db.exec('ALTER TABLE sales ADD COLUMN was_negative INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec('PRAGMA user_version = 15');
+    v = 15;
   }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
@@ -2057,17 +2067,29 @@ export function openBarakaDb(dbPath: string): BarakaDb {
 
       db.exec('BEGIN IMMEDIATE');
       try {
-        // ADR-046 Tier 3 (APPROVED): explicit refusal — no silent negative.
-        // The check lives INSIDE the txn, before seq is consumed, so a
-        // refusal rolls back fully (no gaps, no partial stock).
+        // ADR-047 (APPROVED, replaces ADR-046 Tier 3): allow-negative policy.
+        // The switch lives in meta KV: '0' = refuse (old Tier-3),
+        // absent/anything-else = allow (owner default ON). The sale is then
+        // flagged was_negative=1 + journalled — never silently zero.
+        const allowNeg = ((): boolean => {
+          try {
+            const flag = db.prepare("SELECT value FROM meta WHERE key = 'allow_negative_sale'").get() as
+              { value: string } | undefined;
+            return flag?.value !== '0';
+          } catch { return true; }
+        })();
         const stockOf = db.prepare('SELECT stock_milli FROM products WHERE id = ?');
+        let shortDesc: string | null = null;
         for (const it of items) {
           if (it.product_id == null) continue;
           const row = stockOf.get(it.product_id) as { stock_milli: number } | undefined;
           if (row && it.qty_milli > row.stock_milli) {
-            throw new Error(
-              `[db] STOCK_INSUFFICIENT product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${row.stock_milli} milli`,
-            );
+            if (!allowNeg) {
+              throw new Error(
+                `[db] STOCK_INSUFFICIENT product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${row.stock_milli} milli`,
+              );
+            }
+            shortDesc = `product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${row.stock_milli} milli`;
           }
         }
         const invoice = `FACT-${year}-${pad6(bumpSeq(db, 'FACT', year))}`;
@@ -2078,9 +2100,9 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
             tva0_base_ct, tva0_amt_ct, tva0_ttc_ct, tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
             tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
-            payment_method, tva_enabled, timbre_enabled, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
+            payment_method, tva_enabled, timbre_enabled, was_negative, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
             client_sale_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)`,
         ).run(
           id, invoice, ticket, header.cashier_id, header.cashier_name, clientFk,
           header.client_name ?? null, header.client_nif ?? null, header.client_nis ?? null,
@@ -2089,7 +2111,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           t.tva_breakdown[0].base_ht_ct, t.tva_breakdown[0].tva_amount_ct, t.tva_breakdown[0].total_ttc_ct,
           t.tva_breakdown[9].base_ht_ct, t.tva_breakdown[9].tva_amount_ct, t.tva_breakdown[9].total_ttc_ct,
           t.tva_breakdown[19].base_ht_ct, t.tva_breakdown[19].tva_amount_ct, t.tva_breakdown[19].total_ttc_ct,
-          header.payment_method, regime.tva_enabled ? 1 : 0, regime.timbre_enabled ? 1 : 0,
+          header.payment_method, regime.tva_enabled ? 1 : 0, regime.timbre_enabled ? 1 : 0, shortDesc ? 1 : 0,
           header.amount_paid_ct, header.amount_returned_ct,
           header.is_facture ?? 0, createdAt, clientSaleId,
         );
@@ -2110,6 +2132,13 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         if (header.payment_method === 'CREDIT' && clientFk !== null) {
           db.prepare('UPDATE clients SET credit_balance_ct = credit_balance_ct + ? WHERE id = ?')
             .run(t.total_ttc_ct, clientFk);
+        }
+        // ADR-047: every below-available sale leaves an audit trace (who/when/what).
+        if (shortDesc) {
+          logAuditRow(db, {
+            actor: header.cashier_name, action: 'sale.negative',
+            entity: 'sales', entityId: invoice, detail: shortDesc,
+          });
         }
         db.exec('COMMIT');
         return { id, invoice_number: invoice, ticket_number: ticket };

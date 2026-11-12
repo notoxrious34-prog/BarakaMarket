@@ -66,6 +66,10 @@ export const ProductsStockView: React.FC = () => {
   const [sellPrice, setSellPrice] = useState(130);
   const [tvaRate, setTvaRate] = useState<TVARate>(9);
   const [stockQty, setStockQty] = useState(50);
+  // ADR-047: edit mode uses a RELATIVE adjustment (delta), never an absolute
+  // set — an absolute write would clobber a negative offset. Creation keeps
+  // the absolute initial field.
+  const [stockAdjust, setStockAdjust] = useState(0);
   const [minAlert, setMinAlert] = useState(10);
   const [unit, setUnit] = useState<'PIECE' | 'KG' | 'LITRE'>('PIECE');
   const [isScaleProduct, setIsScaleProduct] = useState(false);
@@ -98,7 +102,9 @@ export const ProductsStockView: React.FC = () => {
   const [lossOpen, setLossOpen] = useState(false);
   const handleLossRecorded = (productId: number, qtyUnits: number) => {
     const p = products.find(x => x.id === productId);
-    if (p) updateProduct(productId, { stock_qty: Math.max(0, p.stock_qty - qtyUnits) });
+    // ADR-047: losses drain arithmetically — a loss on short stock deepens
+    // the negative instead of clamping to a lying zero.
+    if (p) updateProduct(productId, { stock_qty: p.stock_qty - qtyUnits });
   };
 
   useEffect(() => {
@@ -209,6 +215,7 @@ export const ProductsStockView: React.FC = () => {
     setSellPrice(p.sell_price);
     setTvaRate(p.tva_rate);
     setStockQty(p.stock_qty);
+    setStockAdjust(0); // delta mode: start from zero, current shown as hint
     setMinAlert(p.min_stock_alert);
     setUnit(p.unit);
     setIsScaleProduct(!!p.is_scale_product);
@@ -227,9 +234,11 @@ export const ProductsStockView: React.FC = () => {
     // sync (upsert errors mid-loop) and makes POS lookup ambiguous.
     const dup = products.find(p => p.barcode === barcode.trim() && (!editingProduct || p.id !== editingProduct.id));
     if (dup) { fail(`الباركود موجود مسبقاً (${dup.name_fr})`, `Code-barres déjà utilisé (${dup.name_fr})`); return; }
-    // S7: money and stock never go negative (native CHECKs + fiscal math).
+    // S7: money never goes negative (native CHECKs + fiscal math). Stock is
+    // RELATIVE in edit mode (ADR-047) so it may stay negative; creation sets
+    // an absolute initial quantity that must be >= 0.
     if (!(buyPrice >= 0) || !(sellPrice >= 0)) { fail('الأسعار لا تكون سالبة', 'Les prix ne peuvent pas être négatifs'); return; }
-    if (!(stockQty >= 0) || !(minAlert >= 0)) { fail('المخزون والتنبيه لا يكونان سالبين', 'Stock et alerte ≥ 0'); return; }
+    if (editingProduct ? !(minAlert >= 0) : (!(stockQty >= 0) || !(minAlert >= 0))) { fail('المخزون والتنبيه لا يكونان سالبين', 'Stock et alerte ≥ 0'); return; }
     // S6: a tracked expiry needs a real date.
     if (hasExpiry && !expiryDate) { fail('حدد تاريخ انتهاء الصلاحية أو ألغِ التتبع', 'Indiquez la date ou décochez le suivi'); return; }
     // S15: scale PLU codes are numeric (the scale lane matches digits).
@@ -237,6 +246,9 @@ export const ProductsStockView: React.FC = () => {
     setFormMsg('');
 
     if (editingProduct) {
+      // ADR-047: relative settlement — the delta adds to the live stock, so a
+      // negative offset heals by arithmetic instead of being clobbered.
+      const settledQty = editingProduct.stock_qty + stockAdjust;
       updateProduct(editingProduct.id, {
         barcode,
         name_fr: nameFr,
@@ -245,7 +257,7 @@ export const ProductsStockView: React.FC = () => {
         buy_price: buyPrice,
         sell_price: sellPrice,
         tva_rate: tvaRate,
-        stock_qty: stockQty,
+        stock_qty: settledQty,
         min_stock_alert: minAlert,
         unit,
         is_scale_product: isScaleProduct,
@@ -254,7 +266,7 @@ export const ProductsStockView: React.FC = () => {
         expiry_date: hasExpiry ? expiryDate : undefined,
       });
       // S8: mirror the mutation mid-session (the session sync ran at mount).
-      void upsertProductsNative([{ ...editingProduct, barcode, name_fr: nameFr, name_ar: nameAr || nameFr, category_id: categoryId, buy_price: buyPrice, sell_price: sellPrice, tva_rate: tvaRate, stock_qty: stockQty, min_stock_alert: minAlert, unit, is_scale_product: isScaleProduct, scale_item_code: isScaleProduct ? scaleItemCode : undefined, has_expiry_date: hasExpiry, expiry_date: hasExpiry ? expiryDate : undefined }]);
+      void upsertProductsNative([{ ...editingProduct, barcode, name_fr: nameFr, name_ar: nameAr || nameFr, category_id: categoryId, buy_price: buyPrice, sell_price: sellPrice, tva_rate: tvaRate, stock_qty: settledQty, min_stock_alert: minAlert, unit, is_scale_product: isScaleProduct, scale_item_code: isScaleProduct ? scaleItemCode : undefined, has_expiry_date: hasExpiry, expiry_date: hasExpiry ? expiryDate : undefined }]);
     } else {
       const created = addProduct({
         barcode,
@@ -490,16 +502,20 @@ export const ProductsStockView: React.FC = () => {
                       </span>
                     </td>
 
-                    {/* Stock */}
+                    {/* Stock — ADR-047: negatives render explicitly, never as zero. */}
                     <td className="py-2.5 px-4 text-center font-mono">
                       <span
                         className={`font-bold ${
-                          lowStock ? 'text-rose-400 font-black' : 'text-slate-200'
+                          p.stock_qty < 0 ? 'text-orange-400 font-black' : lowStock ? 'text-rose-400 font-black' : 'text-slate-200'
                         }`}
                       >
                         {p.unit === 'KG' ? formatGrams(p.stock_qty) : `${p.stock_qty} u`}
                       </span>
-                      {lowStock && (
+                      {p.stock_qty < 0 ? (
+                        <div className="text-[9px] text-orange-400 font-sans font-bold">
+                          {isAr ? 'مكشوف' : 'Découvert'}
+                        </div>
+                      ) : lowStock && (
                         <div className="text-[9px] text-rose-400 font-sans">
                           {isAr ? 'منخفض' : 'Alerte'}
                         </div>
@@ -704,15 +720,32 @@ export const ProductsStockView: React.FC = () => {
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="text-xs font-semibold text-slate-300 block mb-1">
-                    {isAr ? 'الكمية في المخزن:' : 'Quantité Stock:'}
+                    {editingProduct
+                      ? (isAr ? 'تعديل المخزون (+/−):' : 'Ajustement stock (+/−) :')
+                      : (isAr ? 'الكمية في المخزن:' : 'Quantité Stock:')}
                   </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={stockQty}
-                    onChange={e => setStockQty(parseFloat(e.target.value) || 0)}
-                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white font-mono"
-                  />
+                  {editingProduct ? (
+                    <>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={stockAdjust}
+                        onChange={e => setStockAdjust(parseFloat(e.target.value) || 0)}
+                        className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+                      />
+                      <div className="text-[10px] text-slate-400 mt-1 font-mono" dir="ltr">
+                        {editingProduct.stock_qty} → {editingProduct.stock_qty + stockAdjust}
+                      </div>
+                    </>
+                  ) : (
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={stockQty}
+                      onChange={e => setStockQty(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-[#162030] border border-[#2b3a4f] rounded-lg px-3 py-1.5 text-xs text-white font-mono"
+                    />
+                  )}
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-slate-300 block mb-1">

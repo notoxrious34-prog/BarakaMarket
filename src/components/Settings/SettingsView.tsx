@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { auditSessionEvent } from '../../core/session-authority';
 import { loadOutbox, OUTBOX_KEY } from '../../core/sale-outbox';
@@ -189,9 +189,18 @@ const DangerZone: React.FC<{ isAr: boolean }> = ({ isAr }) => {
  * Explicit save stays inside StoreProfileView (handleSubmit + toast).
  */
 export const SettingsView: React.FC = () => {
-  const { language } = useApp();
+  const { language, settingsTabRequest, setSettingsTabRequest } = useApp();
   const isAr = language === 'ar';
   const [tab, setTab] = useState<Tab>('fiscal');
+
+  // ADR-048: footer badge deep-link — consume once, then clear.
+  const VALID_TABS = ['fiscal', 'users', 'data', 'audit', 'timeline', 'shortcuts', 'danger'] as const;
+  useEffect(() => {
+    if (settingsTabRequest && (VALID_TABS as readonly string[]).includes(settingsTabRequest)) {
+      setTab(settingsTabRequest as Tab);
+      setSettingsTabRequest(null);
+    }
+  }, [settingsTabRequest, setSettingsTabRequest]);
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: 'fiscal', label: isAr ? 'الجباية والمحل' : 'Fiscal & Magasin', icon: <Settings className="w-3.5 h-3.5" /> },

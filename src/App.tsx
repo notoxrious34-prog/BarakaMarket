@@ -41,6 +41,9 @@ const MainLayout: React.FC = () => {
     outboxEntries,
     refreshOutbox,
     discardOutboxEntry,
+    updateAvailable,
+    dismissUpdateBadge,
+    setSettingsTabRequest,
   } = useApp();
   const [outboxOpen, setOutboxOpen] = useState(false);
 
@@ -170,6 +173,28 @@ const MainLayout: React.FC = () => {
             </>
           )}
           <span className="text-slate-300 dark:text-slate-600">|</span>
+          {/* ADR-048: silent update badge — dot + version, click deep-links to MAJ. */}
+          {updateAvailable && (
+            <span className="flex items-center gap-1 whitespace-nowrap" data-testid="footer-update-badge">
+              <button
+                type="button"
+                onClick={() => { setSettingsTabRequest('data'); setActiveView('settings'); }}
+                title={language === 'ar' ? `تحديث متوفر: ${updateAvailable.version} — انقر للانتقال لمدير التحديث` : `Mise à jour ${updateAvailable.version} — ouvrir le gestionnaire`}
+                className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-400/50 text-amber-300 font-semibold cursor-pointer hover:bg-amber-500/25"
+              >
+                <span className="w-1.5 h-1.5 rounded-full inline-block animate-pulse bg-amber-400" />
+                <span className="font-mono" dir="ltr">v{updateAvailable.version}</span>
+              </button>
+              <button
+                type="button"
+                onClick={dismissUpdateBadge}
+                title={language === 'ar' ? 'تجاهل هذه النسخة' : 'Ignorer cette version'}
+                className="text-slate-500 hover:text-slate-300 cursor-pointer px-0.5"
+              >
+                ×
+              </button>
+            </span>
+          )}
           <span className="uppercase tracking-widest text-amber-400/80">V{APP_VERSION}</span>
         </span>
       </footer>

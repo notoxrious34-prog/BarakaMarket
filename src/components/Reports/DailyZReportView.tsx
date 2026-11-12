@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { can } from '../../core/rbac';
-import { formatDZD } from '../../core/display';
+import { formatDZD, formatDZDFromCt } from '../../core/display';
 import { dzdToCentimes } from '../../core/money';
 import { commitZClose, fetchDailyZ, zListNative, fetchLossesWindow, LOOPBACK_BASE } from '../../core/fiscal-authority';
 import { GENESIS_PREV_HASH, previewChainHash } from '../../core/zreport';
@@ -57,6 +57,8 @@ export const DailyZReportView: React.FC = () => {
   // P0b: lane-verified count — distinguishes "no sales" from "not loaded".
   // null = lane unreachable here (honest unknown), never asserted as zero.
   const [laneCount, setLaneCount] = useState<number | null>(null);
+  /** ADR-047: lane-truth below-available sales for the day (null = unknown). */
+  const [laneShort, setLaneShort] = useState<{ n: number; ttcCt: number } | null>(null);
 
   // #004/MKT-009: apply a stored DAY row as a locked reprint (component-level
   // so the day navigator reuses the exact mount path — one mapping, no drift).
@@ -107,6 +109,9 @@ export const DailyZReportView: React.FC = () => {
         // P0b: lane-verified count (null when the lane is down — unknown).
         if (z && typeof z.sales_count === 'number') setLaneCount(z.sales_count);
         else setLaneCount(null);
+        // ADR-047: below-available disclosure (lane truth; hidden when unknown).
+        if (z && typeof z.short_count === 'number') setLaneShort({ n: z.short_count, ttcCt: z.short_total_ttc_ct ?? 0 });
+        else setLaneShort(null);
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -291,6 +296,14 @@ export const DailyZReportView: React.FC = () => {
                 {isAr
                   ? `تنبيه: الذاكرة المحلية تعرض ${zReport.sales_count} بينما الدفتر يؤكد ${laneCount} — الأرقام المعروضة غير مؤكدة بعد`
                   : `Alerte : mémoire locale ${zReport.sales_count}, registre ${laneCount} — chiffres non confirmés`}
+              </p>
+            )}
+            {/* ADR-047: mandatory below-available disclosure (lane truth). */}
+            {laneShort !== null && laneShort.n > 0 && (
+              <p className="text-[11px] text-orange-300 bg-orange-500/10 border border-orange-500/30 rounded-lg px-2.5 py-1 mt-1.5 font-mono" dir="ltr">
+                {isAr
+                  ? `مبيعات على المكشوف: ${laneShort.n} — ${formatDZDFromCt(laneShort.ttcCt)} (بأساس آخر سعر شراء)`
+                  : `Ventes à découvert: ${laneShort.n} — ${formatDZDFromCt(laneShort.ttcCt)} (au dernier coût d'achat)`}
               </p>
             )}
           </div>

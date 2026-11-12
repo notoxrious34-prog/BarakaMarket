@@ -832,6 +832,9 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     ).all(start, end) as Array<Record<string, number | string>>;
     const sum = (k: string) => rows.reduce((a, r) => a + (r[k] as number), 0);
     const byMethod = (m: string) => rows.filter(r => r.payment_method === m).reduce((a, r) => a + (r.total_ttc_ct as number), 0);
+    // ADR-047: below-available sales stay visible in the day disclosure
+    // (was_negative=1; absent on pre-v15 files → treated as 0).
+    const shortRows = rows.filter(r => (r.was_negative as number) === 1);
     res.json({
       date: day,
       sales_count: rows.length,
@@ -842,6 +845,8 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       total_especes_ct: byMethod('ESPECES'),
       total_bank_ct: byMethod('CIB') + byMethod('DAHABIYA'),
       total_credit_granted_ct: byMethod('CREDIT'),
+      short_count: shortRows.length,
+      short_total_ttc_ct: shortRows.reduce((a, r) => a + (r.total_ttc_ct as number), 0),
     });
   });
 

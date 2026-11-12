@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS sales (
   payment_method    TEXT    NOT NULL CHECK (payment_method IN ('ESPECES', 'CIB', 'DAHABIYA', 'CREDIT')),
   tva_enabled       INTEGER NOT NULL DEFAULT 1,   -- v7: fiscal regime toggles
   timbre_enabled    INTEGER NOT NULL DEFAULT 1,   -- (owner Card 3), stored per sale
+  was_negative      INTEGER NOT NULL DEFAULT 0,   -- v15 (ADR-047): 1 when a line sold below available stock
   amount_paid_ct    INTEGER NOT NULL DEFAULT 0,
   amount_returned_ct INTEGER NOT NULL DEFAULT 0,
   status            TEXT    NOT NULL DEFAULT 'COMPLETED' CHECK (status IN ('COMPLETED', 'CANCELLED')),

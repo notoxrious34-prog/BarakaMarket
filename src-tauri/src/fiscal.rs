@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 14;
+pub const LATEST_SCHEMA_VERSION: i64 = 15;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -387,6 +387,20 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+    // v14 → v15 (ADR-047): allow-negative policy — sales carry was_negative
+    // (the global switch lives in meta KV: absent = allow, owner default ON).
+    if v < 15 {
+        if !has_col("sales", "was_negative")? {
+            conn.execute_batch(
+                "ALTER TABLE sales ADD COLUMN was_negative INTEGER NOT NULL DEFAULT 0;
+                 PRAGMA user_version = 15;",
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute_batch("PRAGMA user_version = 15;")
+                .map_err(|e| e.to_string())?;
+        }
+    }
     Ok(())
 }
 
@@ -694,22 +708,37 @@ pub fn record_sale(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
-    // ADR-046 Tier 3 (APPROVED): explicit refusal — no silent negative.
-    // Inside the txn, before seq is consumed: refusal drops the tx fully.
+    // ADR-047 (APPROVED, replaces ADR-046 Tier 3): allow-negative policy.
+    // meta KV 'allow_negative_sale' = '0' restores the old refusal;
+    // absent/anything-else = allow (owner default ON). Below-available sales
+    // are flagged was_negative=1 + journalled — never silently zero.
+    let allow_neg: bool = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'allow_negative_sale'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .map(|s| s != "0")
+        .unwrap_or(true);
+    let mut short_desc: Option<String> = None;
     for it in items {
         if let Some(p) = it["product_id"].as_i64() {
             let qty = ct(&it["qty_milli"], "qty_milli")?;
             let stock: i64 = tx
-                .query_row(
-                    "SELECT stock_milli FROM products WHERE id = ?1",
-                    [p],
-                    |r| r.get(0),
-                )
+                .query_row("SELECT stock_milli FROM products WHERE id = ?1", [p], |r| {
+                    r.get(0)
+                })
                 .map_err(|e| e.to_string())?;
             if qty > stock {
+                if !allow_neg {
+                    let nm = it["name_fr"].as_str().unwrap_or("");
+                    return Err(format!(
+                        "[fiscal] STOCK_INSUFFICIENT product {p} ({nm}): requested {qty} milli, available {stock} milli"
+                    ));
+                }
                 let nm = it["name_fr"].as_str().unwrap_or("");
-                return Err(format!(
-                    "[fiscal] STOCK_INSUFFICIENT product {p} ({nm}): requested {qty} milli, available {stock} milli"
+                short_desc = Some(format!(
+                    "product {p} ({nm}): requested {qty} milli, available {stock} milli"
                 ));
             }
         }
@@ -727,9 +756,9 @@ pub fn record_sale(
           total_ht_ct, total_tva_ct, timbre_ct, total_ttc_ct,
           tva0_base_ct, tva0_amt_ct, tva0_ttc_ct, tva9_base_ct, tva9_amt_ct, tva9_ttc_ct,
           tva19_base_ct, tva19_amt_ct, tva19_ttc_ct,
-          payment_method, tva_enabled, timbre_enabled, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
+          payment_method, tva_enabled, timbre_enabled, was_negative, amount_paid_ct, amount_returned_ct, status, is_facture, created_at,
           client_sale_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,'COMPLETED',?31,?32,?33)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,'COMPLETED',?32,?33,?34)",
         rusqlite::params![
             id, invoice, ticket,
             str_field(&header["cashier_id"], "cashier_id")?,
@@ -743,7 +772,7 @@ pub fn record_sale(
             opt_str(&header["client_address"], "client_address")?.unwrap_or_default(),
             ht, tva, timbre, ttc,
             tier[0].0, tier[0].1, tier[0].2, tier[1].0, tier[1].1, tier[1].2, tier[2].0, tier[2].1, tier[2].2,
-            method, tva_on as i64, timbre_on as i64, paid, ret, is_facture,
+            method, tva_on as i64, timbre_on as i64, short_desc.is_some() as i64, paid, ret, is_facture,
             str_field(&header["created_at"], "created_at")?, key,
         ],
     );
@@ -819,6 +848,16 @@ pub fn record_sale(
             )
             .map_err(|e| e.to_string())?;
         }
+    }
+    // ADR-047: every below-available sale leaves an audit trace (who/when/what).
+    if let Some(desc) = &short_desc {
+        let actor = header["cashier_name"].as_str().unwrap_or("");
+        tx.execute(
+            "INSERT INTO audit_log (ts, actor, action, entity, entity_id, detail)
+             VALUES (datetime('now'), ?1, 'sale.negative', 'sales', ?2, ?3)",
+            rusqlite::params![actor, invoice, desc],
+        )
+        .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "id": id, "invoice_number": invoice, "ticket_number": ticket }))
@@ -2448,6 +2487,16 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
+    // ADR-047: below-available sales stay visible in the day disclosure.
+    let (short_count, short_total): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), SUM(total_ttc_ct) FROM sales
+             WHERE created_at >= ?1 AND created_at < ?2 AND status = 'COMPLETED'
+               AND was_negative = 1",
+            [&wstart, &wend],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
     let (returns_count, returns_total): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(ri.line_ttc_ct), 0)
@@ -2467,6 +2516,8 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
         "voids_count": voids,
         "returns_count": returns_count,
         "returns_total_ttc_ct": returns_total,
+        "short_count": short_count,
+        "short_total_ttc_ct": short_total.unwrap_or(0),
         "closed": locked,
     }))
 }
@@ -3568,8 +3619,9 @@ mod tests {
     }
 
     #[test]
-    fn adr046_tier3_oversell_refused_with_stock_insufficient() {
+    fn adr047_oversell_commits_flagged_negative_with_audit() {
         // 50 units x 18000ct, TVA 0 -> timbre 9000, TTC 909000 (consistent).
+        // Default policy (meta absent = allow): commits, flags, goes negative.
         let mut db = memdb();
         let h = serde_json::json!({
             "id": "neg-1", "cashier_id": "C-1", "cashier_name": "Amine",
@@ -3587,12 +3639,52 @@ mod tests {
         let items = vec![
             serde_json::json!({"product_id": 1, "barcode": "a", "name_fr": "LAIT", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 50000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 900000, "line_tva_ct": 0, "line_ttc_ct": 900000}),
         ];
-        let err = record_sale(&mut db, &h, &items).unwrap_err();
-        assert!(err.contains("STOCK_INSUFFICIENT"), "must refuse explicitly, got: {err}");
-        let n: i64 = db
-            .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+        let out = record_sale(&mut db, &h, &items).expect("allow-negative must commit");
+        let flag: i64 = db
+            .query_row(
+                "SELECT was_negative FROM sales WHERE id = ?1",
+                [out["id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(n, 0);
+        assert_eq!(flag, 1);
+        let stock: i64 = db
+            .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stock, -2000); // 48000 - 50000: negative, never clamped
+        let audit: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'sale.negative'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit, 1);
+    }
+
+    #[test]
+    fn adr047_meta_flag_off_restores_tier3_refusal() {
+        let mut db = memdb();
+        db.execute_batch("INSERT INTO meta (key, value) VALUES ('allow_negative_sale', '0');")
+            .unwrap();
+        let h = serde_json::json!({
+            "id": "neg-2", "cashier_id": "C-1", "cashier_name": "Amine",
+            "client_id": null, "client_name": null,
+            "payment_method": "ESPECES", "amount_paid_ct": 1000000, "amount_returned_ct": 91000,
+            "client_sale_id": "NEG-2",
+            "totals": { "total_ht_ct": 900000, "total_tva_ct": 0, "timbre_ct": 9000,
+                        "total_ttc_ct": 909000,
+                        "tva_breakdown": {
+                            "0": {"base_ht_ct": 900000, "tva_amount_ct": 0, "total_ttc_ct": 900000},
+                            "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0},
+                            "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}},
+            "is_facture": 0, "created_at": "2026-11-12T12:00:00.000Z"
+        });
+        let items = vec![
+            serde_json::json!({"product_id": 1, "barcode": "a", "name_fr": "LAIT", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 50000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 900000, "line_tva_ct": 0, "line_ttc_ct": 900000}),
+        ];
+        let err = record_sale(&mut db, &h, &items).unwrap_err();
+        assert!(err.contains("STOCK_INSUFFICIENT"), "flag off must refuse, got: {err}");
         let stock: i64 = db
             .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| r.get(0))
             .unwrap();
