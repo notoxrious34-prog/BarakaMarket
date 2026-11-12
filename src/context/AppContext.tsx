@@ -46,6 +46,8 @@ import { restoreLocalSnapshotKeys } from '../core/local-snapshot.js';
 import { can, type Session } from '../core/rbac.js';
 import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCount, removeOutboxEntry, OUTBOX_KEY, type OutboxEntry, type StorageLike } from '../core/sale-outbox';
 import { parseQtyPrefix } from '../core/barcode-qty';
+import { formatGrams } from '../core/display';
+import { checkStockAvailability } from '../core/stock-guard';
 import { reverseReceiptLines, editReceiptLines, applyReceiptLines } from '../core/purchase-lane';
 import { nextBRNumber, validateReceptionPayment, validateSupplierPayment, isValidNIF } from '../core/supplier-finance';
 import { validateSettlementAmount, reverseCreditOnVoid, validateCreditLimit } from '../core/client-debt';
@@ -836,6 +838,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHeldCarts(prev => prev.filter(h => h.id !== heldId));
   };
 
+  // ADR-046 Tier 3 (APPROVED): the sale is refused EXPLICITLY at scan time —
+  // cumulative cart qty vs local stock, packs × multiplier, KG exact to the
+  // milli. The lanes re-verify authoritatively at commit (STOCK_INSUFFICIENT).
+  const stockShortMsg = (product: Product, addQty: number, packMult?: number | null): string | null => {
+    const mult = packMult ?? 1;
+    const line = cart.currentCart.find(i => i.product_id === product.id && (i.packMultiplier ?? 1) === mult);
+    const shortage = checkStockAvailability(
+      [{ product_id: product.id, name_fr: product.name_fr, quantity: (line?.quantity ?? 0) + addQty, packMultiplier: mult }],
+      [{ id: product.id, stock_qty: product.stock_qty }],
+    );
+    if (!shortage) return null;
+    const avail = product.unit === 'KG' ? formatGrams(shortage.available) : `${shortage.available} u`;
+    // Scan feedback is French-only by convention (all scanBarcode messages).
+    return `Stock insuffisant: ${product.name_fr} — disponible: ${avail}`;
+  };
+
   const scanBarcode = (rawInput: string): { success: boolean; message: string } => {
     const code = rawInput.trim();
     if (!code) return { success: false, message: 'Code vide' };
@@ -859,6 +877,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (scaleResult.mode === 'PRICE' && scaleResult.priceCt !== undefined) {
           const unitCt = Math.round(product.sell_price * 100);
           const qtyMilli = unitCt > 0 ? Math.round((scaleResult.priceCt * 1000) / unitCt) : 1000;
+          const shortP = stockShortMsg(product, qtyMilli / 1000);
+          if (shortP) return { success: false, message: shortP };
           addToCart(product, qtyMilli / 1000);
           return {
             success: true,
@@ -866,6 +886,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         }
         const grams = scaleResult.weightGrams ?? 1000;
+        const shortW = stockShortMsg(product, grams / 1000);
+        if (shortW) return { success: false, message: shortW };
         addToCart(product, grams / 1000);
         return {
           success: true,
@@ -880,12 +902,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // wins — the cashier weighed it in their head, not on the plateau.
       if (directProduct.is_scale_product && isHardwareScaleActive && !hadPrefix) {
         const weight = Math.round((scaleWeightGrams / 1000) * 1000) / 1000;
+        const shortH = stockShortMsg(directProduct, weight);
+        if (shortH) return { success: false, message: shortH };
         addToCart(directProduct, weight);
         return {
           success: true,
           message: `${directProduct.name_fr} (${Math.round(weight * 1000)} g) pesé`,
         };
       } else {
+        const shortU = stockShortMsg(directProduct, mult);
+        if (shortU) return { success: false, message: shortU };
         addToCart(directProduct, mult);
         return {
           success: true,
@@ -906,6 +932,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           Math.round(product.sell_price * 100), multiplier, alias.price_override_ct ?? null,
         );
         if (multiplier > 1) {
+          const shortPk = stockShortMsg(product, mult, multiplier);
+          if (shortPk) return { success: false, message: shortPk };
           addToCart(product, mult, 0, {
             unitPriceTtc: effectiveCt / 100,
             packMultiplier: multiplier,
@@ -917,6 +945,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             message: `${product.name_fr} [${alias.pack_name ?? `Pack x${multiplier}`}]${mult > 1 ? ` x${mult}` : ''} - ${(effectiveCt / 100).toFixed(2)} DZD ajouté`,
           };
         }
+        const shortA = stockShortMsg(product, mult);
+        if (shortA) return { success: false, message: shortA };
         addToCart(product, mult, 0, { barcode: core });
         return { success: true, message: mult > 1 ? `${product.name_fr} x${mult} ajouté` : `${product.name_fr} ajouté` };
       }
@@ -929,6 +959,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         p.name_ar.includes(core)
     );
     if (fuzzy) {
+      const shortF = stockShortMsg(fuzzy, mult);
+      if (shortF) return { success: false, message: shortF };
       addToCart(fuzzy, mult);
       return { success: true, message: mult > 1 ? `${fuzzy.name_fr} x${mult} ajouté` : `${fuzzy.name_fr} ajouté` };
     }
@@ -1195,6 +1227,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         is_facture: isFactureReglementaire ? 1 : 0,
         created_at: createdAt,
       };
+      // ADR-046 Tier 3 (APPROVED): last local double-check before the
+      // authoritative lane commit — the lane re-verifies, but the cashier
+      // learns the available stock HERE, not after the ticket prints.
+      for (const it of cart.currentCart) {
+        const p = products.find(pp => pp.id === it.product_id);
+        if (!p) continue;
+        const s = checkStockAvailability(
+          [{ product_id: p.id, name_fr: p.name_fr, quantity: it.quantity, packMultiplier: it.packMultiplier }],
+          [{ id: p.id, stock_qty: p.stock_qty }],
+        );
+        if (s) {
+          const avail = p.unit === 'KG' ? formatGrams(s.available) : `${s.available} u`;
+          throw new Error(`Stock insuffisant: ${p.name_fr} — disponible: ${avail}`);
+        }
+      }
       // Degraded lane: no commit when the fiscal lane is unreachable (rush hour first).
       const out = authorityRef.current === 'FISCAL_SQLITE'
         ? await commitSale(fiscalHeader, payloadItems)

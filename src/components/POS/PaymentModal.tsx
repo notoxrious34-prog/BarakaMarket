@@ -111,7 +111,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
     if (isUnderpaid) return;
     // Empty tendered field = exact amount (rush-hour express lane).
     const tenderCt = amountPaidInput.trim() === '' ? totalTtcCt : tenderedCt;
-    await finalizeWith(tenderCt);
+    try {
+      await finalizeWith(tenderCt);
+    } catch (e) {
+      // ADR-046 Tier 3: explicit refusal (e.g. over-selling) surfaces here —
+      // no drawer kick, no chime, the cart stays intact for correction.
+      alert((e as Error).message);
+    }
   };
 
   const setExact = () => setAmountPaidInput((totalTtcCt / 100).toString());

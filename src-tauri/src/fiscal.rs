@@ -694,6 +694,26 @@ pub fn record_sale(
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
+    // ADR-046 Tier 3 (APPROVED): explicit refusal — no silent negative.
+    // Inside the txn, before seq is consumed: refusal drops the tx fully.
+    for it in items {
+        if let Some(p) = it["product_id"].as_i64() {
+            let qty = ct(&it["qty_milli"], "qty_milli")?;
+            let stock: i64 = tx
+                .query_row(
+                    "SELECT stock_milli FROM products WHERE id = ?1",
+                    [p],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if qty > stock {
+                let nm = it["name_fr"].as_str().unwrap_or("");
+                return Err(format!(
+                    "[fiscal] STOCK_INSUFFICIENT product {p} ({nm}): requested {qty} milli, available {stock} milli"
+                ));
+            }
+        }
+    }
     let invoice = format!("FACT-{year}-{:06}", bump_seq(&tx, "FACT", year)?);
     let ticket = format!("T-{year}-{:06}", bump_seq(&tx, "T", year)?);
     let is_facture = if header["is_facture"].as_i64().unwrap_or(0) == 1 {
@@ -3545,6 +3565,38 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn adr046_tier3_oversell_refused_with_stock_insufficient() {
+        // 50 units x 18000ct, TVA 0 -> timbre 9000, TTC 909000 (consistent).
+        let mut db = memdb();
+        let h = serde_json::json!({
+            "id": "neg-1", "cashier_id": "C-1", "cashier_name": "Amine",
+            "client_id": null, "client_name": null,
+            "payment_method": "ESPECES", "amount_paid_ct": 1000000, "amount_returned_ct": 91000,
+            "client_sale_id": "NEG-1",
+            "totals": { "total_ht_ct": 900000, "total_tva_ct": 0, "timbre_ct": 9000,
+                        "total_ttc_ct": 909000,
+                        "tva_breakdown": {
+                            "0": {"base_ht_ct": 900000, "tva_amount_ct": 0, "total_ttc_ct": 900000},
+                            "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0},
+                            "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}},
+            "is_facture": 0, "created_at": "2026-11-12T12:00:00.000Z"
+        });
+        let items = vec![
+            serde_json::json!({"product_id": 1, "barcode": "a", "name_fr": "LAIT", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 50000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 900000, "line_tva_ct": 0, "line_ttc_ct": 900000}),
+        ];
+        let err = record_sale(&mut db, &h, &items).unwrap_err();
+        assert!(err.contains("STOCK_INSUFFICIENT"), "must refuse explicitly, got: {err}");
+        let n: i64 = db
+            .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+        let stock: i64 = db
+            .query_row("SELECT stock_milli FROM products WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stock, 48000); // untouched
     }
 
     #[test]

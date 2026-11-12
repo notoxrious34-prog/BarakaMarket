@@ -2057,6 +2057,19 @@ export function openBarakaDb(dbPath: string): BarakaDb {
 
       db.exec('BEGIN IMMEDIATE');
       try {
+        // ADR-046 Tier 3 (APPROVED): explicit refusal — no silent negative.
+        // The check lives INSIDE the txn, before seq is consumed, so a
+        // refusal rolls back fully (no gaps, no partial stock).
+        const stockOf = db.prepare('SELECT stock_milli FROM products WHERE id = ?');
+        for (const it of items) {
+          if (it.product_id == null) continue;
+          const row = stockOf.get(it.product_id) as { stock_milli: number } | undefined;
+          if (row && it.qty_milli > row.stock_milli) {
+            throw new Error(
+              `[db] STOCK_INSUFFICIENT product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${row.stock_milli} milli`,
+            );
+          }
+        }
         const invoice = `FACT-${year}-${pad6(bumpSeq(db, 'FACT', year))}`;
         const ticket = `T-${year}-${pad6(bumpSeq(db, 'T', year))}`;
         db.prepare(

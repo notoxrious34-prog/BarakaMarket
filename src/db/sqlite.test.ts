@@ -144,6 +144,30 @@ test('db: recordSale with broken invariant throws + rolls back fully', () => {
   b.close();
 });
 
+test('db: ADR-046 Tier 3 — over-selling refuses with STOCK_INSUFFICIENT, stock untouched', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct(PROD); // stock 48.000
+  // Consistent single line: 50 units x 18000ct, TVA 0 -> timbre 9000, TTC 909000.
+  const line = calculateLineTotalsCt(18000, 50, 0);
+  const t = calculateSaleTotalsCt([{ tva_rate: 0 as const, ...line }], 'ESPECES');
+  assert.throws(
+    () => b.recordSale(
+      {
+        cashier_id: 'C-1', cashier_name: 'Amine', payment_method: 'ESPECES',
+        amount_paid_ct: 1000000, amount_returned_ct: 91000, totals: t,
+        created_at: '2026-10-26T14:00:00.000Z',
+      },
+      [
+        { product_id: 1, barcode: 'a', name_fr: 'LAIT', name_ar: '', unit_price_ct: 18000, qty_milli: 50000, unit: 'PIECE', tva_rate: 0, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct },
+      ],
+    ),
+    /STOCK_INSUFFICIENT/,
+  );
+  assert.equal(b.activeSalesCount(), 0);
+  assert.equal(b.getProduct(1).stock_milli, 48000); // untouched
+  b.close();
+});
+
 test('db: voidSale keeps row CANCELLED + journal entry, excluded from active', () => {
   const b = openBarakaDb(':memory:');
   b.upsertProduct(PROD);

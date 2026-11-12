@@ -121,7 +121,8 @@ test('backup §11: sale → backup → void → restore → identical journal', 
   // at backup time — same invoice, same active count, void gone.
   const dbPath = tmpDb('shopready.db');
   const b = openBarakaDb(dbPath);
-  b.upsertProduct(PROD(47, '6130000000474'));
+  // ADR-046 Tier 3: the fixture needs cover for both sales (2 x 1000 milli).
+  b.upsertProduct({ ...PROD(47, '6130000000474'), stock_milli: 10000 });
   const line = {
     product_id: 47, barcode: '6130000000474', name_fr: 'PROD 47', name_ar: '',
     unit_price_ct: 1500, qty_milli: 1000, unit: 'PIECE' as const, tva_rate: 0 as const,
