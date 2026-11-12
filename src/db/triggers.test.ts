@@ -78,11 +78,11 @@ test('t11: settlement rows are append-only', () => {
   b.close();
 });
 
-test('t14: v4 file climbs to v14 with triggers intact', () => {
+test('t15: v4 file climbs to v15 with triggers intact', () => {
   const p = tmpFile('t11v4');
   try {
     const b = openBarakaDb(p);
-    assert.equal(LATEST_SCHEMA_VERSION, 14);
+    assert.equal(LATEST_SCHEMA_VERSION, 15);
     // Simulate a v4 file: drop the v5 triggers, reset the version stamp.
     for (const t of ['trg_sales_no_delete', 'trg_sale_items_no_delete', 'trg_settlements_no_delete',
       'trg_sales_terminal', 'trg_users_no_delete', 'trg_audit_no_delete', 'trg_audit_no_update']) {
@@ -92,7 +92,7 @@ test('t14: v4 file climbs to v14 with triggers intact', () => {
     b.close();
     // Reopen climbs: version + all triggers back (seven legacy + three returns).
     const c = openBarakaDb(p);
-    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 14);
+    assert.equal((c.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, 15);
     const names = (c.db.prepare("SELECT name AS n FROM sqlite_master WHERE type = 'trigger'").all() as { n: string }[]).map(r => r.n);
     for (const t of ['trg_sales_no_delete', 'trg_sales_terminal', 'trg_audit_no_update',
       'trg_returns_no_delete', 'trg_return_items_no_delete', 'trg_returns_terminal']) {
