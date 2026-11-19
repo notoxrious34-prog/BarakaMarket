@@ -54,6 +54,7 @@ import { nextBRNumber, validateReceptionPayment, validateSupplierPayment, isVali
 import { validateSettlementAmount, reverseCreditOnVoid, validateCreditLimit } from '../core/client-debt';
 import { printSaleAuto, showPoleTendered } from '../core/print-lane';
 import { syncCatalogToNative, upsertProductsNative } from '../core/product-authority';
+import { syncClientsMirror, upsertClientMirror } from '../core/client-authority';
 import { isTauriRuntime } from '../core/fiscal-authority';
 import { ean13CheckDigit } from '../core/barcode-svg';
 
@@ -1155,10 +1156,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const retryOutboxDrain = (): void => { void drainOutbox(); };
 
   /** A1: owner-only discard of a poison entry. Audited, never silent. */
+  /**
+   * F2 (v1.8.4): reverse the browser-only effects of a never-committed row.
+   * Stock drain + credit debt (sales) or balance payment (settlements) minted
+   * at creation are undone with the same rounding; the lane never saw the
+   * row so nothing fiscal moves. The phantom row itself is dropped.
+   */
+  const reverseProvisionalEffects = (
+    provisionalId: string,
+    kind: 'sale' | 'settlement',
+    settleHeader: { client_id?: number; amount_ct?: number } | null,
+  ): void => {
+    if (kind === 'sale') {
+      const sale = sales.find(s => s.id === provisionalId);
+      if (sale) {
+        setProducts(prev => prev.map(p => {
+          const it = sale.items.find(i => i.product_id === p.id);
+          if (!it) return p;
+          return { ...p, stock_qty: Math.round((p.stock_qty + it.quantity * (it.packMultiplier ?? 1)) * 100) / 100 };
+        }));
+        if (sale.payment_method === 'CREDIT' && sale.client_id) {
+          const cid = sale.client_id;
+          const tot = sale.total_ttc;
+          setClients(prev => prev.map(c => (c.id === cid
+            ? { ...c, credit_balance: reverseCreditOnVoid(c.credit_balance, tot) }
+            : c)));
+        }
+        setSales(prev => prev.filter(s => s.id !== provisionalId));
+      }
+    } else if (settleHeader && settleHeader.client_id != null && (settleHeader.amount_ct ?? 0) > 0) {
+      // A settlement reduces the displayed debt at creation; discarding the
+      // uncommitted row must give it back (centimes -> DZD, same rounding).
+      const cid = settleHeader.client_id;
+      const back = Math.round((settleHeader.amount_ct as number)) / 100;
+      setClients(prev => prev.map(c => (c.id === cid
+        ? { ...c, credit_balance: Math.round((c.credit_balance + back) * 100) / 100 }
+        : c)));
+      setSettlements(prev => prev.filter(s => s.id !== provisionalId));
+    }
+  };
+
   const discardOutboxEntry = (key: string): void => {
     const target = loadOutbox(lsStore).find(e => e.key === key);
     if (!target) return;
     auditFiscal('sale.void', `outbox discard ${target.kind} ${target.provisionalId} (key ${key.slice(0, 8)}…) by ${session?.username ?? 'till'}`);
+    // F2 (v1.8.4): the outbox row never reached the lane — the browser-only
+    // effects minted at creation (stock drain, credit debt, settlement
+    // payment) must be reversed, or phantom debt/stock survives the discard.
+    reverseProvisionalEffects(target.provisionalId, target.kind,
+      target.kind === 'settlement'
+        ? (target.header as { client_id?: number; amount_ct?: number } | null)
+        : null);
     removeOutboxEntry(lsStore, key);
     refreshOutbox();
   };
@@ -1192,6 +1240,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (authority !== 'FISCAL_SQLITE' || nativeSyncRef.current || !isTauriRuntime()) return;
     nativeSyncRef.current = true;
     void syncCatalogToNative(products).catch(() => { nativeSyncRef.current = false; });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authority]);
+
+  // F4 (v1.8.4): one-way client mirror, BOTH lanes, once per session.
+  // Heals missing lane identities (screenshot case) so the next drain —
+  // boot, 60s, or manual — commits instead of refusing.
+  const clientsSyncRef = useRef(false);
+  const clientsRef = useRef(clients);
+  clientsRef.current = clients;
+  useEffect(() => {
+    if (authority !== 'FISCAL_SQLITE' || clientsSyncRef.current) return;
+    clientsSyncRef.current = true;
+    void syncClientsMirror(clientsRef.current).catch(() => { clientsSyncRef.current = false; });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authority]);
 
@@ -1281,6 +1342,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       // ADR-047: no local stock block — the lane decides authoritatively at
       // commit and stamps was_negative (scan already warned the cashier).
+      // F4 (v1.8.4): ensure the lane knows this client BEFORE a CREDIT
+      // commit — awaited (single row, both lanes). Failure is silent here;
+      // the commit refuses loudly with the reason (screenshot case).
+      // F1 (v1.8.4): advisory plafond pre-check — the lane enforces at
+      // commit (fraction rounding may differ by 0.01; lane is final).
+      if (paymentMethod === 'CREDIT') {
+        await upsertClientMirror(selectedClient).catch(() => false);
+        const projected = selectedClient.credit_balance + t.total_ttc_ct / 100;
+        if (selectedClient.max_credit_limit > 0 && projected - selectedClient.max_credit_limit > 0.005) {
+          throw new Error(
+            `[sale] plafond dépassé — solde ${selectedClient.credit_balance} + vente ${(t.total_ttc_ct / 100).toFixed(2)} > plafond ${selectedClient.max_credit_limit}`,
+          );
+        }
+      }
       // Degraded lane: no commit when the fiscal lane is unreachable (rush hour first).
       const out = authorityRef.current === 'FISCAL_SQLITE'
         ? await commitSale(fiscalHeader, payloadItems)
@@ -1359,7 +1434,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clearCart();
       openPrintModal(authoritative, isFactureReglementaire ? 'facture' : 'ticket');
       return authoritative;
-    } catch {
+    } catch (e) {
+      // F1 (v1.8.4): a deterministic plafond refusal must surface loudly —
+      // never degrade into an untracked provisional (no outbox, no reason).
+      if (e instanceof Error && /plafond dépassé/.test(e.message)) throw e;
       return completeSale(paymentMethod, amountPaid, isFactureReglementaire);
     }
   };
@@ -1379,7 +1457,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const target = sales.find(x => x.id === saleId);
     if (!target) throw new Error('[void] sale not found');
     if (target.status !== 'COMPLETED') throw new Error('[void] only COMPLETED sales can be voided');
-    const out = await commitVoid(saleId, why, s.username);
+    let out: { id: string; status: string } | null = null;
+    try {
+      out = await commitVoid(saleId, why, s.username);
+    } catch (e) {
+      // F2 (v1.8.4): the lane never saw this provisional ("sale not found") —
+      // cancel browser-only: reverse creation effects, drop the phantom row
+      // and its outbox entries. Any other error still throws (lane truth).
+      if (!target.is_provisional || !/not found/i.test((e as Error).message)) throw e;
+      reverseProvisionalEffects(target.id, 'sale', null);
+      for (const q of loadOutbox(lsStore).filter(q => q.provisionalId === target.id)) {
+        removeOutboxEntry(lsStore, q.key);
+      }
+      refreshOutbox();
+      auditFiscal('sale.void', `${target.invoice_number} (provisional cancel — lane never saw it) by ${s.username}`);
+      return;
+    }
     if (!out) throw new Error('[void] fiscal lane unreachable — retry when MODE FISCAL ACTIF');
     setSales(prev => prev.map(x => (x.id === saleId ? { ...x, status: 'CANCELLED' as const } : x)));
     // D3-fix: voiding a CREDIT sale gives the debt back — the carnet must not
@@ -1907,6 +2000,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       credit_balance: 0,
     };
     setClients(prev => [...prev, newClient]);
+    // F4 (v1.8.4): the lane must know this identity before any CREDIT commit.
+    void upsertClientMirror(newClient);
     return newClient;
   };
 
@@ -1915,7 +2010,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       throw new Error('[client] NIF must be exactly 15 digits');
     }
     if (clientData.max_credit_limit !== undefined) validateCreditLimit(clientData.max_credit_limit);
-    setClients(prev => prev.map(c => (c.id === id ? { ...c, ...clientData } : c)));
+    setClients(prev => {
+      const next = prev.map(c => (c.id === id ? { ...c, ...clientData } : c));
+      const updated = next.find(c => c.id === id);
+      // F4: profile edits (incl. plafond) sync to the lane; balance never crosses.
+      if (updated) void upsertClientMirror(updated);
+      return next;
+    });
   };
 
   const deleteClient = (id: number) => {

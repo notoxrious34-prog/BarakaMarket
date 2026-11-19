@@ -704,6 +704,25 @@ pub fn record_sale(
             "[fiscal] client inconnu — recréez le client avant une vente à crédit".to_string(),
         );
     }
+    // F1 (v1.8.4): plafond enforced AT COMMIT — the lane is the final truth
+    // (UI pre-check is advisory; degraded/outbox paths bypass it).
+    // Idempotent replays return above, so a committed sale never trips this.
+    if method == "CREDIT" {
+        if let Some(c) = client_fk {
+            let (bal, lim): (i64, i64) = conn
+                .query_row(
+                    "SELECT credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = ?1",
+                    [c],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+            if lim > 0 && bal + ttc > lim {
+                return Err(format!(
+                    "[fiscal] CREDIT_LIMIT_EXCEEDED client {c}: balance {bal}ct + sale {ttc}ct exceeds plafond {lim}ct"
+                ));
+            }
+        }
+    }
 
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3668,6 +3687,39 @@ mod tests {
         let z = daily_z(&db, "2026-11-12").unwrap();
         assert_eq!(z["short_count"], 1);
         assert_eq!(z["short_total_ttc_ct"], 909000);
+    }
+
+    // F1 (v1.8.4): plafond enforced at commit — over-limit CREDIT refuses,
+    // at-limit commits and posts the debt.
+    #[test]
+    fn f1_credit_plafond_enforced_at_commit() {
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO clients (id, name, max_credit_limit_ct) VALUES (7, 'Zed', 500000)",
+            [],
+        )
+        .unwrap();
+        let h = serde_json::json!({"id": "f1-over", "cashier_id": "C-1", "cashier_name": "Amine", "client_id": 7, "payment_method": "CREDIT", "amount_paid_ct": 0, "amount_returned_ct": 0, "client_sale_id": "f1-over", "totals": {"total_ht_ct": 900000, "total_tva_ct": 0, "timbre_ct": 0, "total_ttc_ct": 900000, "tva_breakdown": {"0": {"base_ht_ct": 900000, "tva_amount_ct": 0, "total_ttc_ct": 900000}, "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}, "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}}, "is_facture": 0, "created_at": "2026-11-12T14:00:00.000Z"});
+        let items = vec![
+            serde_json::json!({"product_id": 1, "barcode": "a", "name_fr": "LAIT", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 50000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 900000, "line_tva_ct": 0, "line_ttc_ct": 900000}),
+        ];
+        let err = record_sale(&mut db, &h, &items).unwrap_err();
+        assert!(err.contains("CREDIT_LIMIT_EXCEEDED"), "over-limit must refuse, got: {err}");
+        // Raise the plafond via the mirror, then the same sale commits.
+        db.execute(
+            "UPDATE clients SET max_credit_limit_ct = 1000000 WHERE id = 7",
+            [],
+        )
+        .unwrap();
+        let mut h2 = h.clone();
+        h2["id"] = serde_json::json!("f1-ok");
+        h2["client_sale_id"] = serde_json::json!("f1-ok");
+        let out = record_sale(&mut db, &h2, &items).expect("at-limit credit must commit");
+        assert!(out["invoice_number"].as_str().unwrap().starts_with("FACT-"));
+        let bal: i64 = db
+            .query_row("SELECT credit_balance_ct FROM clients WHERE id = 7", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bal, 900000);
     }
 
     #[test]

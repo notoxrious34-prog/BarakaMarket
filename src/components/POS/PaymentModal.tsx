@@ -89,6 +89,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({ onClose }) => {
       alert(isAr ? 'يرجى اختيار عميل من دفتر الديون لتسجيل البيع بالكريدي' : 'Veuillez sélectionner un client pour le crédit');
       return;
     }
+    // F1 (v1.8.4): hard plafond block — a deterministic business refusal must
+    // never degrade into an untracked provisional (no outbox, no reason).
+    // The lane re-verifies at commit (second wall for programmatic paths).
+    if (isCreditExceeded) {
+      alert(isAr ? `مرفوض: تجاوز السقف — الرصيد ${selectedClient.credit_balance} + البيع ${totals.total_ttc} > السقف ${selectedClient.max_credit_limit}` : `Refusé : plafond dépassé — solde ${selectedClient.credit_balance} + vente ${totals.total_ttc} > plafond ${selectedClient.max_credit_limit}`);
+      return;
+    }
 
     // Gate-02 TASK 1: authoritative SQLite commit in fiscal mode (monotonic
     // FACT/T); provisional fallback keeps the rush-hour line moving.

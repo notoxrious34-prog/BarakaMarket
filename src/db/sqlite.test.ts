@@ -219,6 +219,73 @@ test('db: v1.8.3 — unknown-to-lane product COMMITS flagged (was_negative=1), n
   b.close();
 });
 
+test('db: F4 — upsertClientMirror inserts + preserves lane balance, updates plafond', () => {
+  const b = openBarakaDb(':memory:');
+  const out = b.upsertClientMirror({ id: 5, name: 'Test 1', phone: '055', max_credit_limit_ct: 500000 });
+  assert.equal(out.id, 5);
+  b.db.prepare('UPDATE clients SET credit_balance_ct = 37000 WHERE id = 5').run();
+  b.upsertClientMirror({ id: 5, name: 'Test 1 Renamed', max_credit_limit_ct: 600000 });
+  const row = b.db.prepare('SELECT name, credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = 5').get() as { name: string; credit_balance_ct: number; max_credit_limit_ct: number };
+  assert.equal(row.name, 'Test 1 Renamed');
+  assert.equal(row.credit_balance_ct, 37000); // lane-owned ledger untouched
+  assert.equal(row.max_credit_limit_ct, 600000); // UI-owned plafond synced
+  assert.throws(() => b.upsertClientMirror({ id: 0, name: 'X' }), /id must be > 0/);
+  assert.throws(() => b.upsertClientMirror({ id: 6, name: '  ' }), /must not be empty/);
+  b.close();
+});
+
+test('db: F1 — CREDIT over plafond refuses at commit; raised plafond commits + posts debt', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct(PROD);
+  b.upsertClientMirror({ id: 7, name: 'Zed', max_credit_limit_ct: 500000 });
+  const line = calculateLineTotalsCt(18000, 50, 0);
+  const t = calculateSaleTotalsCt([{ tva_rate: 0 as const, ...line }], 'CREDIT');
+  assert.equal(t.timbre_ct, 0); // no timbre on credit grant
+  const mkArgs = () => ({
+    header: {
+      cashier_id: 'C-1', cashier_name: 'Amine', client_id: 7, payment_method: 'CREDIT' as const,
+      amount_paid_ct: 0, amount_returned_ct: 0, totals: t,
+      created_at: '2026-10-26T14:00:00.000Z',
+    },
+    items: [
+      { product_id: 1, barcode: 'a', name_fr: 'LAIT', name_ar: '', unit_price_ct: 18000, qty_milli: 50000, unit: 'PIECE' as const, tva_rate: 0 as const, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct },
+    ],
+  });
+  const over = mkArgs();
+  assert.throws(() => b.recordSale(over.header, over.items), /CREDIT_LIMIT_EXCEEDED/);
+  assert.equal(b.activeSalesCount(), 0);
+  b.upsertClientMirror({ id: 7, name: 'Zed', max_credit_limit_ct: 1000000 });
+  const ok = mkArgs();
+  const out = b.recordSale(ok.header, ok.items);
+  assert.match(out.invoice_number, /^FACT-/);
+  const st = b.getClientStatement(7);
+  assert.equal((st.client as { credit_balance_ct: number }).credit_balance_ct, 900000);
+  b.close();
+});
+
+test('db: F4 — credit sale to a mirrored client commits (screenshot case)', () => {
+  const b = openBarakaDb(':memory:'); // lane catalog + ledger both empty
+  b.upsertClientMirror({ id: 9, name: 'Test 1' }); // no plafond = unlimited
+  const line = calculateLineTotalsCt(18000, 2, 0);
+  const t = calculateSaleTotalsCt([{ tva_rate: 0 as const, ...line }], 'CREDIT');
+  const out = b.recordSale(
+    {
+      cashier_id: 'C-1', cashier_name: 'Amine', client_id: 9, payment_method: 'CREDIT' as const,
+      amount_paid_ct: 0, amount_returned_ct: 0, totals: t,
+      created_at: '2026-10-26T14:00:00.000Z',
+    },
+    [
+      { product_id: 424242, barcode: 'x', name_fr: 'GHOST', name_ar: '', unit_price_ct: 18000, qty_milli: 2000, unit: 'PIECE' as const, tva_rate: 0 as const, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct },
+    ],
+  );
+  assert.match(out.invoice_number, /^FACT-/);
+  const row = b.getSale(out.id) as Record<string, unknown>;
+  assert.equal(row.was_negative, 1); // unknown product still flagged
+  const st = b.getClientStatement(9);
+  assert.equal((st.client as { credit_balance_ct: number }).credit_balance_ct, 36000);
+  b.close();
+});
+
 test('db: voidSale keeps row CANCELLED + journal entry, excluded from active', () => {
   const b = openBarakaDb(':memory:');
   b.upsertProduct(PROD);

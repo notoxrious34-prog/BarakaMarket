@@ -931,6 +931,16 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     }
   });
 
+  // F4 (v1.8.4): client identity mirror — profile sync, never the balance.
+  app.post('/api/clients/upsert', (req, res) => {
+    try {
+      const out = baraka.upsertClientMirror(req.body as never);
+      res.status(200).json(out);
+    } catch (e) {
+      res.status(400).json({ error: (e as Error).message });
+    }
+  });
+
   // Gate-02 TASK 2 Lane A — raw ESC/POS spool. Accepts {hex} byte stream
   // (drawer kicks, ticket buffers) and appends to a local spool file that a
   // USB/COM forwarder drains. Zero hardware in the test lane: file exists

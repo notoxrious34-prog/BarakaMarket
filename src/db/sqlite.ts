@@ -598,6 +598,8 @@ export interface BarakaDb {
   /** ADR-012-MKT: atomic Carnet de Dette settlement + credit ceiling gate. */
   settleClientCredit(payload: ClientSettlementPayload): ClientSettlementResult;
   checkCreditEligibility(clientId: number, saleTotalTtcCt: number): CreditEligibility;
+  /** F4 (v1.8.4): client identity mirror — profile sync, never the balance. */
+  upsertClientMirror(input: { id: number; name: string; phone?: string; address?: string; nif?: string | null; nis?: string | null; rc?: string | null; ai?: string | null; max_credit_limit_ct?: number; notes?: string | null }): { id: number };
   getClientStatement(clientId: number): {
     client: Record<string, unknown>;
     settlements: Record<string, unknown>[];
@@ -1310,6 +1312,27 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
         throw e;
       }
+    },
+
+    /** F4 (v1.8.4): client identity mirror — profile sync, never the balance. */
+    upsertClientMirror(input: { id: number; name: string; phone?: string; address?: string; nif?: string | null; nis?: string | null; rc?: string | null; ai?: string | null; max_credit_limit_ct?: number; notes?: string | null }): { id: number } {
+      if (!Number.isInteger(input.id) || input.id <= 0) throw new Error('[db] client id must be > 0');
+      const name = (input.name ?? '').trim();
+      if (!name) throw new Error('[db] client name must not be empty');
+      const limit = input.max_credit_limit_ct ?? 0;
+      if (!Number.isInteger(limit) || limit < 0) throw new Error('[db] max_credit_limit_ct must be >= 0');
+      db.prepare(
+        `INSERT INTO clients (id, name, phone, address, nif, nis, rc, ai, max_credit_limit_ct, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name, phone = excluded.phone, address = excluded.address,
+          nif = excluded.nif, nis = excluded.nis, rc = excluded.rc, ai = excluded.ai,
+          max_credit_limit_ct = excluded.max_credit_limit_ct, notes = excluded.notes`,
+      ).run(
+        input.id, name, input.phone ?? '', input.address ?? '', input.nif ?? null,
+        input.nis ?? null, input.rc ?? null, input.ai ?? null, limit, input.notes ?? null,
+      );
+      return { id: input.id };
     },
 
     checkCreditEligibility(clientId: number, saleTotalTtcCt: number): CreditEligibility {
@@ -2063,6 +2086,19 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const saleDay = fiscalDayISO(new Date(createdAt));
       if (isDayLocked(db, saleDay)) {
         throw new Error(`[db] day ${saleDay} is already legally closed (Z FINALISÉ) — sale refused`);
+      }
+      // F1 (v1.8.4): plafond enforced AT COMMIT — the lane is the final truth
+      // (UI pre-check is advisory; degraded/outbox paths bypass it).
+      if (header.payment_method === 'CREDIT' && clientFk !== null) {
+        const ledger = db.prepare(
+          'SELECT credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = ?',
+        ).get(clientFk) as { credit_balance_ct: number; max_credit_limit_ct: number } | undefined;
+        const projected = (ledger?.credit_balance_ct ?? 0) + t.total_ttc_ct;
+        if ((ledger?.max_credit_limit_ct ?? 0) > 0 && projected > (ledger?.max_credit_limit_ct ?? 0)) {
+          throw new Error(
+            `[db] CREDIT_LIMIT_EXCEEDED client ${clientFk}: balance ${ledger?.credit_balance_ct ?? 0}ct + sale ${t.total_ttc_ct}ct exceeds plafond ${ledger?.max_credit_limit_ct ?? 0}ct`,
+          );
+        }
       }
 
       db.exec('BEGIN IMMEDIATE');

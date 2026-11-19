@@ -88,6 +88,14 @@ fn product_upsert(product: serde_json::Value) -> Result<serde_json::Value, Strin
     product::product_upsert(&conn, &product)
 }
 
+/// F4 (v1.8.4): client identity mirror — profile sync, never the balance.
+#[tauri::command]
+fn client_upsert(client: serde_json::Value) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    product::client_upsert(&conn, &client)
+}
+
 /// T4c: native product mirror — full list for stock-truth reads.
 #[tauri::command]
 fn product_list() -> Result<serde_json::Value, String> {
@@ -650,6 +658,7 @@ fn main() {
             product_list,
             product_search,
             product_delete,
+            client_upsert,
             user_verify,
             change_pin,
             user_list,

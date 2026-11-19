@@ -88,6 +88,50 @@ pub fn product_upsert(conn: &Connection, p: &Value) -> Result<Value, String> {
     Ok(json!({ "id": id }))
 }
 
+/// F4 (v1.8.4): client identity mirror (UI -> lane). Profile fields sync by
+/// explicit UI id; credit_balance_ct is NEVER touched — the lane owns the
+/// ledger (sale/settlement/void postings only). max_credit_limit_ct syncs
+/// (UI-owned plafond) so the lane can enforce F1 at commit time.
+pub fn client_upsert(conn: &Connection, c: &Value) -> Result<Value, String> {
+    let id = ct(&c["id"], "id")?;
+    if id <= 0 {
+        return Err("[client] id must be > 0".to_string());
+    }
+    let name = req_str(&c["name"], "name")?;
+    if name.trim().is_empty() {
+        return Err("[client] name must not be empty".to_string());
+    }
+    let limit = c["max_credit_limit_ct"].as_i64().unwrap_or(0);
+    if limit < 0 {
+        return Err("[client] max_credit_limit_ct must be >= 0".to_string());
+    }
+    conn.execute(
+        "INSERT INTO clients (id, name, phone, address, nif, nis, rc, ai,
+          max_credit_limit_ct, notes)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name, phone = excluded.phone,
+          address = excluded.address, nif = excluded.nif, nis = excluded.nis,
+          rc = excluded.rc, ai = excluded.ai,
+          max_credit_limit_ct = excluded.max_credit_limit_ct,
+          notes = excluded.notes",
+        rusqlite::params![
+            id,
+            name,
+            c["phone"].as_str().unwrap_or(""),
+            c["address"].as_str().unwrap_or(""),
+            c["nif"].as_str(),
+            c["nis"].as_str(),
+            c["rc"].as_str(),
+            c["ai"].as_str(),
+            limit,
+            c["notes"].as_str(),
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(json!({ "id": id }))
+}
+
 fn row_to_json(r: &rusqlite::Row) -> rusqlite::Result<Value> {
     Ok(json!({
         "id": r.get::<_, i64>(0)?,
@@ -229,5 +273,40 @@ mod tests {
         assert_eq!(r2.as_array().unwrap().len(), 1);
         let r3 = product_search(&db, "zzz-no-match").unwrap();
         assert_eq!(r3.as_array().unwrap().len(), 0);
+    }
+
+    // F4 (v1.8.4): client mirror inserts + updates profile, NEVER the balance.
+    #[test]
+    fn client_upsert_syncs_profile_never_balance() {
+        let db = memdb();
+        let out = client_upsert(
+            &db,
+            &json!({"id": 5, "name": "Test 1", "phone": "055", "max_credit_limit_ct": 500000}),
+        )
+        .unwrap();
+        assert_eq!(out["id"], json!(5));
+        // Lane-side debt posting, then a profile re-sync must NOT wipe it.
+        db.execute(
+            "UPDATE clients SET credit_balance_ct = 37000 WHERE id = 5",
+            [],
+        )
+        .unwrap();
+        client_upsert(
+            &db,
+            &json!({"id": 5, "name": "Test 1 Renamed", "max_credit_limit_ct": 600000}),
+        )
+        .unwrap();
+        let (name, bal, lim): (String, i64, i64) = db
+            .query_row(
+                "SELECT name, credit_balance_ct, max_credit_limit_ct FROM clients WHERE id = 5",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(name, "Test 1 Renamed");
+        assert_eq!(bal, 37000); // lane-owned ledger untouched
+        assert_eq!(lim, 600000); // UI-owned plafond synced
+        assert!(client_upsert(&db, &json!({"id": 0, "name": "X"})).is_err());
+        assert!(client_upsert(&db, &json!({"id": 6, "name": "  "})).is_err());
     }
 }
