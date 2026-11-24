@@ -10,6 +10,7 @@ use std::{fs, path::PathBuf};
 mod auth;
 mod fiscal;
 mod fiscal_sales_book;
+mod machine;
 mod product;
 
 /// Frozen fiscal schema — the SAME file the Node lane is tested against.
@@ -86,6 +87,28 @@ fn product_upsert(product: serde_json::Value) -> Result<serde_json::Value, Strin
     let db = provision_db()?;
     let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
     product::product_upsert(&conn, &product)
+}
+
+/// ADR-050 P1: native machine facts (MachineGuid/COMPUTERNAME/ARCH, std-only).
+#[tauri::command]
+fn machine_hwid() -> Result<serde_json::Value, String> {
+    Ok(machine::machine_facts())
+}
+
+/// ADR-050 P1: meta KV read (license anchors on the native lane).
+#[tauri::command]
+fn meta_get(key: String) -> Result<Option<String>, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    machine::meta_get(&conn, &key)
+}
+
+/// ADR-050 P1: meta KV upsert.
+#[tauri::command]
+fn meta_set(key: String, value: String) -> Result<(), String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    machine::meta_set(&conn, &key, &value)
 }
 
 /// F4 (v1.8.4): client identity mirror — profile sync, never the balance.
@@ -659,6 +682,9 @@ fn main() {
             product_search,
             product_delete,
             client_upsert,
+            machine_hwid,
+            meta_get,
+            meta_set,
             user_verify,
             change_pin,
             user_list,

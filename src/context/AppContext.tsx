@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useMemo } from 'react';
 import { useCart } from './CartContext';
 import { computeHwid, collectBrowserFingerprint, validateLicense } from '../core/licensing';
-import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed, loadStoredLicense } from '../core/license-store';
+import { saveStoredLicense, restoreLicenseFromSqlite, getOrCreateMachineSeed, getInstallEpochMs, loadStoredLicense } from '../core/license-store';
+import { ensureMachineSeed, collectMachineFacts, nativeParts, publishLicenseGate } from '../core/machine-authority';
 import { assessStoredLicense } from '../core/license-verify';
 import { fiscalDayISO } from '../core/fiscal-day';
 import {
@@ -216,6 +217,10 @@ interface AppContextType {
   trialRemaining: { sales: number; days: number };
   /** ADR-002-MKT: hard trial expiry — POS checkout blocked while true. */
   isTrialExpired: boolean;
+  /** ADR-050 P4: inside the 3-day grace after trial exhaustion (banner, sales open). */
+  inGrace: boolean;
+  /** ADR-050 P4: clock rollback detected (monotonic ratchet) — hard lock. */
+  licenseTampered: boolean;
   /** L1-fix: stored ACTIVATED re-verified (forged key => treated as expired). */
   licenseBroken: boolean;
   /** L-drift: activation HWID differs from this machine (lock iff hwid known). */
@@ -2228,28 +2233,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [licenseBroken, setLicenseBroken] = useState(false);
   const [licenseDrift, setLicenseDrift] = useState(false);
   const [licenseCryptoOk, setLicenseCryptoOk] = useState(true);
+  // ADR-050 P4: monotonic ratchet (W3) — a clock rolled back >1h is tamper.
+  const [licenseTampered, setLicenseTampered] = useState(false);
+  useEffect(() => {
+    try {
+      const k = 'baraka_last_seen_ms';
+      const now = Date.now();
+      const last = parseInt(localStorage.getItem(k) ?? '', 10);
+      if (Number.isFinite(last) && last > 0 && now < last - 3600000) {
+        setLicenseTampered(true);
+      } else {
+        localStorage.setItem(k, String(Math.max(now, Number.isFinite(last) && last > 0 ? last : 0)));
+      }
+    } catch { /* private mode: no ratchet */ }
+  }, []);
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const rec = loadStoredLicense();
         if (!rec || rec.status !== 'ACTIVATED') return;
-        const currentHwid = computeHwid(collectBrowserFingerprint(getOrCreateMachineSeed()));
-        const a = await assessStoredLicense(rec, currentHwid, validateLicense);
+        // ADR-050 P1: meta-anchored seed + native facts when available.
+        // legacyHwid = the pre-native formula: a genuine key issued against
+        // it migrates with a warning, never a lock (no-brick upgrade).
+        const seed = await ensureMachineSeed();
+        const facts = await collectMachineFacts();
+        const currentHwid = computeHwid(facts ? nativeParts(facts, seed) : collectBrowserFingerprint(seed));
+        const legacyHwid = computeHwid(collectBrowserFingerprint(seed));
+        const a = await assessStoredLicense(rec, currentHwid, validateLicense,
+          legacyHwid !== currentHwid ? [legacyHwid] : []);
         if (cancelled) return;
         setLicenseDrift(a.drift);
         setLicenseCryptoOk(a.cryptoOk);
         // Enforce only when the activation HWID is known: a signature that
         // fails against its OWN hwid is forged or corrupted — never genuine —
         // and a genuine key on another machine must re-activate here.
-        if (rec.hwid?.trim() && (!a.cryptoOk || a.drift)) setLicenseBroken(true);
+        // Migrated keys (legacy formula) warn only — staff re-issues later.
+        if (rec.hwid?.trim() && (!a.cryptoOk || (a.drift && !a.migrated))) setLicenseBroken(true);
       } catch { /* offline lane: keep the trusted snapshot */ }
     })();
     return () => { cancelled = true; };
   }, [licenseRev]);
-  const isTrialExpired = licenseBroken || (!licenseSnapshot.activated
+  const trialExhausted = !licenseSnapshot.activated
     && licenseSnapshot.sales <= 0
-    && licenseSnapshot.days <= 0);
+    && licenseSnapshot.days <= 0;
+  // ADR-050 P4: 3-day grace after exhaustion (epoch + 14d trial + 3d grace).
+  const graceActive = trialExhausted && !licenseTampered && Date.now() <= getInstallEpochMs() + 17 * 86400000;
+  const isTrialExpired = licenseBroken || licenseTampered || (trialExhausted && !graceActive);
+  const inGrace = !isTrialExpired && graceActive;
+  // ADR-050 P2: publish the boot verdict for the native lane (no crypto
+  // there — it enforces the published verdict + budgets + override).
+  useEffect(() => {
+    const reason = licenseTampered
+      ? 'LICENSE_DENIED'
+      : licenseBroken
+        ? (licenseCryptoOk ? 'LICENSE_DENIED' : 'LICENSE_KEY_INVALID')
+        : 'LICENSE_TRIAL_EXPIRED';
+    publishLicenseGate(!isTrialExpired, isTrialExpired ? reason : undefined);
+  }, [isTrialExpired, licenseBroken, licenseCryptoOk, licenseTampered]);
 
   const openPrintModal = (sale: Sale, type: 'ticket' | 'facture') => {
     setCurrentPrintSale(sale);
@@ -2417,7 +2458,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         completeStoreSetup,
         licenseActivated: licenseSnapshot.activated,
         trialRemaining: { sales: licenseSnapshot.sales, days: licenseSnapshot.days },
-        isTrialExpired, licenseBroken, licenseDrift, licenseCryptoOk,
+        isTrialExpired, inGrace, licenseTampered, licenseBroken, licenseDrift, licenseCryptoOk,
         openPrintModal,
         closePrintModal,
         closeSettlementQuittance,

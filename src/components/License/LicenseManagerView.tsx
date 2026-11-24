@@ -1,10 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   computeHwid, collectBrowserFingerprint,
   validateLicense, evaluateTrial,
 } from '../../core/licensing';
-import { getOrCreateMachineSeed, getInstallEpochMs, loadStoredLicense, saveStoredLicense } from '../../core/license-store';
+import { getInstallEpochMs, loadStoredLicense, saveStoredLicense } from '../../core/license-store';
+import { ensureMachineSeed, collectMachineFacts, nativeParts, readMetaKv, writeMetaKv, LICENSE_OVERRIDE_META_KEY, UNLOCK_COUNTER_META_KEY } from '../../core/machine-authority';
+import { validateEnvelopeKey, parseEnvelopeKey } from '../../core/license-envelope';
+import { verifyUnlock } from '../../core/license-unlock';
+import { auditSessionEvent } from '../../core/session-authority';
 import { APP_VERSION } from '../../core/version';
 import {
   KeyRound,
@@ -25,13 +29,36 @@ import {
  * No price is ever rendered here: pricing lives on the quote/invoice, not in
  * the product. Key generation stays EXCLUSIVELY in scripts/keygen.ts. */
 
+/** Tiny semver compare (1.9.0 vs 2.9.9) — for v2 maxVer policy. */
+function cmpVer(a: string, b: string): number {
+  const pa = a.split('.').map(n => parseInt(n, 10) || 0);
+  const pb = b.split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pa[i] ?? 0) > (pb[i] ?? 0) ? 1 : -1;
+  }
+  return 0;
+}
+
 export const LicenseManagerView: React.FC = () => {
-  const { language, sales, storeProfile, licenseBroken, licenseDrift, licenseCryptoOk } = useApp();
+  const { language, sales, storeProfile, licenseBroken, licenseDrift, licenseCryptoOk, session } = useApp();
   const isAr = language === 'ar';
 
-  // Gate-03 TASK 3: real deterministic HWID (stable seed + platform fingerprint).
-  const seed = useMemo(() => getOrCreateMachineSeed(), []);
-  const hardwareId = useMemo(() => computeHwid(collectBrowserFingerprint(seed)), [seed]);
+  // Gate-03 TASK 3 + ADR-050 P1: native HWID when the exe lane answers,
+  // browser best-effort otherwise. The SHOWN hwid is what gets activated.
+  const [hardwareId, setHardwareId] = useState('BM-····-····-····-····');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const seed = await ensureMachineSeed();
+        const facts = await collectMachineFacts();
+        if (!cancelled) {
+          setHardwareId(computeHwid(facts ? nativeParts(facts, seed) : collectBrowserFingerprint(seed)));
+        }
+      } catch { /* keep placeholder */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [storeName, setStoreName] = useState(() => loadStoredLicense()?.storeName ?? storeProfile.store_name ?? '');
   const [inputKey, setInputKey] = useState('');
   const [stored, setStored] = useState(() => loadStoredLicense());
@@ -76,13 +103,81 @@ export const LicenseManagerView: React.FC = () => {
       setActivationError(isAr ? 'أدخل اسم المحل أولاً' : 'Saisissez le nom du magasin');
       return;
     }
-    if (await validateLicense(storeName, hardwareId, inputKey)) {
+    const key = inputKey.trim();
+    // ADR-050 P4: v2 envelope keys (spare HWID, tiers, expiry, max-ver).
+    if (key.startsWith('AK2-')) {
+      const v = await validateEnvelopeKey(storeName, hardwareId, key, Date.now());
+      if (!v.ok) {
+        setActivationError(isAr
+          ? (v.expired ? 'انتهت صلاحية عقد الدعم — جدّده عبر الدعم' : 'مفتاح غير صالح لهذا المحل/الجهاز')
+          : (v.expired ? 'Support contract expired — renew via support' : 'Clé invalide pour ce magasin / HWID'));
+        return;
+      }
+      if (v.maxVer && cmpVer(APP_VERSION, v.maxVer) > 0) {
+        setActivationError(isAr ? `هذا المفتاح صالح حتى النسخة ${v.maxVer} — حدّث المفتاح` : `Clé valide jusqu'à la version ${v.maxVer} — renouvelez la clé`);
+        return;
+      }
+      const rec = { status: 'ACTIVATED' as const, storeName: storeName.trim(), key, hwid: hardwareId, installedAtMs: getInstallEpochMs() };
+      saveStoredLicense(rec);
+      setStored(rec);
+      void auditSessionEvent(session?.username ?? 'owner', 'license.activate', `v2 tier=${v.tier} slot=${v.slot}`);
+      return;
+    }
+    if (await validateLicense(storeName, hardwareId, key)) {
       // ADR-002: persist HWID with the record — SQLite restore refuses mismatches.
-      const rec = { status: 'ACTIVATED' as const, storeName: storeName.trim(), key: inputKey.trim(), hwid: hardwareId, installedAtMs: getInstallEpochMs() };
+      const rec = { status: 'ACTIVATED' as const, storeName: storeName.trim(), key, hwid: hardwareId, installedAtMs: getInstallEpochMs() };
       saveStoredLicense(rec); // localStorage + fire-and-forget SQLite meta mirror
       setStored(rec);
+      void auditSessionEvent(session?.username ?? 'owner', 'license.activate', 'v1');
     } else {
       setActivationError(isAr ? 'مفتاح غير صالح لهذا المحل/الجهاز' : 'Clé invalide pour ce magasin / HWID');
+    }
+  };
+
+  /** v2 envelope facts of the stored key (display only, no crypto). */
+  const storedV2 = stored?.key.startsWith('AK2-') ? parseEnvelopeKey(stored.key) : null;
+
+  // ADR-050 P4: owner 24h emergency override + offline unlock codes.
+  const [overrideUntilMs, setOverrideUntilMs] = useState<number | null>(null);
+  const [unlockInput, setUnlockInput] = useState('');
+  const [unlockMsg, setUnlockMsg] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const ov = await readMetaKv(LICENSE_OVERRIDE_META_KEY);
+        if (!cancelled && ov) {
+          const u = parseInt(ov, 10);
+          setOverrideUntilMs(Number.isFinite(u) && u > Date.now() ? u : null);
+        }
+      } catch { /* lane silent */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const handleOverride = () => {
+    if (session?.role !== 'owner') return;
+    const until = Date.now() + 24 * 3600000;
+    writeMetaKv(LICENSE_OVERRIDE_META_KEY, String(until));
+    setOverrideUntilMs(until);
+    void auditSessionEvent(session.username, 'license.override', '24h emergency');
+  };
+  const handleUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setUnlockMsg('');
+    try {
+      const lastRaw = await readMetaKv(UNLOCK_COUNTER_META_KEY);
+      const last = parseInt(lastRaw ?? '0', 10) || 0;
+      const v = await verifyUnlock(unlockInput, hardwareId, last, Date.now());
+      if (!v.ok || !v.token) {
+        setUnlockMsg(isAr ? `رمز مرفوض (${v.reason})` : `Code rejeté (${v.reason})`);
+        return;
+      }
+      writeMetaKv(UNLOCK_COUNTER_META_KEY, String(v.token.counter));
+      writeMetaKv(LICENSE_OVERRIDE_META_KEY, String(Math.min(v.token.exp, Date.now() + 7 * 86400000)));
+      setUnlockMsg(isAr ? 'تم القبول — البيع مفتوح مؤقتًا' : 'Code accepté — ventes rouvertes temporairement');
+      void auditSessionEvent(session?.username ?? 'owner', 'license.unlock', `scope=${v.token.scope} counter=${v.token.counter}`);
+    } catch {
+      setUnlockMsg(isAr ? 'تعذّر التحقق — أعد المحاولة' : 'Vérification impossible — réessayez');
     }
   };
 
@@ -135,7 +230,7 @@ export const LicenseManagerView: React.FC = () => {
                 : (isAr ? `نسخة تجريبية — ${trial.salesRemaining} عملية / ${trial.daysRemaining} يوم` : `Essai — ${trial.salesRemaining} ventes / ${trial.daysRemaining} j`)}
             </div>
             <div className="text-[11px] text-slate-400 font-mono">
-              {showActive ? stored?.storeName : 'TRIAL 50 ventes / 14 j'} • {hardwareId}
+              {showActive ? stored?.storeName : 'TRIAL 50 ventes / 14 j'} • {hardwareId}{storedV2 ? ` • ${storedV2.env.tier}${storedV2.env.exp ? ' → ' + new Date(storedV2.env.exp).toISOString().slice(0, 10) : ''}${storedV2.env.h2 ? ' +spare' : ''}` : ''}
             </div>
           </div>
         </div>
@@ -328,6 +423,59 @@ export const LicenseManagerView: React.FC = () => {
               {isAr ? 'الأسعار وشروط البيع في عرض السعر والفاتورة — لا تُعرض داخل البرنامج.' : 'Tarifs et CGV sur devis et facture — jamais affichés dans le produit.'}
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* ── 5 · ADR-050 P4: emergency override (owner) + offline unlock ─── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {session?.role === 'owner' && (
+          <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5">
+            <div className="text-sm font-black text-white mb-1">
+              {isAr ? 'تجاوز طوارئ المالك — 24 ساعة' : 'Dépannage gérant — 24 h'}
+            </div>
+            <p className="text-xs text-slate-400 leading-relaxed mb-3">
+              {isAr
+                ? 'يفتح البيع ليوم واحد عند تعذّر التفعيل (عطل/سفر). يُسجَّل في التدقيق مع اسمك.'
+                : 'Rouvre les ventes 24 h en cas de blocage (panne/voyage). Auditée à votre nom.'}
+            </p>
+            {overrideUntilMs && (
+              <p className="text-[11px] text-emerald-400 font-mono mb-2" dir="ltr">
+                ACTIVE → {new Date(overrideUntilMs).toISOString().slice(0, 16).replace('T', ' ')}
+              </p>
+            )}
+            <button
+              onClick={handleOverride}
+              className="w-full py-2.5 bg-gradient-to-r from-sky-600 to-sky-500 hover:from-sky-500 hover:to-sky-400 text-white rounded-xl text-sm font-black cursor-pointer"
+            >
+              {isAr ? 'تفعيل التجاوز (24h)' : 'Activer le dépannage (24 h)'}
+            </button>
+          </div>
+        )}
+        <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5">
+          <div className="text-sm font-black text-white mb-1">
+            {isAr ? 'رمز الفكّ من الدعم' : 'Code de déblocage support'}
+          </div>
+          <p className="text-xs text-slate-400 leading-relaxed mb-3">
+            {isAr
+              ? 'الصق رمز UL- المستلم من الدعم (عبث ساعة/جهاز/طوارئ) — استعمال واحد.'
+              : 'Collez le code UL- reçu du support (horloge/appareil/urgence) — usage unique.'}
+          </p>
+          <form onSubmit={handleUnlock} className="flex gap-2">
+            <input
+              type="text"
+              value={unlockInput}
+              onChange={e => setUnlockInput(e.target.value.trim())}
+              placeholder="UL-…"
+              className="flex-1 bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-emerald-400 font-mono outline-none focus:border-emerald-500"
+            />
+            <button
+              type="submit"
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs cursor-pointer"
+            >
+              {isAr ? 'فكّ' : 'OK'}
+            </button>
+          </form>
+          {unlockMsg && <p className="text-[11px] text-amber-300 mt-2">{unlockMsg}</p>}
         </div>
       </div>
     </div>

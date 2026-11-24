@@ -53,6 +53,7 @@ export const PosView: React.FC = () => {
     setHardwareScaleActive,
     isFiscalMode,
     isTrialExpired,
+    inGrace,
     setActiveView,
   } = useApp();
   // TASK-MKT-001: cart data + mutators from the isolated CartContext.
@@ -423,6 +424,20 @@ export const PosView: React.FC = () => {
         />
       )}
 
+      {/* ADR-050 P4: 3-day grace banner — sales stay open, activation urged. */}
+      {inGrace && !showLicenseLock && (
+        <div className="mx-3 mt-2 flex items-center justify-between gap-2 rounded-xl border border-amber-500/50 bg-amber-950/50 px-3 py-2">
+          <p className="text-xs font-bold text-amber-300">
+            {isAr ? '● انتهت التجربة — 3 أيام سماح متبقية، فعّل البرنامج لمواصلة البيع' : '● Essai terminé — 3 jours de grâce, activez la licence'}
+          </p>
+          <button
+            onClick={() => setActiveView('license')}
+            className="shrink-0 rounded-lg bg-amber-500 px-3 py-1 text-xs font-black text-black cursor-pointer"
+          >
+            {isAr ? 'تفعيل' : 'Activer'}
+          </button>
+        </div>
+      )}
       {/* ADR-002-MKT: trial-expiry lockout — reports/stock stay open, sales stop. */}
       {showLicenseLock && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" role="alertdialog" aria-modal="true">

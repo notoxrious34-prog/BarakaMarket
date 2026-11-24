@@ -14,19 +14,27 @@
 import type { StoredLicense } from './license-store';
 
 export interface LicenseAssessment {
-  /** Signature genuinely covers (store || activation hwid). */
+  /** Signature genuinely covers (store || ACTIVATION hwid). */
   cryptoOk: boolean;
   /** Activation HWID differs from this machine (or is absent legacy). */
   drift: boolean;
+  /**
+   * ADR-050 migration: the activation HWID matches a KNOWN legacy formula
+   * (e.g. browser-UA sources before the native anchor) — genuine key on an
+   * upgraded client, NOT a clone. Warning-only, never a lock.
+   */
+  migrated?: boolean;
 }
 
 export async function assessStoredLicense(
   rec: StoredLicense,
   currentHwid: string,
   verify: (storeName: string, hwid: string, key: string) => Promise<boolean>,
+  legacyHwids: string[] = [],
 ): Promise<LicenseAssessment> {
   const activationHwid = rec.hwid?.trim() ? rec.hwid.trim() : currentHwid;
   const cryptoOk = await verify(rec.storeName, activationHwid, rec.key);
   const drift = !rec.hwid?.trim() ? true : rec.hwid.trim() !== currentHwid;
-  return { cryptoOk, drift };
+  const migrated = drift && cryptoOk && !!rec.hwid?.trim() && legacyHwids.includes(rec.hwid.trim());
+  return { cryptoOk, drift, migrated };
 }

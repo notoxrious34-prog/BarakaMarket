@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canonicalizeHwid, parseDeskArgs, ledgerAppend, ledgerVerify, ledgerParse,
-  renderReceipt, ledgerHash,
+  renderReceipt, ledgerHash, ledgerTransfer,
 } from './activation-desk.js';
 
 test('desk: HWID canonicalization salvages human input, rejects garbage', () => {
@@ -62,4 +62,16 @@ test('desk: ledgerHash is stable and 64-hex', () => {
   const h = ledgerHash('p', 1, 't', 'issue', 'S', 'H', 'K');
   assert.match(h, /^[0-9a-f]{64}$/);
   assert.equal(h, ledgerHash('p', 1, 't', 'issue', 'S', 'H', 'K'));
+});
+
+test('desk ADR-050: transfer appends revoke+issue pair, chain stays intact', () => {
+  const e1 = ledgerAppend([], { ts: '2026-11-24T10:00:00.000Z', kind: 'issue', store: 'A', hwid: 'H-OLD', key: 'K-OLD' });
+  const { revoke, issue } = ledgerTransfer([e1], {
+    ts: '2026-11-24T11:00:00.000Z', store: 'A', oldSeq: 1, newHwid: 'H-NEW', newKey: 'K-NEW',
+  });
+  assert.equal(revoke.kind, 'revoke');
+  assert.equal(revoke.revokes, 1);
+  assert.equal(issue.kind, 'issue');
+  assert.equal(issue.hwid, 'H-NEW');
+  assert.equal(ledgerVerify([e1, revoke, issue]).brokenAt, null);
 });

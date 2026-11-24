@@ -10,7 +10,7 @@
  * @module db/sqlite
  */
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID, createHash, verify, createPublicKey } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,6 +38,13 @@ import {
 } from '../core/backup-catalog.js';
 import { isRole, registerAttempt, type Role, type AuditAction, type AuditEvent } from '../core/rbac.js';
 import { loadReferenceCatalog, searchCatalog, type ProductTemplate } from '../core/reference-catalog.js';
+import {
+  laneVerdict, trialAliveFor, subscriptionExpiredFor,
+  TRIAL_EPOCH_META_KEY, LICENSE_GATE_META_KEY, LICENSE_OVERRIDE_META_KEY,
+  type GateRefusal,
+} from '../core/license-gate.js';
+import { buildEnvelopePayload, parseEnvelopeKey } from '../core/license-envelope.js';
+import { buildLicensePayload, canonicalStoreName, BARAKA_PUBLIC_KEY } from '../core/licensing.js';
 
 export type Unit = 'PIECE' | 'KG' | 'LITRE';
 
@@ -836,6 +843,83 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
     returnsCount: ret.n, returnsTotalTtcCt: ret.ttc,
     lossesCount: los.n, lossesTotalCt: los.t,
   };
+}
+
+/** ADR-050 P2: SYNC Ed25519 genuineness (node:crypto, lane-side).
+ * Verifies the key's signature over (store || ACTIVATION hwid) — v1 and v2.
+ * Binding to THIS machine stays client-side (boot) + published gate. */
+export function verifyLicenseSignatureSync(storeName: string, hwid: string, key: string, pubkeyHex: string): boolean {
+  try {
+    let msg: Uint8Array;
+    let sigB64: string;
+    if (key.startsWith('AK2-')) {
+      const p = parseEnvelopeKey(key);
+      if (!p || canonicalStoreName(p.env.store) !== canonicalStoreName(storeName)) return false;
+      if (hwid.trim().toUpperCase() !== p.env.h1 && hwid.trim().toUpperCase() !== (p.env.h2 ?? '')) return false;
+      msg = buildEnvelopePayload(p.env);
+      sigB64 = p.sigB64url;
+    } else {
+      const m = /^AK-([A-Za-z0-9_-]{86})$/.exec(key.trim());
+      if (!m || !storeName.trim() || !hwid.trim()) return false;
+      msg = buildLicensePayload(storeName, hwid);
+      sigB64 = m[1];
+    }
+    const der = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(pubkeyHex, 'hex')]);
+    const pub = createPublicKey({ key: der, format: 'der', type: 'spki' });
+    return verify(null, msg, pub, Buffer.from(sigB64, 'base64url'));
+  } catch {
+    return false;
+  }
+}
+
+/** ADR-050 P2: lane license gate — sync from meta + fiscal sales count.
+ * Absent data = ALLOW (no-brick grandfathering); trial_epoch stamps once. */
+export function enforceLicenseGateDb(db: DatabaseSync, pubkeyHex: string): void {
+  const now = Date.now();
+  const meta = (k: string): string | null => {
+    try {
+      const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(k) as { value: string } | undefined;
+      return row?.value ?? null;
+    } catch { return null; }
+  };
+  const ovRaw = meta(LICENSE_OVERRIDE_META_KEY);
+  const overrideValid = ovRaw != null && Number.isFinite(+ovRaw) && now <= +ovRaw;
+  let publishedGateDenied: boolean | GateRefusal = false;
+  try {
+    const g = meta(LICENSE_GATE_META_KEY);
+    if (g) {
+      const parsed = JSON.parse(g) as { ok?: unknown; reason?: unknown };
+      if (parsed && parsed.ok === false) {
+        publishedGateDenied = (parsed.reason === 'LICENSE_TRIAL_EXPIRED' || parsed.reason === 'LICENSE_KEY_INVALID' || parsed.reason === 'LICENSE_DENIED')
+          ? parsed.reason
+          : true;
+      }
+    }
+  } catch { /* malformed gate = no verdict */ }
+  let activated = false;
+  let keyGenuine: boolean | null = null;
+  let subscriptionExpired = false;
+  try {
+    const raw = meta('license_state');
+    if (raw) {
+      const r = JSON.parse(raw) as { status?: unknown; storeName?: unknown; key?: unknown; hwid?: unknown };
+      if (r?.status === 'ACTIVATED' && typeof r.key === 'string' && typeof r.storeName === 'string') {
+        activated = true;
+        const hw = typeof r.hwid === 'string' && r.hwid.trim() ? r.hwid : '';
+        keyGenuine = hw ? verifyLicenseSignatureSync(r.storeName, hw, r.key, pubkeyHex) : false;
+        subscriptionExpired = subscriptionExpiredFor(r.key, now);
+      }
+    }
+  } catch { /* malformed record = trial path */ activated = false; }
+  let epoch = parseInt(meta(TRIAL_EPOCH_META_KEY) ?? '', 10);
+  if (!Number.isFinite(epoch) || epoch <= 0) {
+    epoch = now;
+    try { db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING').run(TRIAL_EPOCH_META_KEY, String(now)); } catch { /* anchor best-effort */ }
+  }
+  let salesCount = 0;
+  try { salesCount = (db.prepare('SELECT COUNT(*) AS c FROM sales').get() as { c: number }).c ?? 0; } catch { /* no sales table yet */ }
+  const v = laneVerdict({ activated, keyGenuine, subscriptionExpired, publishedGateDenied, overrideValid, trialAlive: trialAliveFor(salesCount, epoch, now) });
+  if (!v.ok) throw new Error(`[db] ${v.reason} — licence requise pour enregistrer (voir Licence → Activation)`);
 }
 
 export function openBarakaDb(dbPath: string): BarakaDb {
@@ -2053,6 +2137,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       }
       assertIntegerCentimes(header.amount_paid_ct, 'amount_paid_ct');
       assertIntegerCentimes(header.amount_returned_ct, 'amount_returned_ct');
+
+      // ADR-050 P2: lane license gate BEFORE any row is written (trial
+      // budgets + override + published verdict + key genuineness).
+      enforceLicenseGateDb(db, BARAKA_PUBLIC_KEY);
 
       const createdAt = header.created_at ?? new Date().toISOString();
       const year = parseInt(createdAt.slice(0, 4), 10);

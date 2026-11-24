@@ -100,7 +100,8 @@ export type AuditAction =
   | 'return.create' | 'return.approve' | 'return.reject'
   | 'claim.create' | 'claim.settle'
   | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'
-  | 'supplier.pay' | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore';
+  | 'supplier.pay' | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore'
+  | 'license.activate' | 'license.override' | 'license.unlock';
 
 export interface AuditEvent {
   actor: string;

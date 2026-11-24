@@ -568,6 +568,65 @@ fn method_ok(m: &str) -> bool {
 }
 
 /// Native record_sale. `header`/`items` mirror SaleHeaderInput/SaleItemInput.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// ADR-050 P2: native lane license gate (sync; no crypto here — full
+/// crypto+binding verdicts are published by the client boot via meta
+/// `license_gate`). Trial budgets mirror the TS lane (50 sales AND 14 days).
+/// Absent data = ALLOW (no-brick grandfathering); epoch stamps once.
+fn license_gate_check(conn: &Connection, now: i64) -> Result<(), String> {
+    let meta = |k: &str| crate::machine::meta_get(conn, k).ok().flatten();
+    if let Some(ov) = meta("license_override_until") {
+        if let Ok(u) = ov.trim().parse::<i64>() {
+            if now <= u {
+                return Ok(());
+            }
+        }
+    }
+    if let Some(g) = meta("license_gate") {
+        if let Ok(v) = serde_json::from_str::<Value>(&g) {
+            if v.get("ok") == Some(&Value::Bool(false)) {
+                let reason = v
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("LICENSE_DENIED");
+                return Err(format!(
+                    "[fiscal] {reason} — licence requise (voir Licence → Activation)"
+                ));
+            }
+        }
+    }
+    let mut activated = false;
+    if let Some(raw) = meta("license_state") {
+        if let Ok(r) = serde_json::from_str::<Value>(&raw) {
+            activated = r.get("status") == Some(&Value::String("ACTIVATED".to_string()));
+        }
+    }
+    if activated {
+        return Ok(());
+    }
+    let epoch: i64 = match meta("trial_epoch").and_then(|s| s.trim().parse().ok()) {
+        Some(e) if e > 0 => e,
+        _ => {
+            let _ = crate::machine::meta_stamp_once(conn, "trial_epoch", &now.to_string());
+            now
+        }
+    };
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sales", [], |r| r.get(0))
+        .unwrap_or(0);
+    let days_left = 14 - (now - epoch).max(0) / 86400000;
+    if 50 - count <= 0 && days_left <= 0 {
+        return Err("[fiscal] LICENSE_TRIAL_EXPIRED — période d'essai épuisée (voir Licence → Activation)".to_string());
+    }
+    Ok(())
+}
+
 pub fn record_sale(
     conn: &mut Connection,
     header: &Value,
@@ -728,6 +787,9 @@ pub fn record_sale(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| e.to_string())?;
     // ADR-047 (APPROVED, replaces ADR-046 Tier 3): allow-negative policy.
+    // ADR-050 P2: lane license gate BEFORE any row is written (trial budgets
+    // + override + client-published verdict; binding/crypto enforced boot-side).
+    license_gate_check(&tx, now_ms())?;
     // meta KV 'allow_negative_sale' = '0' restores the old refusal;
     // absent/anything-else = allow (owner default ON). Below-available sales
     // are flagged was_negative=1 + journalled — never silently zero.
@@ -3627,6 +3689,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stock, 46000); // 48000 - 2000, once
+    }
+
+    #[test]
+    fn license_gate_denies_published_verdict() {
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('license_gate', '{\"ok\":false,\"reason\":\"LICENSE_KEY_INVALID\"}')",
+            [],
+        )
+        .unwrap();
+        let err = record_sale(&mut db, &sale_header(Some("G1")), &sale_items()).unwrap_err();
+        assert!(err.contains("LICENSE_KEY_INVALID"), "gate deny must propagate, got: {err}");
+    }
+
+    #[test]
+    fn license_gate_refuses_exhausted_trial() {
+        let mut db = memdb();
+        let old = now_ms() - 15 * 86400000;
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('trial_epoch', ?1)",
+            [old.to_string()],
+        )
+        .unwrap();
+        for i in 0..50 {
+            let mut h = sale_header(None);
+            h["id"] = serde_json::json!(format!("t{i}"));
+            record_sale(&mut db, &h, &sale_items()).unwrap();
+        }
+        let err = record_sale(&mut db, &sale_header(None), &sale_items()).unwrap_err();
+        assert!(err.contains("LICENSE_TRIAL_EXPIRED"), "exhausted trial must refuse, got: {err}");
+    }
+
+    #[test]
+    fn license_override_unlocks_exhausted_trial() {
+        let mut db = memdb();
+        let old = now_ms() - 15 * 86400000;
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('trial_epoch', ?1)",
+            [old.to_string()],
+        )
+        .unwrap();
+        for i in 0..50 {
+            let mut h = sale_header(None);
+            h["id"] = serde_json::json!(format!("o{i}"));
+            record_sale(&mut db, &h, &sale_items()).unwrap();
+        }
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('license_override_until', ?1)",
+            [(now_ms() + 3600000).to_string()],
+        )
+        .unwrap();
+        let mut h = sale_header(None);
+        h["id"] = serde_json::json!("o-ok");
+        assert!(record_sale(&mut db, &h, &sale_items()).is_ok());
+    }
+
+    #[test]
+    fn license_grandfather_stamps_epoch_and_allows() {
+        let mut db = memdb();
+        record_sale(&mut db, &sale_header(Some("GF1")), &sale_items()).unwrap();
+        let e: String = db
+            .query_row("SELECT value FROM meta WHERE key = 'trial_epoch'", [], |r| r.get(0))
+            .unwrap();
+        assert!(e.parse::<i64>().unwrap() > 0);
     }
 
     #[test]

@@ -15,6 +15,17 @@ import {
   computeHwid, collectNodeFingerprint, buildLicensePayload,
   formatActivationKey, validateLicense, canonicalStoreName,
 } from '../src/core/licensing.js';
+import {
+  envelopeFromInput, buildEnvelopePayload, formatEnvelopeKey, validateEnvelopeKey,
+} from '../src/core/license-envelope.js';
+
+function flag(name: string): string | undefined {
+  const i = process.argv.findIndex(a => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (i < 0) return undefined;
+  const a = process.argv[i];
+  if (a.includes('=')) return a.slice(name.length + 3);
+  return process.argv[i + 1];
+}
 
 function loadPrivateKey() {
   if (process.env.BARAKA_PRIVATE_KEY) return createPrivateKey(process.env.BARAKA_PRIVATE_KEY);
@@ -48,12 +59,39 @@ async function main() {
     }
   }
   const store = canonicalStoreName(storeName);
-  const sig = sign(null, buildLicensePayload(store, hwid), key);
-  const license = formatActivationKey(sig.toString('base64url'));
+  // ADR-050: v2 envelope by default (spare HWID, tiers, expiry, max-ver).
+  // --format v1 keeps minting the legacy AK- key for grandfathered flows.
+  const format = (flag('format') ?? 'v2').toLowerCase();
+  if (format === 'v1') {
+    const sig = sign(null, buildLicensePayload(store, hwid), key);
+    const license = formatActivationKey(sig.toString('base64url'));
+    console.log(`STORE: ${store}`);
+    console.log(`HWID : ${hwid}`);
+    console.log(`KEY  : ${license}`);
+    console.log(`CHECK: ${(await validateLicense(store, hwid, license)) ? 'VALID' : 'INVALID'}`);
+    return;
+  }
+  const tier = (flag('tier') ?? 'PERP').toUpperCase();
+  const expRaw = flag('expires');
+  const env = envelopeFromInput(store, {
+    tier: tier === 'SUPPORT12' ? 'SUPPORT12' : 'PERP',
+    issuedMs: Date.now(),
+    expiresMs: expRaw ? Date.parse(`${expRaw}T23:59:59Z`) : null,
+    maxVer: flag('max-ver') ?? null,
+    hwid1: hwid,
+    hwid2: flag('hwid2') ?? null,
+  });
+  if (!env) {
+    console.error('Invalid envelope input (tier/expiry/hwid2) — see ADR-050.');
+    process.exit(1);
+  }
+  const esig = sign(null, Buffer.from(buildEnvelopePayload(env)), key).toString('base64url');
+  const elicense = formatEnvelopeKey(env, esig);
   console.log(`STORE: ${store}`);
-  console.log(`HWID : ${hwid}`);
-  console.log(`KEY  : ${license}`);
-  console.log(`CHECK: ${(await validateLicense(store, hwid, license)) ? 'VALID' : 'INVALID'}`);
+  console.log(`HWID : ${hwid}${env.h2 ? ` (spare ${env.h2})` : ''}`);
+  console.log(`TIER : ${env.tier}${env.exp ? ` until ${new Date(env.exp).toISOString().slice(0, 10)}` : ''}`);
+  console.log(`KEY  : ${elicense}`);
+  console.log(`CHECK: ${((await validateEnvelopeKey(store, hwid, elicense, Date.now())).ok) ? 'VALID' : 'INVALID'}`);
 }
 
 await main();

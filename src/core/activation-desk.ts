@@ -121,6 +121,23 @@ export function ledgerAppend(prevEntries: LedgerEntry[], input: { ts: string; ki
   return entry;
 }
 
+/** ADR-050 transfer: revoke the old seq + issue the new HWID, one atomic pair.
+ * Both rows ride the FROZEN chain formula (kind flows into the hash input). */
+export function ledgerTransfer(
+  prevEntries: LedgerEntry[],
+  input: { ts: string; store: string; oldSeq: number; newHwid: string; newKey: string; note?: string },
+): { revoke: LedgerEntry; issue: LedgerEntry } {
+  const revoke = ledgerAppend(prevEntries, {
+    ts: input.ts, kind: 'revoke', store: input.store, hwid: '',
+    key: '', note: input.note ?? 'transfer-out', revokes: input.oldSeq,
+  });
+  const issue = ledgerAppend([...prevEntries, revoke], {
+    ts: input.ts, kind: 'issue', store: input.store, hwid: input.newHwid,
+    key: input.newKey, note: input.note ?? 'transfer-in',
+  });
+  return { revoke, issue };
+}
+
 /** Replay the chain: linkage + recompute every hash. Returns the first broken seq, or null when intact. */
 export function ledgerVerify(entries: LedgerEntry[]): { brokenAt: number | null; count: number } {
   let prev = GENESIS;
