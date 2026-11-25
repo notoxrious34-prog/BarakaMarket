@@ -16,6 +16,8 @@ export interface DeskHealth {
   ledgerBrokenAt: number | null;
   backupCount: number;
   priceDzd: number;
+  auditCount: number;
+  lastIssueTs: string | null;
 }
 
 export interface DeskHwid {
@@ -91,6 +93,8 @@ export interface DeskStats {
   issued: number;
   revoked: number;
   revenueDzd: number;
+  netIssued: number;
+  netRevenueDzd: number;
   priceDzd: number;
   count: number;
   brokenAt: number | null;

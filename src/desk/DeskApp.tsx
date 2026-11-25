@@ -778,16 +778,16 @@ export function DeskApp() {
         {/* ── Stats ──────────────────────────────── */}
         <section className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
           {[
-            { label: 'مفاتيح مصدَرة', value: stats ? String(stats.issued) : '—', icon: <KeyRound size={18} />, accent: GOLD },
-            { label: `إيراد (${priceDzd.toLocaleString('fr-FR')} دج / مفتاح)`, value: stats ? `${stats.revenueDzd.toLocaleString('fr-FR')} دج` : '—', icon: <Landmark size={18} />, accent: 'text-emerald-300' },
-            { label: 'ملغاة (مرجع طاقم)', value: stats ? String(stats.revoked) : '—', icon: <Ban size={18} />, accent: 'text-slate-300' },
-            { label: 'بصمة هذا الجهاز', value: localHwid || '…', icon: <Fingerprint size={18} />, accent: 'text-sky-300', mono: true },
+            { label: 'مفاتيح مصدَرة', value: stats ? String(stats.issued) : '—', icon: <KeyRound size={18} />, accent: GOLD, hint: undefined as string | undefined },
+            { label: `إيراد صافٍ (${priceDzd.toLocaleString('fr-FR')} دج / مفتاح نشط)`, value: stats ? `${stats.netRevenueDzd.toLocaleString('fr-FR')} دج` : '—', icon: <Landmark size={18} />, accent: 'text-emerald-300', hint: stats ? `الإجمالي الخام: ${stats.revenueDzd.toLocaleString('fr-FR')} دج (${stats.issued} إصداراً يشمل المكرر والمستبدَل)` : undefined },
+            { label: 'ملغاة (مرجع طاقم)', value: stats ? String(stats.revoked) : '—', icon: <Ban size={18} />, accent: 'text-slate-300', hint: undefined as string | undefined },
+            { label: 'بصمة هذا الجهاز', value: localHwid || '…', icon: <Fingerprint size={18} />, accent: 'text-sky-300', mono: true, hint: undefined as string | undefined },
           ].map(s => (
             <div key={s.label} className={`${card} flex items-center gap-3 p-4`}>
               <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#0b0f17] ${s.accent}`}>{s.icon}</div>
               <div className="min-w-0">
                 <div className="text-[11px] font-bold text-slate-500">{s.label}</div>
-                <div className={`truncate text-lg font-extrabold ${s.mono ? `${monoLtr} text-[13px]` : ''}`} dir={s.mono ? 'ltr' : 'auto'} title={s.value}>
+                <div className={`truncate text-lg font-extrabold ${s.mono ? `${monoLtr} text-[13px]` : ''}`} dir={s.mono ? 'ltr' : 'auto'} title={s.hint ?? s.value}>
                   {s.value}
                 </div>
               </div>

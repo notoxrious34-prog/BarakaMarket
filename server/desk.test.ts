@@ -60,11 +60,16 @@ const post = (p: string, body: unknown, token: string | null = TOKEN) =>
 test('health exposes version + key/ledger status', async () => {
   const r = await fetch(`${base}/api/desk/health`);
   assert.equal(r.status, 200);
-  const h = (await r.json()) as { ok: boolean; version: string; keyLoaded: boolean; ledgerCount: number; ledgerBrokenAt: number | null };
+  const h = (await r.json()) as {
+    ok: boolean; version: string; keyLoaded: boolean; ledgerCount: number; ledgerBrokenAt: number | null;
+    auditCount: number; lastIssueTs: string | null;
+  };
   assert.equal(h.ok, true);
   assert.equal(h.version, DESK_VERSION);
   assert.equal(typeof h.keyLoaded, 'boolean');
   assert.ok(Number.isInteger(h.ledgerCount) && h.ledgerCount >= 0);
+  assert.ok(Number.isInteger(h.auditCount) && h.auditCount >= 0);
+  assert.ok(h.lastIssueTs === null || typeof h.lastIssueTs === 'string');
 });
 
 test('hwid returns a canonical BM fingerprint', async () => {
@@ -100,11 +105,26 @@ test('ledger + stats are consistent', async () => {
   };
   assert.ok(Array.isArray(l.entries) && Number.isInteger(l.count));
   const s = (await (await fetch(`${base}/api/desk/stats`)).json()) as {
-    issued: number; revoked: number; revenueDzd: number; count: number;
+    issued: number; revoked: number; revenueDzd: number; netIssued: number; netRevenueDzd: number; count: number;
   };
   assert.equal(s.count, l.count);
   assert.equal(s.revenueDzd, s.issued * LICENSE_PRICE_DZD);
+  assert.equal(s.netRevenueDzd, s.netIssued * LICENSE_PRICE_DZD);
   assert.ok(s.issued >= s.revoked);
+  assert.ok(s.netIssued <= s.issued);
+});
+
+test('net stats exclude replaced + duplicate pairs', { skip: !HAS_KEY }, async () => {
+  const before = (await (await fetch(`${base}/api/desk/stats`)).json()) as { netIssued: number; issued: number };
+  const g = await post('/api/desk/generate', { store: 'Net Shop', hwid: 'BM-6000-6000-6000-6001' });
+  assert.equal(g.status, 200);
+  const mid = (await (await fetch(`${base}/api/desk/stats`)).json()) as { netIssued: number; issued: number };
+  assert.equal(mid.netIssued, before.netIssued + 1);
+  // Force a duplicate: gross grows, net does not.
+  await post('/api/desk/generate', { store: 'Net Shop', hwid: 'BM-6000-6000-6000-6001', force: true });
+  const after = (await (await fetch(`${base}/api/desk/stats`)).json()) as { netIssued: number; issued: number };
+  assert.equal(after.issued, mid.issued + 1);
+  assert.equal(after.netIssued, mid.netIssued);
 });
 
 test('revoke of an unknown seq is 404', async () => {
@@ -376,4 +396,14 @@ test('audit records unlock + transfer mutations', { skip: !HAS_KEY }, async () =
   const kinds = new Set(a.entries.map(e => `${e.action}:${e.ok}`));
   assert.ok(kinds.has('unlock:true'));
   assert.ok(kinds.has('transfer:true'));
+});
+
+// KEEP LAST: this test deliberately exhausts the per-minute POST budget, so
+// every POST test must be registered above it (sequential file order).
+test('POST throttle trips with 429 past 240/min', async () => {
+  let last = 0;
+  for (let i = 0; i < 245; i++) {
+    last = (await post('/api/desk/verify', { store: 'T', hwid: 'BM-1111-2222-3333-4444', key: 'AK-x' })).status;
+  }
+  assert.equal(last, 429);
 });

@@ -18,6 +18,9 @@ import {
 import {
   envelopeFromInput, buildEnvelopePayload, formatEnvelopeKey, validateEnvelopeKey,
 } from '../src/core/license-envelope.js';
+import {
+  ledgerAppend, ledgerVerify, ledgerParse, type LedgerEntry,
+} from '../src/core/activation-desk.js';
 
 function flag(name: string): string | undefined {
   const i = process.argv.findIndex(a => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -38,9 +41,73 @@ function loadPrivateKey() {
 
 const [, , storeName, hwidArg] = process.argv;
 
+const LEDGER_IDX = process.argv.findIndex(a => a === '--ledger' || a.startsWith('--ledger='));
+const LEDGER_FILE = (() => {
+  if (LEDGER_IDX < 0) return null;
+  const a = process.argv[LEDGER_IDX];
+  const v = a.includes('=') ? a.slice('--ledger='.length) : process.argv[LEDGER_IDX + 1];
+  const p = v && !v.startsWith('-') ? v : 'keygen-ledger.jsonl';
+  return path.resolve(process.cwd(), p);
+})();
+
+/**
+ * Cross-process file lock so a CLI issuance never interleaves with the
+ * running desk station (which holds its own in-process mutex). Stale locks
+ * (>60s) are stolen; a live holder fails fast after 10s with guidance.
+ */
+function withLedgerFileLock<T>(ledgerFile: string, fn: () => T): T {
+  const lock = `${ledgerFile}.lock`;
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    try {
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > 60000) fs.rmSync(lock, { force: true });
+      } catch { /* missing lock — take it below */ }
+      fs.writeFileSync(lock, `${process.pid}`, { flag: 'wx' });
+      break;
+    } catch {
+      if (Date.now() > deadline) {
+        console.error('Ledger is locked (the desk station may be issuing) — retry, or issue from the desk.');
+        process.exit(2);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try { fs.rmSync(lock, { force: true }); } catch { /* lock already gone */ }
+  }
+}
+
+/** Append a self-checked issuance to the shared ledger (F4: no silent minting). */
+function recordLedger(entry: { store: string; hwid: string; key: string }): void {
+  if (!LEDGER_FILE) return;
+  withLedgerFileLock(LEDGER_FILE, () => {
+    let prev: LedgerEntry[] = [];
+    try {
+      const t = fs.readFileSync(LEDGER_FILE, 'utf8');
+      if (t.trim()) prev = ledgerParse(t);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    }
+    if (ledgerVerify(prev).brokenAt !== null) {
+      console.error(`LEDGER: TAMPERED — refusing to append. Restore from ${LEDGER_FILE.replace(/\.jsonl$/, '.backup.jsonl')} first.`);
+      process.exit(2);
+    }
+    const row = ledgerAppend(prev, {
+      ts: new Date().toISOString(), kind: 'issue',
+      store: entry.store, hwid: entry.hwid, key: entry.key, note: 'cli-issue',
+    });
+    fs.appendFileSync(LEDGER_FILE, `${JSON.stringify(row)}\n`);
+    console.log(`LEDGER: appended #${row.seq} → ${LEDGER_FILE}`);
+  });
+}
+
 if (!storeName) {
-  console.error('Usage: npx tsx scripts/keygen.ts "Store Name" ["BM-XXXX-..."]');
+  console.error('Usage: npx tsx scripts/keygen.ts "Store Name" ["BM-XXXX-..."] [--format v1|v2] [--tier PERP|SUPPORT12] [--expires YYYY-MM-DD] [--max-ver X.Y.Z] [--hwid2 BM-…] [--ledger[=path]]');
   console.error('  Without HWID: prints the HWID of THIS machine (run on the shop POS).');
+  console.error('  --ledger: append the self-checked key to the shared ledger (default keygen-ledger.jsonl).');
   process.exit(1);
 }
 
@@ -68,7 +135,13 @@ async function main() {
     console.log(`STORE: ${store}`);
     console.log(`HWID : ${hwid}`);
     console.log(`KEY  : ${license}`);
-    console.log(`CHECK: ${(await validateLicense(store, hwid, license)) ? 'VALID' : 'INVALID'}`);
+    const ok = await validateLicense(store, hwid, license);
+    console.log(`CHECK: ${ok ? 'VALID' : 'INVALID'}`);
+    if (!ok && LEDGER_FILE) {
+      console.error('SELF-CHECK FAILED — refusing ledger append.');
+      process.exit(3);
+    }
+    if (ok) recordLedger({ store, hwid, key: license });
     return;
   }
   const tier = (flag('tier') ?? 'PERP').toUpperCase();
@@ -91,7 +164,13 @@ async function main() {
   console.log(`HWID : ${hwid}${env.h2 ? ` (spare ${env.h2})` : ''}`);
   console.log(`TIER : ${env.tier}${env.exp ? ` until ${new Date(env.exp).toISOString().slice(0, 10)}` : ''}`);
   console.log(`KEY  : ${elicense}`);
-  console.log(`CHECK: ${((await validateEnvelopeKey(store, hwid, elicense, Date.now())).ok) ? 'VALID' : 'INVALID'}`);
+  const vok = (await validateEnvelopeKey(store, hwid, elicense, Date.now())).ok;
+  console.log(`CHECK: ${vok ? 'VALID' : 'INVALID'}`);
+  if (!vok && LEDGER_FILE) {
+    console.error('SELF-CHECK FAILED — refusing ledger append.');
+    process.exit(3);
+  }
+  if (vok) recordLedger({ store, hwid, key: elicense });
 }
 
 await main();

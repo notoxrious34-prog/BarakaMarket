@@ -156,6 +156,13 @@ function writeEntry(e: LedgerEntry): void {
   try {
     fs.appendFileSync(backupPath(), `${JSON.stringify(e)}\n`);
   } catch { /* backup must never block issuance */ }
+  // Optional second roof: DESK_BACKUP_DIR (e.g. a USB stick or synced folder).
+  const extra = process.env.DESK_BACKUP_DIR;
+  if (extra) {
+    try {
+      fs.appendFileSync(path.join(extra, 'keygen-ledger.backup.jsonl'), `${JSON.stringify(e)}\n`);
+    } catch { /* second roof is best-effort too */ }
+  }
 }
 
 export interface AuditRow {
@@ -168,9 +175,17 @@ export interface AuditRow {
   detail?: string;
 }
 
+const AUDIT_MAX_BYTES = 1_000_000; // 1MB per generation, then rotate once.
+
 function audit(row: Omit<AuditRow, 'ts'>): void {
   try {
-    fs.appendFileSync(auditPath(), `${JSON.stringify({ ts: new Date().toISOString(), ...row })}\n`);
+    const p = auditPath();
+    try {
+      if (fs.statSync(p).size >= AUDIT_MAX_BYTES) {
+        fs.renameSync(p, `${p}.1`);
+      }
+    } catch { /* missing file — nothing to rotate */ }
+    fs.appendFileSync(p, `${JSON.stringify({ ts: new Date().toISOString(), ...row })}\n`);
   } catch { /* audit is best-effort, never blocks the operation */ }
 }
 
@@ -302,7 +317,27 @@ async function selfCheckOk(store: string, hwid: string, key: string, format: Min
 
 export function createDeskApp(): express.Express {
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '1mb' }));
+
+  /** Loopback throttle: 240 signed POSTs/min/IP (double-clicks never hit it). */
+  const postHits = new Map<string, number[]>();
+  app.use('/api/desk', (req, res, next) => {
+    if (req.method !== 'POST') {
+      next();
+      return;
+    }
+    const now = Date.now();
+    const ip = req.ip ?? 'local';
+    const win = (postHits.get(ip) ?? []).filter(t => now - t < 60000);
+    win.push(now);
+    postHits.set(ip, win);
+    if (win.length > 240) {
+      audit({ action: 'verify', ok: false, detail: `rate-limited ${ip}` });
+      res.status(429).json({ error: 'طلبات كثيرة — انتظر دقيقة.' });
+      return;
+    }
+    next();
+  });
   // Loopback station: no CORS, no remote binds (listen is 127.0.0.1-only below).
   app.disable('x-powered-by');
   ensureDeskToken();
@@ -316,16 +351,23 @@ export function createDeskApp(): express.Express {
     const { key, source, permWarn } = keySource();
     let count = 0;
     let brokenAt: number | null = null;
+    let lastIssueTs: string | null = null;
     try {
       const entries = readLedger();
       count = entries.length;
       brokenAt = ledgerVerify(entries).brokenAt;
+      lastIssueTs = [...entries].reverse().find(e => e.kind === 'issue')?.ts ?? null;
     } catch { /* ledger unreadable — surfaced on /ledger */ }
+    let auditCount = 0;
+    try {
+      auditCount = readAudit().length;
+    } catch { /* audit unreadable — still report health */ }
     res.json({
       ok: true, version: DESK_VERSION,
       keyLoaded: key !== null, keySource: source, keyPermWarn: permWarn,
       ledgerCount: count, ledgerBrokenAt: brokenAt,
       backupCount: backupCount(), priceDzd: LICENSE_PRICE_DZD,
+      auditCount, lastIssueTs,
     });
   });
 
@@ -677,9 +719,21 @@ export function createDeskApp(): express.Express {
     } catch { /* treat as empty */ }
     const issued = entries.filter(e => e.kind === 'issue').length;
     const revoked = entries.filter(e => e.kind === 'revoke').length;
+    // Net = pairs whose LATEST row is an issue (replacements/duplicates excluded).
+    const lastByPair = new Map<string, 'issue' | 'revoke'>();
+    for (const e of entries) {
+      if (e.kind === 'issue') lastByPair.set(`${e.store}||${e.hwid}`, 'issue');
+      else if (e.revokes !== undefined) {
+        const target = entries.find(x => x.seq === e.revokes);
+        if (target) lastByPair.set(`${target.store}||${target.hwid}`, 'revoke');
+      }
+    }
+    let netIssued = 0;
+    for (const v of lastByPair.values()) if (v === 'issue') netIssued++;
     res.json({
       issued, revoked,
       revenueDzd: issued * LICENSE_PRICE_DZD,
+      netIssued, netRevenueDzd: netIssued * LICENSE_PRICE_DZD,
       priceDzd: LICENSE_PRICE_DZD,
       count: entries.length,
       brokenAt: ledgerVerify(entries).brokenAt,
