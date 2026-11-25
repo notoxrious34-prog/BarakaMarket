@@ -1,5 +1,11 @@
 # CHANGELOG — Baraka Market
 
+## v1.9.3 (2026-11-25) — الكتالوج المثبّت P3 + عزل إقلاع المتصفح (ADR-053 P3)
+- **P3 pinned**: سكيما `v16 → v17` (`barcode NULL` شرعي + `kind PIECE/POIDS/LIBRE` + سعر/كغ المالك Q4 + `track_stock` المحايد Q3 + خانات `#1..#12` + انتهاء).
+- **Parity الممرّين**: `product_pinned/product_set_pin` (Rust) + `GET/POST /api/products/pin` (loopback) + `pin-authority` (`x-baraka-loopback`) + `#N/Q*#N` وAlt+1..9 وشريط وزن POIDS ولوحة مالك مع anti-fake.
+- **عزل الإقلاع**: `rapide-limits.ts` أخرجت العميل من `db/sqlite` (node كان يقتل `dev`) + حارس `browser-lane-guard` أحمر→أخضر.
+- البوابات: `tsc` + `npm` **578/578** + `cargo` **61/61** + `build` + إثبات بصري حي (OEUF 300 + BANANE 500g=140 → TTC 450).
+
 ## Unreleased — إصلاحات ما بعد التدقيق (audit fixes)
 - **الصافي legacy-aware**: إلغاءات المفتاح القديمة (بلا حقل `revokes`) أصبحت
   بنطاق تسلسلي في `findActiveIssue` و`/stats` — إصدار لاحق بنفس البايتات يبقى نشطاً؛
