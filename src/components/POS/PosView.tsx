@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { useCart } from '../../context/CartContext';
 import { initialCategories } from '../../data/seedData';
@@ -6,6 +6,7 @@ import { Product, SaleItem } from '../../types';
 import { calculateSaleTotals } from '../../core/cart-bridge';
 import { formatDZD } from '../../core/display';
 import { resolveAction } from '../../core/shortcuts';
+import { smartMatches } from '../../core/search-smart';
 import {
   Search,
   Barcode,
@@ -33,6 +34,8 @@ import { PosShortcutsBar } from './PosShortcutsBar';
 import { PosFiscalTotals } from './PosFiscalTotals';
 import { PosCartLine } from './PosCartLine';
 import { PosProductCard } from './PosProductCard';
+import { PosRapideTiles } from './PosRapideTiles';
+import { usePinnedRapides } from './usePinnedRapides';
 import { useAutoFocusBarcode } from './useAutoFocusBarcode';
 import { attachScannerTrap } from '../../hardware/scanner';
 import { scanBeep, errorBuzz } from '../../hardware/sound';
@@ -81,6 +84,8 @@ export const PosView: React.FC = () => {
   const [qtyModalIndex, setQtyModalIndex] = useState<number | null>(null);
   const [discountModalIndex, setDiscountModalIndex] = useState<number | null>(null);
   const [showCatalogModal, setShowCatalogModal] = useState(false);
+  // ADR-051 P1: F7 no-match → rapide modal prefilled with the query.
+  const [rapideLabel, setRapideLabel] = useState('');
   // ADR-051 P0: Produit Rapide (codeless items) — same modal contract.
   const [showRapideModal, setShowRapideModal] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
@@ -106,16 +111,13 @@ export const PosView: React.FC = () => {
   // Calculate live cart totals (defaulting to Cash/Espèces preview for Timbre preview)
   const cartTotals = calculateSaleTotals(currentCart, 'ESPECES', storeProfile);
 
-  // Filter products by category and search
+  // ADR-051 P1: pinned rapide tiles via hook (MKT-004 — PosView stays lean).
+  const { tiles: pinnedTiles, addPinned } = usePinnedRapides(showRapideModal || showCatalogModal, addToCart);
+  // Filter products by category and search (ADR-051 P1: smart matching —
+  // Arabic normalization + latin transliteration, multi-token AND).
   const filteredProducts = products.filter(p => {
     const matchesCategory = selectedCategory === 'all' || p.category_id === selectedCategory;
-    const query = searchQuery.toLowerCase().trim();
-    const matchesSearch =
-      !query ||
-      p.name_fr.toLowerCase().includes(query) ||
-      p.name_ar.includes(query) ||
-      p.barcode.includes(query);
-    return matchesCategory && matchesSearch;
+    return matchesCategory && smartMatches(p, searchQuery);
   });
 
   // Zero-Mouse Keyboard Controller (F1-F10, Space, Enter) — TASK 6 extended matrix
@@ -341,6 +343,8 @@ export const PosView: React.FC = () => {
 
         {/* Product Cards Grid — TASK-MKT-004: memoized cards. */}
         <div className="flex-1 min-h-0 overflow-y-auto pe-1 pb-1">
+          {/* ADR-051 P1: pinned rapide tiles island (MKT-004). */}
+          <PosRapideTiles tiles={pinnedTiles} visible={searchQuery.trim() === ''} onPick={addPinned} />
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 pos-product-grid">
             {filteredProducts.map(product => (
               <PosProductCard key={product.id} product={product} isAr={isAr} onAdd={addToCart} />
@@ -515,13 +519,19 @@ export const PosView: React.FC = () => {
       {showCatalogModal && (
         <CatalogSearchModal
           onClose={() => { setShowCatalogModal(false); rearmBarcode(); }}
+          onCreateRapide={(label) => {
+            setShowCatalogModal(false);
+            setRapideLabel(label);
+            setShowRapideModal(true);
+          }}
         />
       )}
 
       {/* ADR-051 P0: Produit Rapide — codeless items, same focus contract. */}
       {showRapideModal && (
         <QuickProductModal
-          onClose={() => { setShowRapideModal(false); rearmBarcode(); }}
+          initialLabel={rapideLabel}
+          onClose={() => { setShowRapideModal(false); setRapideLabel(''); rearmBarcode(); }}
         />
       )}
 

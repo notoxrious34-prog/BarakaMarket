@@ -1,11 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { useCart } from '../../context/CartContext';
-import { X, Zap } from 'lucide-react';
+import { X, Zap, Pin, PinOff, History } from 'lucide-react';
 import {
   buildRapideAdd, validateRapideInput,
   type RapideTva, type RapideUnit, type RapideError,
 } from '../../core/rapide';
+import {
+  loadRapideMemory, rememberRapideSale, getRapideRecents, toggleRapidePin,
+} from '../../core/rapide-memory';
 import { calculateLineTotals } from '../../core/cart-bridge';
 import { formatDZD } from '../../core/display';
 
@@ -39,6 +42,15 @@ export const QuickProductModal: React.FC<Props> = ({ onClose, initialLabel = '' 
   const [tva, setTva] = useState<RapideTva | null>(null);
   const [errs, setErrs] = useState<RapideError[]>([]);
   const labelRef = useRef<HTMLInputElement>(null);
+  // P1 memory: label → price/tva/unit + recents + pins (localStorage, app-only).
+  const [memTick, setMemTick] = useState(0);
+  const mem = useMemo(() => {
+    try { return loadRapideMemory(localStorage); } catch { return {}; }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memTick]);
+  const recents = useMemo(() => getRapideRecents(mem, 6), [mem]);
+  const memHit = mem[label.trim()];
+  const isPinned = memHit?.pinned === true;
 
   useEffect(() => { labelRef.current?.focus(); }, []);
 
@@ -69,6 +81,14 @@ export const QuickProductModal: React.FC<Props> = ({ onClose, initialLabel = '' 
     } catch { return null; }
   })();
 
+  const applyMem = (m: { priceTtcCt: number; tva: RapideTva; unit: RapideUnit; label: string }) => {
+    setLabel(m.label);
+    setPrice(String(m.priceTtcCt / 100));
+    setTva(m.tva);
+    setUnit(m.unit);
+    setErrs([]);
+  };
+
   const submit = (e?: React.FormEvent) => {
     e?.preventDefault();
     const input = { label, priceTtcCt: toCt(price), quantity: toQty(qty), tva: (tva ?? 99) as RapideTva, unit };
@@ -78,6 +98,12 @@ export const QuickProductModal: React.FC<Props> = ({ onClose, initialLabel = '' 
     if (v.length > 0) return;
     const r = buildRapideAdd({ ...input, tva: tva as RapideTva });
     addToCart(r.product, r.quantity, 0, r.pack);
+    try {
+      rememberRapideSale(localStorage, {
+        label: input.label.trim(), priceTtcCt: input.priceTtcCt,
+        tva: tva as RapideTva, unit, vendor: '',
+      });
+    } catch { /* memory is best-effort */ }
     onClose();
   };
 
@@ -109,6 +135,16 @@ export const QuickProductModal: React.FC<Props> = ({ onClose, initialLabel = '' 
             {isAr ? 'منتج سريع — بلا كود بار' : 'Produit rapide — sans code-barres'}
           </span>
           <span className="ms-auto" />
+          {memHit && (
+            <button
+              type="button"
+              title={isAr ? (isPinned ? 'إلغاء التثبيت' : 'تثبيت في الشبكة') : (isPinned ? 'Détacher' : 'Épingler')}
+              onClick={() => { try { toggleRapidePin(localStorage, memHit.label); } catch { /* best-effort */ } setMemTick(t => t + 1); }}
+              className={`p-1 cursor-pointer ${isPinned ? 'text-amber-400' : 'text-slate-500 hover:text-amber-300'}`}
+            >
+              {isPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+            </button>
+          )}
           <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-white cursor-pointer">
             <X className="w-4 h-4" />
           </button>
@@ -127,6 +163,33 @@ export const QuickProductModal: React.FC<Props> = ({ onClose, initialLabel = '' 
               className="w-full bg-[#111722] border border-[#233145] focus:border-emerald-500 rounded-xl px-3 py-2 text-sm text-white placeholder-slate-500 outline-none"
             />
           </div>
+          {/* P1: memory hit → one-tap refill; recents chips */}
+          {memHit && price === '' && tva === null && (
+            <button
+              type="button"
+              onClick={() => applyMem(memHit)}
+              className="w-full text-start text-[11px] bg-amber-600/10 border border-amber-600/40 text-amber-300 rounded-xl px-3 py-1.5 cursor-pointer hover:bg-amber-600/20"
+            >
+              <History className="w-3 h-3 inline me-1" />
+              {isAr
+                ? `معروف: ${formatDZD(memHit.priceTtcCt / 100, false)} — TVA ${memHit.tva}% — اضغط للملء`
+                : `Connu : ${formatDZD(memHit.priceTtcCt / 100, false)} — TVA ${memHit.tva}% — toucher pour remplir`}
+            </button>
+          )}
+          {recents.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {recents.filter(r => r.label !== label.trim()).slice(0, 6).map(r => (
+                <button
+                  key={r.label}
+                  type="button"
+                  onClick={() => applyMem(r)}
+                  className="text-[11px] bg-[#111722] border border-[#2b3a4f] text-slate-300 rounded-full px-2.5 py-1 truncate max-w-[150px] cursor-pointer hover:border-amber-600/50"
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="flex gap-2">
             <div className="flex-1">

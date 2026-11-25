@@ -2,17 +2,20 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { useCart } from '../../context/CartContext';
 import { formatDZD } from '../../core/display';
-import { X, Search } from 'lucide-react';
+import { smartMatches } from '../../core/search-smart';
+import { X, Search, Zap } from 'lucide-react';
 
 interface Props {
   onClose: () => void;
+  /** ADR-051 P1: no-match → create a rapide item prefilled with the query. */
+  onCreateRapide?: (label: string) => void;
 }
 
 /**
  * F7 — instant obsidian catalog search. Auto-focused AR/FR input,
  * ArrowUp/Down navigation, Enter picks -> cart, focus re-arms to scanner.
  */
-export const CatalogSearchModal: React.FC<Props> = ({ onClose }) => {
+export const CatalogSearchModal: React.FC<Props> = ({ onClose, onCreateRapide }) => {
   const { products, language } = useApp();
   // TASK-MKT-001: picks land via the isolated CartContext.
   const { addToCart } = useCart();
@@ -27,19 +30,18 @@ export const CatalogSearchModal: React.FC<Props> = ({ onClose }) => {
   }, []);
 
   const results = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    const pool = products.filter(p =>
-      !query ||
-      p.name_fr.toLowerCase().includes(query) ||
-      p.name_ar.includes(q.trim()) ||
-      p.barcode.includes(query),
-    );
+    // ADR-051 P1: smart matching (normalization + transliteration + AND).
+    const pool = products.filter(p => smartMatches(p, q));
     return pool.slice(0, 30);
   }, [products, q]);
 
   useEffect(() => {
     setHi(0);
   }, [q]);
+
+  const trimmed = q.trim();
+  // ADR-051 P1: empty result + typed query → inline rapide creation (replaces "no results").
+  const showCreate = onCreateRapide && trimmed.length >= 2 && results.length === 0;
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -58,12 +60,15 @@ export const CatalogSearchModal: React.FC<Props> = ({ onClose }) => {
           e.preventDefault();
           addToCart(pick, 1);
           onClose();
+        } else if (showCreate) {
+          e.preventDefault();
+          onCreateRapide(trimmed);
         }
       }
     };
     window.addEventListener('keydown', h, true);
     return () => window.removeEventListener('keydown', h, true);
-  }, [results, hi, addToCart, onClose]);
+  }, [results, hi, addToCart, onClose, showCreate, onCreateRapide, trimmed]);
 
   return (
     <div className="fixed inset-0 z-[70] flex items-start justify-center bg-black/80 backdrop-blur-sm p-4 pt-[10vh]">
@@ -80,7 +85,22 @@ export const CatalogSearchModal: React.FC<Props> = ({ onClose }) => {
           <button onClick={onClose} className="p-1 text-slate-400 hover:text-white cursor-pointer"><X className="w-4 h-4" /></button>
         </div>
         <div ref={listRef} className="max-h-[50vh] overflow-y-auto p-1.5">
-          {results.length === 0 && (
+          {showCreate ? (
+            <button
+              onClick={() => onCreateRapide(trimmed)}
+              className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-start cursor-pointer bg-amber-950/40 border border-amber-600 hover:bg-amber-950/70"
+            >
+              <Zap className="w-4 h-4 text-amber-400 shrink-0" />
+              <span className="min-w-0">
+                <span className="block text-xs font-bold text-amber-200 truncate">
+                  {isAr ? `⚡ إنشاء منتج سريع: «${trimmed}»` : `⚡ Créer rapide : «${trimmed}»`}
+                </span>
+                <span className="block text-[10px] text-amber-400/70">
+                  {isAr ? 'Enter — ثم السعر + TVA' : 'Entrée — puis prix + TVA'}
+                </span>
+              </span>
+            </button>
+          ) : results.length === 0 && (
             <div className="p-6 text-center text-xs text-slate-500">
               {isAr ? 'لا توجد نتائج' : 'Aucun article trouvé'}
             </div>
