@@ -19,7 +19,7 @@ import path from 'node:path';
 import { createPrivateKey, sign } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { createDeskApp, DESK_TOKEN_HEADER } from './desk.js';
-import { DESK_VERSION } from '../src/core/activation-desk.js';
+import { DESK_VERSION, ledgerParse, ledgerAppend } from '../src/core/activation-desk.js';
 import { LICENSE_PRICE_DZD } from '../src/core/licensing.js';
 import { envelopeFromInput, formatEnvelopeKey, buildEnvelopePayload } from '../src/core/license-envelope.js';
 import { verifyUnlock } from '../src/core/license-unlock.js';
@@ -396,6 +396,80 @@ test('audit records unlock + transfer mutations', { skip: !HAS_KEY }, async () =
   const kinds = new Set(a.entries.map(e => `${e.action}:${e.ok}`));
   assert.ok(kinds.has('unlock:true'));
   assert.ok(kinds.has('transfer:true'));
+});
+
+// KEEP LAST: this test deliberately exhausts the per-minute POST budget, so
+// every POST test must be registered above it (sequential file order).
+test('legacy key-carried revoke retires pair but re-issue stays active', { skip: !HAS_KEY }, async () => {
+  const g = await post('/api/desk/generate', { store: 'Legacy Shop', hwid: 'BM-7000-7000-7000-7001', format: 'v1' });
+  assert.equal(g.status, 200);
+  const { seq: seq1, key } = (await g.json()) as GenBody;
+  // Simulate a pre-`revokes` CLI marker: carries the target key, no revokes field.
+  const ledgerFile = path.join(SCRATCH, 'keygen-ledger.jsonl');
+  const entries = ledgerParse(fs.readFileSync(ledgerFile, 'utf8'));
+  const mark = ledgerAppend(entries, {
+    ts: new Date().toISOString(), kind: 'revoke', store: 'LEGACY SHOP',
+    hwid: 'BM-7000-7000-7000-7001', key,
+    note: 'revoked by operator (staff-side reference; clients verify offline)',
+  });
+  fs.appendFileSync(ledgerFile, `${JSON.stringify(mark)}\n`);
+  // Pair is retired: re-issuing is a fresh 200 …
+  const g2 = await post('/api/desk/generate', { store: 'Legacy Shop', hwid: 'BM-7000-7000-7000-7001', format: 'v1' });
+  assert.equal(g2.status, 200);
+  // … but the re-issue is ACTIVE: a third generate is a 409 duplicate.
+  // (Before the seq-scoping fix the legacy key match hid the re-issue → 200.)
+  const g3 = await post('/api/desk/generate', { store: 'Legacy Shop', hwid: 'BM-7000-7000-7000-7001', format: 'v1' });
+  assert.equal(g3.status, 409);
+  assert.equal(seq1 + 2, ((await g2.json()) as GenBody).seq);
+});
+
+test('net stats honor legacy key-carried revokes', { skip: !HAS_KEY }, async () => {
+  const before = (await (await fetch(`${base}/api/desk/stats`)).json()) as { netIssued: number };
+  const g = await post('/api/desk/generate', { store: 'Legacy Net', hwid: 'BM-7000-7000-7000-7002', format: 'v1' });
+  assert.equal(g.status, 200);
+  const { seq, key } = (await g.json()) as GenBody;
+  const mid = (await (await fetch(`${base}/api/desk/stats`)).json()) as { netIssued: number };
+  assert.equal(mid.netIssued, before.netIssued + 1);
+  const ledgerFile = path.join(SCRATCH, 'keygen-ledger.jsonl');
+  const entries = ledgerParse(fs.readFileSync(ledgerFile, 'utf8'));
+  const mark = ledgerAppend(entries, {
+    ts: new Date().toISOString(), kind: 'revoke', store: 'LEGACY NET',
+    hwid: 'BM-7000-7000-7000-7002', key,
+    note: 'revoked by operator (staff-side reference; clients verify offline)',
+  });
+  fs.appendFileSync(ledgerFile, `${JSON.stringify(mark)}\n`);
+  const after = (await (await fetch(`${base}/api/desk/stats`)).json()) as { netIssued: number };
+  assert.equal(after.netIssued, before.netIssued);
+  assert.ok(seq > 0);
+});
+
+test('transfer carries client meta to the new issue', { skip: !HAS_KEY }, async () => {
+  const g = await post('/api/desk/generate', {
+    store: 'Meta Shop', hwid: 'BM-7000-7000-7000-7003', meta: { phone: '0550123456', wilaya: 'Alger' },
+  });
+  assert.equal(g.status, 200);
+  const seq = ((await g.json()) as GenBody).seq;
+  const t = await post('/api/desk/transfer', {
+    oldSeq: seq, newHwid: 'BM-7000-7000-7000-7004', meta: { phone: '0550123456', wilaya: 'Alger' },
+  });
+  assert.equal(t.status, 200);
+  const tail = (await (await fetch(`${base}/api/desk/ledger?last=1`)).json()) as {
+    entries: Array<{ kind: string; meta?: { phone?: string; wilaya?: string } }>;
+  };
+  assert.equal(tail.entries[0].kind, 'issue');
+  assert.equal(tail.entries[0].meta?.phone, '0550123456');
+  assert.equal(tail.entries[0].meta?.wilaya, 'Alger');
+});
+
+test('oversized JSON fails closed with a JSON 413 (no HTML leak)', async () => {
+  const r = await fetch(`${base}/api/desk/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', [DESK_TOKEN_HEADER]: TOKEN },
+    body: `{"store":"T","pad":"${'x'.repeat(1_200_000)}"}`,
+  });
+  assert.equal(r.status, 413);
+  const b = (await r.json()) as { error?: string };
+  assert.match(b.error ?? '', /1MB/);
 });
 
 // KEEP LAST: this test deliberately exhausts the per-minute POST budget, so

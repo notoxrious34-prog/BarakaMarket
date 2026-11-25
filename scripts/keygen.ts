@@ -16,6 +16,9 @@ import {
   formatActivationKey, validateLicense, canonicalStoreName,
 } from '../src/core/licensing.js';
 import {
+  canonicalizeHwid,
+} from '../src/core/activation-desk.js';
+import {
   envelopeFromInput, buildEnvelopePayload, formatEnvelopeKey, validateEnvelopeKey,
 } from '../src/core/license-envelope.js';
 import { resolveLedgerFile, recordLedgerEntry } from './ledger-cli.js';
@@ -47,9 +50,9 @@ function recordLedger(entry: { store: string; hwid: string; key: string }): void
 }
 
 if (!storeName) {
-  console.error('Usage: npx tsx scripts/keygen.ts "Store Name" ["BM-XXXX-..."] [--format v1|v2] [--tier PERP|SUPPORT12] [--expires YYYY-MM-DD] [--max-ver X.Y.Z] [--hwid2 BM-…] [--ledger[=path]]');
+  console.error('Usage: npx tsx scripts/keygen.ts "Store Name" ["BM-XXXX-..."|dash-less] [--format v1|v2] [--tier PERP|SUPPORT12] [--expires YYYY-MM-DD] [--max-ver X.Y.Z] [--hwid2 BM-…] [--ledger[=path]] [--no-ledger]');
   console.error('  Without HWID: prints the HWID of THIS machine (run on the shop POS).');
-  console.error('  --ledger: append the self-checked key to the shared ledger (default keygen-ledger.jsonl).');
+  console.error('  Ledger duty is ON by default (./keygen-ledger.jsonl); --no-ledger mints unrecorded (printed).');
   process.exit(1);
 }
 
@@ -61,11 +64,12 @@ async function main() {
     hwid = computeHwid(collectNodeFingerprint(seed, os));
     console.log(`HWID(this machine, seed=${seed}): ${hwid}`);
   } else {
-    hwid = hwidArg.trim().toUpperCase();
-    if (!/^BM-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/.test(hwid)) {
-      console.error('Invalid HWID format — expected BM-XXXX-XXXX-XXXX-XXXX');
+    const canon = canonicalizeHwid(hwidArg);
+    if (!canon) {
+      console.error('Invalid HWID — expected BM-XXXX-XXXX-XXXX-XXXX (dashes optional, case-insensitive).');
       process.exit(1);
     }
+    hwid = canon;
   }
   const store = canonicalStoreName(storeName);
   // ADR-050: v2 envelope by default (spare HWID, tiers, expiry, max-ver).
@@ -86,13 +90,29 @@ async function main() {
     if (ok) recordLedger({ store, hwid, key: license });
     return;
   }
-  const tier = (flag('tier') ?? 'PERP').toUpperCase();
+  const tierRaw = (flag('tier') ?? 'PERP').toUpperCase();
+  if (tierRaw !== 'PERP' && tierRaw !== 'SUPPORT12') {
+    console.error(`Invalid --tier "${flag('tier')}" — expected PERP or SUPPORT12.`);
+    process.exit(1);
+  }
   const expRaw = flag('expires');
+  let expiresMs: number | null = null;
+  if (expRaw) {
+    const parsed = Date.parse(`${expRaw}T23:59:59Z`);
+    if (!Number.isInteger(parsed) || parsed <= Date.now()) {
+      console.error(`Invalid --expires "${expRaw}" — must be a future date (YYYY-MM-DD).`);
+      process.exit(1);
+    }
+    expiresMs = parsed;
+  }
+  const maxVerRaw = flag('max-ver') ?? null;
+  if (maxVerRaw !== null && !/^\d+\.\d+\.\d+$/.test(maxVerRaw)) {
+    console.error(`Invalid --max-ver "${maxVerRaw}" — expected X.Y.Z (e.g. 1.10.0).`);
+    process.exit(1);
+  }
   const env = envelopeFromInput(store, {
-    tier: tier === 'SUPPORT12' ? 'SUPPORT12' : 'PERP',
-    issuedMs: Date.now(),
-    expiresMs: expRaw ? Date.parse(`${expRaw}T23:59:59Z`) : null,
-    maxVer: flag('max-ver') ?? null,
+    tier: tierRaw as 'PERP' | 'SUPPORT12', issuedMs: Date.now(),
+    expiresMs, maxVer: maxVerRaw,
     hwid1: hwid,
     hwid2: flag('hwid2') ?? null,
   });

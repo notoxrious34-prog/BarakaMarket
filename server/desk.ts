@@ -212,24 +212,28 @@ function withLedgerLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Latest non-revoked `issue` for a (store, hwid) pair, or null. */
+/**
+ * Latest non-revoked `issue` for a (store, hwid) pair, or null.
+ * Legacy markers (pre-`revokes`, key/note-carried) retire ONLY issues older
+ * than themselves: a re-issue after a legacy revoke stays active even when
+ * the deterministic v1 key bytes are identical.
+ */
 export function findActiveIssue(entries: LedgerEntry[], store: string, hwid: string): LedgerEntry | null {
   const revokedSeq = new Set<number>();
-  const revokedKey = new Set<string>();
+  const legacy: { seq: number; key: string; noteSeq: number | null }[] = [];
   for (const e of entries) {
     if (e.kind !== 'revoke') continue;
     if (typeof e.revokes === 'number') revokedSeq.add(e.revokes);
     else {
-      // Legacy markers (v3): recover the target from the note or the key.
+      // Legacy markers (v3/CLI): recover the target from the note or the key.
       const m = /→ #(\d+)/.exec(e.note ?? '');
-      if (m) revokedSeq.add(Number(m[1]));
-      if (e.key) revokedKey.add(e.key);
+      legacy.push({ seq: e.seq, key: e.key, noteSeq: m ? Number(m[1]) : null });
     }
   }
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i];
-    if (e.kind === 'issue' && e.store === store && e.hwid === hwid &&
-      !revokedSeq.has(e.seq) && !revokedKey.has(e.key)) {
+    if (e.kind === 'issue' && e.store === store && e.hwid === hwid && !revokedSeq.has(e.seq) &&
+      !legacy.some(m => m.seq > e.seq && ((m.key !== '' && m.key === e.key) || (m.noteSeq !== null && m.noteSeq === e.seq)))) {
       return e;
     }
   }
@@ -318,6 +322,12 @@ async function selfCheckOk(store: string, hwid: string, key: string, format: Min
 export function createDeskApp(): express.Express {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
+  // JSON-shaped errors: the default Express HTML error page never leaks out.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  app.use('/api/desk', (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const status = (err as { status?: unknown })?.status === 413 || (err as { type?: unknown })?.type === 'entity.too.large' ? 413 : 400;
+    res.status(status).json({ error: status === 413 ? 'الحمولة تتجاوز 1MB.' : 'JSON غير صالح.' });
+  });
 
   /** Loopback throttle: 240 signed POSTs/min/IP (double-clicks never hit it). */
   const postHits = new Map<string, number[]>();
@@ -595,8 +605,8 @@ export function createDeskApp(): express.Express {
    * The UI replacement flow calls this instead of issue-then-revoke.
    */
   app.post('/api/desk/transfer', needToken, async (req, res) => {
-    const { oldSeq: rawOld, newHwid: rawNew, force, format: rawFormat, v2: rawV2 } = (req.body ?? {}) as {
-      oldSeq?: unknown; newHwid?: unknown; force?: unknown; format?: unknown; v2?: unknown;
+    const { oldSeq: rawOld, newHwid: rawNew, force, meta: rawMeta, format: rawFormat, v2: rawV2 } = (req.body ?? {}) as {
+      oldSeq?: unknown; newHwid?: unknown; force?: unknown; meta?: unknown; format?: unknown; v2?: unknown;
     };
     const oldSeq = Number(rawOld);
     if (!Number.isInteger(oldSeq) || oldSeq < 1) {
@@ -660,6 +670,9 @@ export function createDeskApp(): express.Express {
             ts: new Date(nowMs).toISOString(), store: target.store, oldSeq,
             newHwid, newKey: minted.key, note: `transfer #${oldSeq} → new HWID (operator)`,
           });
+          // Client context survives replacement (lost before the fix).
+          const tmeta = sanitizeMeta(rawMeta);
+          if (tmeta !== undefined) issue.meta = tmeta;
           writeEntry(revoke);
           writeEntry(issue);
           audit({ action: 'transfer', store: target.store, hwid: newHwid, seq: issue.seq, ok: true, detail: `retired #${oldSeq}` });
@@ -719,17 +732,24 @@ export function createDeskApp(): express.Express {
     } catch { /* treat as empty */ }
     const issued = entries.filter(e => e.kind === 'issue').length;
     const revoked = entries.filter(e => e.kind === 'revoke').length;
-    // Net = pairs whose LATEST row is an issue (replacements/duplicates excluded).
-    const lastByPair = new Map<string, 'issue' | 'revoke'>();
+    // Net = pairs whose LATEST issue is not retired — including retirement
+    // by legacy markers (key/note-carried, seq-scoped like findActiveIssue).
+    const latest = new Map<string, LedgerEntry>();
     for (const e of entries) {
-      if (e.kind === 'issue') lastByPair.set(`${e.store}||${e.hwid}`, 'issue');
-      else if (e.revokes !== undefined) {
-        const target = entries.find(x => x.seq === e.revokes);
-        if (target) lastByPair.set(`${target.store}||${target.hwid}`, 'revoke');
-      }
+      if (e.kind !== 'issue') continue;
+      const k = `${e.store}||${e.hwid}`;
+      if (!latest.has(k) || latest.get(k)!.seq < e.seq) latest.set(k, e);
     }
+    const isRetired = (issue: LedgerEntry): boolean => entries.some(e =>
+      e.kind === 'revoke' && e.seq > issue.seq && (
+        (typeof e.revokes === 'number' && e.revokes === issue.seq) ||
+        (typeof e.revokes !== 'number' && (
+          (/→ #(\d+)/.exec(e.note ?? '')?.[1] === String(issue.seq)) ||
+          (e.key !== '' && e.key === issue.key)
+        ))
+      ));
     let netIssued = 0;
-    for (const v of lastByPair.values()) if (v === 'issue') netIssued++;
+    for (const issue of latest.values()) if (!isRetired(issue)) netIssued++;
     res.json({
       issued, revoked,
       revenueDzd: issued * LICENSE_PRICE_DZD,

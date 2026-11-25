@@ -499,12 +499,13 @@ export function DeskApp() {
     try {
       // Replacement mode → ONE atomic transfer (no two-active window).
       if (replaceCtx && gHwidState.canon) {
+        const tmeta = buildMeta();
         const t = await deskApi.transfer(replaceCtx.oldSeq, gHwidState.canon, {
-          force: force || undefined, format: gFormat, v2: buildV2Opts(),
+          force: force || undefined, format: gFormat, v2: buildV2Opts(), meta: tmeta ?? undefined,
         });
         setGResult({
           store: t.store, hwid: t.newHwid, key: t.issue.key, seq: t.issue.seq,
-          ts: t.issue.ts, priceDzd: t.priceDzd, meta: null, format: t.format, v2: t.v2,
+          ts: t.issue.ts, priceDzd: t.priceDzd, meta: tmeta ?? null, format: t.format, v2: t.v2,
         });
         setConfirmSign(false);
         setForceDup(false);

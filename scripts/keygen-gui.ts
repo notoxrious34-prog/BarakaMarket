@@ -16,9 +16,8 @@ import {
   computeHwid, collectNodeFingerprint, buildLicensePayload,
   formatActivationKey, validateLicense, canonicalStoreName,
 } from '../src/core/licensing.js';
+import { canonicalizeHwid } from '../src/core/activation-desk.js';
 import { resolveLedgerFile, recordLedgerEntry } from './ledger-cli.js';
-
-const HWID_RE = /^BM-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/;
 
 function loadPrivateKey() {
   if (process.env.BARAKA_PRIVATE_KEY) return createPrivateKey(process.env.BARAKA_PRIVATE_KEY);
@@ -40,9 +39,9 @@ async function main() {
     } finally { rl.close(); }
   }
   const store = canonicalStoreName(storeArg);
-  const hwid = hwidArg.trim().toUpperCase();
-  if (!HWID_RE.test(hwid)) {
-    console.error(`Invalid HWID — expected BM-XXXX-XXXX-XXXX-XXXX, got: ${hwid}`);
+  const hwid = canonicalizeHwid(hwidArg);
+  if (!hwid) {
+    console.error('Invalid HWID — expected BM-XXXX-XXXX-XXXX-XXXX (dashes optional, case-insensitive).');
     process.exit(1);
   }
   const key = loadPrivateKey();

@@ -209,10 +209,10 @@ export const deskApi = {
       method: 'POST',
       body: JSON.stringify({ store, hwid, meta, force, format, v2 }),
     }),
-  transfer: (oldSeq: number, newHwid: string, opts?: { force?: boolean; format?: 'v1' | 'v2'; v2?: V2Opts }) =>
+  transfer: (oldSeq: number, newHwid: string, opts?: { force?: boolean; format?: 'v1' | 'v2'; v2?: V2Opts; meta?: GenerateMeta }) =>
     call<TransferResult>('/api/desk/transfer', {
       method: 'POST',
-      body: JSON.stringify({ oldSeq, newHwid, force: opts?.force, format: opts?.format, v2: opts?.v2 }),
+      body: JSON.stringify({ oldSeq, newHwid, force: opts?.force, format: opts?.format, v2: opts?.v2, meta: opts?.meta }),
     }),
   unlock: (hwid: string, scope: 'tamper' | 'drift' | 'emergency', days: number, counter: number) =>
     call<UnlockResult>('/api/desk/unlock/issue', {

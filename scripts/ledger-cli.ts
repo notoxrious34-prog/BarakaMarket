@@ -12,10 +12,15 @@ import {
   ledgerAppend, ledgerVerify, ledgerParse, type LedgerEntry,
 } from '../src/core/activation-desk.js';
 
-/** Resolve `--ledger[=path]` from argv (bare flag = ./keygen-ledger.jsonl). */
+/**
+ * Resolve the ledger file from argv. Ledger duty is ON by default
+ * (./keygen-ledger.jsonl); pass `--no-ledger` for an explicitly unrecorded
+ * mint (printed as skipped), or `--ledger[=path]` to redirect.
+ */
 export function resolveLedgerFile(argv: string[]): string | null {
+  if (argv.includes('--no-ledger')) return null;
   const i = argv.findIndex(a => a === '--ledger' || a.startsWith('--ledger='));
-  if (i < 0) return null;
+  if (i < 0) return path.resolve(process.cwd(), 'keygen-ledger.jsonl');
   const a = argv[i];
   const v = a.includes('=') ? a.slice('--ledger='.length) : argv[i + 1];
   const p = v && !v.startsWith('-') ? v : 'keygen-ledger.jsonl';
@@ -54,9 +59,12 @@ export interface CliLedgerEntry {
   note?: string;
 }
 
-/** Append a self-checked issuance to the shared ledger. No-op when file is null. */
+/** Append a self-checked issuance to the shared ledger. Loud no-op when file is null. */
 export function recordLedgerEntry(ledgerFile: string | null, entry: CliLedgerEntry): void {
-  if (!ledgerFile) return;
+  if (!ledgerFile) {
+    console.log('LEDGER: skipped (--no-ledger) — this issuance is NOT recorded.');
+    return;
+  }
   withLedgerFileLock(ledgerFile, () => {
     let prev: LedgerEntry[] = [];
     try {
