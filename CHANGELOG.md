@@ -1,17 +1,16 @@
 # CHANGELOG — Baraka Market
 
+## v1.9.2 (2026-11-25) — Produit Rapide P2 + مكتب التفعيل (ADR-051 P2 · Desk P1-ops)
+- **P2 rapide**: سكيما `v15 → v16` (مذكرة `rapide_count/total` على `z_reports`) + سقفا COMMIT (`RAPIDE_CAP_EXCEEDED` يومي/كاشير، `meta KV`) + بطاقة المالك 4 + إفصاح الممرّ (لا تمسّ `z_hash`).
+- **Desk**: إيراد صافٍ بجانب الخام + دفتر CLI مشترك بقفل عابر (`F4` مغلقة) + تقسية تشغيلية (تدوير، نسخة ثانية، خنق 429) + عدّادات الفوتر.
+- البوابات: `tsc` + `lint` + `npm` **553/553** + `cargo` **58/58** + `build` + إثبات حي loopback 4/4.
+
 ## Unreleased — تجميد إصدار CLI القائم (قرار المالك A)
 - `scripts/activation-desk.ts`: أمر `generate` يرفض فوراً برمز 2 (`FROZEN`)
   ويوجّه للمحطة؛ تبقى القراءة والطوارئ (تحقق/HWID/سجل/إلغاء مرجعي)؛
   حُذف ممسك المفتاح الخاص والاستيرادات الميتة؛ القائمة 1) تعرض التنبيه.
 - الإصدار حصراً من المحطة (قفل + 409 + v2 + تدقيق) — مسار إصدار واحد.
 - البوابات: `tsc` + إثبات حي (رفض 2، تحقق INVALID بـ 3، دفتر INTACT).
-
-## Unreleased — Produit Rapide P2: الأسقف والمذكرة (ADR-051)
-- سكيما `v15 → v16`: عمودا `rapide_count / rapide_total_ttc_ct` على `z_reports` + هجرة في الممرّين.
-- سقفان عند الـCOMMIT (`RAPIDE_CAP_EXCEEDED`): يومي `rapide_cap_day_ct` + كاشير `rapide_cap_cashier_ct` (`meta KV`، `0/غائب = غير محدود`) — بطاقة المالك 4 في الإعدادات (تُحفظ + تُدقَّق).
-- مذكرة Z إعلامية (لا تمسّ `z_hash`): `fetchDailyZ` + `/api/z/summary` + إفصاح الشاشة + تحقق `finalizeZReport` (المزوَّر/الممرّ الساقط يُرفض).
-- الأدلة: `sqlite-rapide-p2.test.ts` (7/7) + 4 اختبارات Rust (`adr051_*`).
 
 ## v1.9.1 (2026-11-25) — Produit Rapide Pro + Speed P0/P1 (ADR-051)
 - **P0**: منتج سريع بلا كود بار (`F11` + زر `⚡ rapide`، `pos.rapide`) — مودال (تسمية/سعر TTC/كمية/قطعة-وزن/TVA صريح + حارس دور للصفرية)، دمج سليم بالتسمية (`packName`)، parity الممرّين (FK NULL + `was_negative=1` + صفر أثر مخزني).
