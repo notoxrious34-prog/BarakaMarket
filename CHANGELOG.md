@@ -1,5 +1,12 @@
 # CHANGELOG — Baraka Market
 
+## Unreleased — تجميد إصدار CLI القائم (قرار المالك A)
+- `scripts/activation-desk.ts`: أمر `generate` يرفض فوراً برمز 2 (`FROZEN`)
+  ويوجّه للمحطة؛ تبقى القراءة والطوارئ (تحقق/HWID/سجل/إلغاء مرجعي)؛
+  حُذف ممسك المفتاح الخاص والاستيرادات الميتة؛ القائمة 1) تعرض التنبيه.
+- الإصدار حصراً من المحطة (قفل + 409 + v2 + تدقيق) — مسار إصدار واحد.
+- البوابات: `tsc` + إثبات حي (رفض 2، تحقق INVALID بـ 3، دفتر INTACT).
+
 ## Unreleased — Produit Rapide P2: الأسقف والمذكرة (ADR-051)
 - سكيما `v15 → v16`: عمودا `rapide_count / rapide_total_ttc_ct` على `z_reports` + هجرة في الممرّين.
 - سقفان عند الـCOMMIT (`RAPIDE_CAP_EXCEEDED`): يومي `rapide_cap_day_ct` + كاشير `rapide_cap_cashier_ct` (`meta KV`، `0/غائب = غير محدود`) — بطاقة المالك 4 في الإعدادات (تُحفظ + تُدقَّق).

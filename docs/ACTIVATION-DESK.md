@@ -8,7 +8,7 @@
 | الطريقة | الأمر |
 |---|---|
 | 🖥️ المحطة الويب (الأنيقة — موصى به) | `npm run desk` ← افتح `http://127.0.0.1:3200/desk.html` |
-| نقرة مزدوجة (الأسهل) | `BarakaActivationDesk.exe` ← قائمة موجهة 1-5 |
+| نقرة مزدوجة (قراءة/طوارئ) | `BarakaActivationDesk.exe` ← تحقق/سجل/HWID (التوليد **مجمّد**: `FROZEN` — الإصدار من المحطة فقط) |
 | سطر أوامر خام (+v2) | `npx tsx scripts/keygen.ts "Epicerie Nour" "BM-…" [--format v2] [--tier SUPPORT12] [--expires 2027-01-01] [--hwid2 BM-…] [--ledger[=path]]` — `--ledger` يسجل في الدفتر المشترك (قفل ملف، يرفض المكسور) |
 | سكربت/SSH | `npm run keygen -- generate … --yes --json` (مخرجات JSON، رموز خروج 0/2/3) |
 
