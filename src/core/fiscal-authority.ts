@@ -562,15 +562,17 @@ export async function fetchDailyZ(
   total_credit_granted_ct?: number;
   /** ADR-047: below-available sales in this day (lane truth, either lane). */
   short_count?: number; short_total_ttc_ct?: number;
+  /** ADR-051 P2: codeless rapide lines in this day (lane truth). */
+  rapide_count?: number; rapide_total_ttc_ct?: number;
 } | null> {
-  const native = await invokeLane<{ day?: string; sales_count?: number; total_ttc_ct?: number; voids_count?: number; closed?: boolean; short_count?: number; short_total_ttc_ct?: number }>(
+  const native = await invokeLane<{ day?: string; sales_count?: number; total_ttc_ct?: number; voids_count?: number; closed?: boolean; short_count?: number; short_total_ttc_ct?: number; rapide_count?: number; rapide_total_ttc_ct?: number }>(
     'daily_z', { day },
   );
   if (
     native && native.day === day && typeof native.sales_count === 'number'
     && typeof native.total_ttc_ct === 'number' && typeof native.voids_count === 'number'
   ) {
-    return { day, sales_count: native.sales_count, total_ttc_ct: native.total_ttc_ct, voids_count: native.voids_count, closed: native.closed === true, short_count: native.short_count ?? 0, short_total_ttc_ct: native.short_total_ttc_ct ?? 0 };
+    return { day, sales_count: native.sales_count, total_ttc_ct: native.total_ttc_ct, voids_count: native.voids_count, closed: native.closed === true, short_count: native.short_count ?? 0, short_total_ttc_ct: native.short_total_ttc_ct ?? 0, rapide_count: native.rapide_count ?? 0, rapide_total_ttc_ct: native.rapide_total_ttc_ct ?? 0 };
   }
   // P0b: browser lane — same ledger, same shape (closed unknown here).
   const lb = await cashLoopback<{
@@ -578,6 +580,7 @@ export async function fetchDailyZ(
     total_ht_ct?: number; total_tva_ct?: number; total_timbre_ct?: number;
     total_especes_ct?: number; total_bank_ct?: number; total_credit_granted_ct?: number;
     short_count?: number; short_total_ttc_ct?: number;
+    rapide_count?: number; rapide_total_ttc_ct?: number;
   }>(`/api/z/summary?date=${encodeURIComponent(day)}`);
   if (lb && lb.date === day && typeof lb.sales_count === 'number' && typeof lb.total_ttc_ct === 'number') {
     return {
@@ -587,6 +590,7 @@ export async function fetchDailyZ(
       total_especes_ct: lb.total_especes_ct, total_bank_ct: lb.total_bank_ct,
       total_credit_granted_ct: lb.total_credit_granted_ct,
       short_count: lb.short_count ?? 0, short_total_ttc_ct: lb.short_total_ttc_ct ?? 0,
+      rapide_count: lb.rapide_count ?? 0, rapide_total_ttc_ct: lb.rapide_total_ttc_ct ?? 0,
     };
   }
   return null;
@@ -599,9 +603,11 @@ export interface ZCloseTotals {
   totalTimbreCt: number; totalTtcCt: number; especesGrossCt: number; cibTotalCt: number;
   dahabiyaTotalCt: number; creditGrantedCt: number; creditCollectedCt: number;
   firstInvoice: string; lastInvoice: string;
-  /** v1.5.0 memo: approved returns posted this day. A3: + daily scrappage. */
+  /** v1.5.0 memo: approved returns posted this day. A3: + daily scrappage.
+   *  ADR-051 P2: + codeless rapide memo (count + TTC). */
   returnsCount: number; returnsTotalTtcCt: number;
   lossesCount: number; lossesTotalCt: number;
+  rapideCount: number; rapideTotalTtcCt: number;
 }
 
 /**

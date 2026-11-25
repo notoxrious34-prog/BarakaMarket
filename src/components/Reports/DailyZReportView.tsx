@@ -59,6 +59,8 @@ export const DailyZReportView: React.FC = () => {
   const [laneCount, setLaneCount] = useState<number | null>(null);
   /** ADR-047: lane-truth below-available sales for the day (null = unknown). */
   const [laneShort, setLaneShort] = useState<{ n: number; ttcCt: number } | null>(null);
+  // ADR-051 P2: rapide memo from the lane summary (null = lane down, unknown).
+  const [laneRapide, setLaneRapide] = useState<{ n: number; ttcCt: number } | null>(null);
 
   // #004/MKT-009: apply a stored DAY row as a locked reprint (component-level
   // so the day navigator reuses the exact mount path — one mapping, no drift).
@@ -112,6 +114,9 @@ export const DailyZReportView: React.FC = () => {
         // ADR-047: below-available disclosure (lane truth; hidden when unknown).
         if (z && typeof z.short_count === 'number') setLaneShort({ n: z.short_count, ttcCt: z.short_total_ttc_ct ?? 0 });
         else setLaneShort(null);
+        // ADR-051 P2: codeless rapide memo (lane truth; hidden when unknown).
+        if (z && typeof z.rapide_count === 'number') setLaneRapide({ n: z.rapide_count, ttcCt: z.rapide_total_ttc_ct ?? 0 });
+        else setLaneRapide(null);
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -250,6 +255,12 @@ export const DailyZReportView: React.FC = () => {
           }
         }
       } catch { /* same: mismatch refusal, never a fake zero */ }
+      // ADR-051 P2: rapide memo comes from the LANE's own summary (laneRapide
+      // aggregates sale_items product_id NULL + *PRIX-LIBRE* over the fiscal
+      // window — no caller-side recount). A null lane (lane down) refuses
+      // with the ledger-mismatch path: never commit with a fake zero.
+      const rapideCount = laneRapide?.n ?? -1;
+      const rapideTotalTtcCt = laneRapide?.ttcCt ?? -1;
       const out = await commitZClose(zReport.date, '08:00', closingTime, {
         salesCount: zReport.sales_count, totalHtCt: ct.ht, tva0BaseCt: ct.b0,
         tva9BaseCt: ct.b9, tva9AmtCt: ct.a9, tva19BaseCt: ct.b19, tva19AmtCt: ct.a19,
@@ -258,6 +269,7 @@ export const DailyZReportView: React.FC = () => {
         creditGrantedCt: ct.cred, creditCollectedCt: ct.coll,
         firstInvoice, lastInvoice,
         returnsCount, returnsTotalTtcCt, lossesCount, lossesTotalCt,
+        rapideCount, rapideTotalTtcCt,
       });
       if (!out) throw new Error('lane');
       setClosure({ report_number: out.report_number, hash: out.hash });
@@ -304,6 +316,14 @@ export const DailyZReportView: React.FC = () => {
                 {isAr
                   ? `مبيعات على المكشوف: ${laneShort.n} — ${formatDZDFromCt(laneShort.ttcCt)} (بأساس آخر سعر شراء)`
                   : `Ventes à découvert: ${laneShort.n} — ${formatDZDFromCt(laneShort.ttcCt)} (au dernier coût d'achat)`}
+              </p>
+            )}
+            {/* ADR-051 P2: codeless rapide memo (lane truth). Informational. */}
+            {laneRapide !== null && laneRapide.n > 0 && (
+              <p className="text-[11px] text-sky-300 bg-sky-500/10 border border-sky-500/30 rounded-lg px-2.5 py-1 mt-1.5 font-mono" dir="ltr">
+                {isAr
+                  ? `سطور حرة بلا كود: ${laneRapide.n} — ${formatDZDFromCt(laneRapide.ttcCt)} (مذكرة إعلامية)`
+                  : `Lignes rapides sans code: ${laneRapide.n} — ${formatDZDFromCt(laneRapide.ttcCt)} (mémo)`}
               </p>
             )}
           </div>

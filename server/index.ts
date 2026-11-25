@@ -835,6 +835,14 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     // ADR-047: below-available sales stay visible in the day disclosure
     // (was_negative=1; absent on pre-v15 files → treated as 0).
     const shortRows = rows.filter(r => (r.was_negative as number) === 1);
+    // ADR-051 P2: codeless rapide lines (sale_items product_id NULL +
+    // *PRIX-LIBRE*) — same marker/memo as the lane aggregates.
+    const rap = baraka.db.prepare(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(si.line_ttc_ct), 0) AS t
+       FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE s.status = 'COMPLETED' AND s.created_at >= ? AND s.created_at < ?
+         AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'`,
+    ).get(start, end) as { n: number; t: number };
     res.json({
       date: day,
       sales_count: rows.length,
@@ -847,6 +855,8 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
       total_credit_granted_ct: byMethod('CREDIT'),
       short_count: shortRows.length,
       short_total_ttc_ct: shortRows.reduce((a, r) => a + (r.total_ttc_ct as number), 0),
+      rapide_count: rap.n,
+      rapide_total_ttc_ct: rap.t,
     });
   });
 

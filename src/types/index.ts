@@ -292,6 +292,9 @@ export interface ZClosureResult {
   returnsTotalTtcCt: number;
   lossesCount: number;
   lossesTotalCt: number;
+  /** ADR-051 P2: codeless rapide memo (count + TTC) in this shift. */
+  rapideCount: number;
+  rapideTotalTtcCt: number;
 }
 
 /** ADR-010-MKT: shelf-edge label types (canonical in core/shelf-labels). */

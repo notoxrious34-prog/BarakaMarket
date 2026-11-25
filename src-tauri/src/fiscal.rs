@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 15;
+pub const LATEST_SCHEMA_VERSION: i64 = 16;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -400,6 +400,24 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             conn.execute_batch("PRAGMA user_version = 15;")
                 .map_err(|e| e.to_string())?;
         }
+    }
+    // v15 → v16 (ADR-051 P2): rapide memo on z_reports — count + TTC of
+    // codeless lines. Informational only; the hash chain is untouched.
+    if v < 16 {
+        if !has_col("z_reports", "rapide_count")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN rapide_count INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !has_col("z_reports", "rapide_total_ttc_ct")? {
+            conn.execute_batch(
+                "ALTER TABLE z_reports ADD COLUMN rapide_total_ttc_ct INTEGER NOT NULL DEFAULT 0;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute_batch("PRAGMA user_version = 16;")
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -801,6 +819,71 @@ pub fn record_sale(
         )
         .map(|s| s != "0")
         .unwrap_or(true);
+    // ADR-051 P2: rapide caps enforced AT COMMIT (meta KV centimes;
+    // 0/absent = unlimited — same convention as the credit plafond).
+    // A rapide line = product_id null/0 + *PRIX-LIBRE* (same marker the Z
+    // memo counts). Day cap spans the fiscal day; cashier cap scopes it.
+    let mut new_rapide_ttc: i64 = 0;
+    for it in items {
+        let pid = it["product_id"].as_i64().unwrap_or(0);
+        if pid == 0 && it["barcode"].as_str().unwrap_or("") == "*PRIX-LIBRE*" {
+            new_rapide_ttc += ct(&it["line_ttc_ct"], "line_ttc_ct")?;
+        }
+    }
+    if new_rapide_ttc > 0 {
+        let created = str_field(&header["created_at"], "created_at")?;
+        let capday = algiers_day(&created)?;
+        let (wstart, wend) = day_bounds_utc(&capday)?;
+        let cap = |k: &str| -> i64 {
+            tx.query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [k],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(0)
+        };
+        let day_cap = cap("rapide_cap_day_ct");
+        if day_cap > 0 {
+            let used: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(si.line_ttc_ct), 0)
+                     FROM sale_items si JOIN sales s ON s.id = si.sale_id
+                     WHERE s.status = 'COMPLETED' AND s.created_at >= ?1 AND s.created_at < ?2
+                       AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'",
+                    [&wstart, &wend],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if used + new_rapide_ttc > day_cap {
+                return Err(format!(
+                    "[fiscal] RAPIDE_CAP_EXCEEDED day {capday}: rapide {new_rapide_ttc}ct exceeds cap {day_cap}ct"
+                ));
+            }
+        }
+        let cashier_cap = cap("rapide_cap_cashier_ct");
+        if cashier_cap > 0 {
+            let cashier = str_field(&header["cashier_id"], "cashier_id")?;
+            let used: i64 = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(si.line_ttc_ct), 0)
+                     FROM sale_items si JOIN sales s ON s.id = si.sale_id
+                     WHERE s.status = 'COMPLETED' AND s.created_at >= ?1 AND s.created_at < ?2
+                       AND s.cashier_id = ?3
+                       AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'",
+                    rusqlite::params![wstart, wend, cashier],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if used + new_rapide_ttc > cashier_cap {
+                return Err(format!(
+                    "[fiscal] RAPIDE_CAP_EXCEEDED cashier {cashier} day {capday}: rapide {new_rapide_ttc}ct exceeds cap {cashier_cap}ct"
+                ));
+            }
+        }
+    }
     let mut short_desc: Option<String> = None;
     for it in items {
         if let Some(p) = it["product_id"].as_i64() {
@@ -2504,6 +2587,17 @@ pub fn z_close(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
+    // ADR-051 P2: rapide memo over the day window (same bounds as sales).
+    let (rapn, rapttc): (i64, i64) = tx
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(si.line_ttc_ct), 0)
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id
+             WHERE s.created_at >= ?1 AND s.created_at < ?2 AND s.status = 'COMPLETED'
+               AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'",
+            [&wstart, &wend],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
     let prev: String = match tx.query_row(
         "SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1",
         [],
@@ -2523,13 +2617,15 @@ pub fn z_close(
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
           credit_collected_ct, returns_count, returns_total_ttc_ct,
           losses_count, losses_total_ct,
+          rapide_count, rapide_total_ttc_ct,
           first_invoice_number, last_invoice_number,
           prev_hash, hash, finalized, close_kind)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,1,'DAY')",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,1,'DAY')",
         rusqlite::params![
             number, day, opening_time, closing_time,
             n, nht, nb0, nb9, na9, nb19, na19, ntva, timbre, nttc,
             ncash, ncib, ndah, ncred, coll, rn, rttc, ln, lttc,
+            rapn, rapttc,
             first.unwrap_or_default(), last.unwrap_or_default(),
             prev, hash,
         ],
@@ -2582,6 +2678,17 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
+    // ADR-051 P2: codeless rapide lines in the day disclosure.
+    let (rapide_count, rapide_total): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT COUNT(*), SUM(si.line_ttc_ct)
+             FROM sale_items si JOIN sales s ON s.id = si.sale_id
+             WHERE s.created_at >= ?1 AND s.created_at < ?2 AND s.status = 'COMPLETED'
+               AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'",
+            [&wstart, &wend],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
     let (returns_count, returns_total): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(ri.line_ttc_ct), 0)
@@ -2603,6 +2710,8 @@ pub fn daily_z(conn: &Connection, day: &str) -> Result<Value, String> {
         "returns_total_ttc_ct": returns_total,
         "short_count": short_count,
         "short_total_ttc_ct": short_total.unwrap_or(0),
+        "rapide_count": rapide_count,
+        "rapide_total_ttc_ct": rapide_total.unwrap_or(0),
         "closed": locked,
     }))
 }
@@ -3510,6 +3619,17 @@ pub fn cash_close_and_z(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .map_err(|e| e.to_string())?;
+        // ADR-051 P2: rapide memo over the SHIFT window (same session bounds).
+        let (rapn, rapttc): (i64, i64) = tx
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(si.line_ttc_ct), 0)
+                 FROM sale_items si JOIN sales s ON s.id = si.sale_id
+                 WHERE s.status = 'COMPLETED' AND s.created_at >= ?1 AND s.created_at <= ?2
+                   AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'",
+                rusqlite::params![opened_at, period_end],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
         let (nht, nb9, na9, nb19, na19, ntva, nttc, ncash, ncib, ndah, ncred) = (
             ht - rht,
             b9 - rb9,
@@ -3543,10 +3663,11 @@ pub fn cash_close_and_z(
               especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
               credit_collected_ct, returns_count, returns_total_ttc_ct,
               losses_count, losses_total_ct,
+              rapide_count, rapide_total_ttc_ct,
               first_invoice_number, last_invoice_number,
               prev_hash, hash, finalized, close_kind)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, 1, 'SHIFT')",
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, 1, 'SHIFT')",
             rusqlite::params![
                 number,
                 day,
@@ -3570,6 +3691,8 @@ pub fn cash_close_and_z(
                 rttc,
                 ln,
                 lttc,
+                rapn,
+                rapttc,
                 first.unwrap_or_default(),
                 last.unwrap_or_default(),
                 prev,
@@ -4781,6 +4904,134 @@ mod tests {
             z["hash"].as_str().unwrap()
         );
         assert!(z_close(&mut db, "11-02", "08:00", "20:00").is_err()); // bad day
+    }
+
+    // ADR-051 P2 helpers: a codeless rapide header (timbre engine off via the
+    // per-sale fiscal regime so the memo math stays exact) + its single line.
+    fn rapide_header(id: &str, key: &str, ttc: i64, cashier: &str) -> Value {
+        serde_json::json!({
+            "id": id, "cashier_id": cashier, "cashier_name": "Amine",
+            "client_id": null, "client_name": null,
+            "payment_method": "ESPECES", "amount_paid_ct": ttc, "amount_returned_ct": 0,
+            "client_sale_id": key,
+            "fiscal_regime": {"tva_enabled": true, "timbre_enabled": false},
+            "totals": { "total_ht_ct": ttc, "total_tva_ct": 0, "timbre_ct": 0,
+                        "total_ttc_ct": ttc,
+                        "tva_breakdown": {
+                            "0": {"base_ht_ct": ttc, "tva_amount_ct": 0, "total_ttc_ct": ttc},
+                            "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0},
+                            "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}},
+            "is_facture": 0, "created_at": "2026-11-01T12:00:00.000Z"
+        })
+    }
+
+    fn rapide_items(ttc: i64) -> Vec<Value> {
+        vec![serde_json::json!({"product_id": 0, "barcode": "*PRIX-LIBRE*", "name_fr": "RAPIDE", "name_ar": "سريع", "unit_price_ct": ttc, "qty_milli": 1000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": ttc, "line_tva_ct": 0, "line_ttc_ct": ttc})]
+    }
+
+    #[test]
+    fn adr051_migrate_v16_adds_rapide_columns() {
+        let db = memdb();
+        let v: i64 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, LATEST_SCHEMA_VERSION);
+        assert_eq!(v, 16);
+        for col in ["rapide_count", "rapide_total_ttc_ct"] {
+            let n: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('z_reports') WHERE name = ?1",
+                    [col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "z_reports.{col} must exist after v16");
+        }
+    }
+
+    #[test]
+    fn adr051_rapide_day_cap_refuses_over_cap_and_spares_catalog() {
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('rapide_cap_day_ct', '50000')",
+            [],
+        )
+        .unwrap();
+        record_sale(&mut db, &rapide_header("r1", "RK-1", 30000, "C-1"), &rapide_items(30000))
+            .expect("300 under the 500 cap must commit");
+        let err = record_sale(
+            &mut db,
+            &rapide_header("r2", "RK-2", 25000, "C-1"),
+            &rapide_items(25000),
+        )
+        .unwrap_err();
+        assert!(err.contains("RAPIDE_CAP_EXCEEDED"), "over-cap must refuse, got: {err}");
+        // Catalog (non-rapide) sales are untouched by the cap.
+        record_sale(&mut db, &sale_header(Some("RK-3")), &sale_items())
+            .expect("catalog sale must ignore the rapide cap");
+        let (n, t): (i64, i64) = db
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(si.line_ttc_ct), 0)
+                 FROM sale_items si JOIN sales s ON s.id = si.sale_id
+                 WHERE s.status = 'COMPLETED'
+                   AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((n, t), (1, 30000));
+    }
+
+    #[test]
+    fn adr051_rapide_cashier_cap_scopes_per_cashier() {
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO meta (key, value) VALUES ('rapide_cap_cashier_ct', '20000')",
+            [],
+        )
+        .unwrap();
+        record_sale(
+            &mut db,
+            &rapide_header("k1", "KK-1", 20000, "C-1"),
+            &rapide_items(20000),
+        )
+        .expect("at-cap must commit");
+        let err = record_sale(
+            &mut db,
+            &rapide_header("k2", "KK-2", 1000, "C-1"),
+            &rapide_items(1000),
+        )
+        .unwrap_err();
+        assert!(err.contains("RAPIDE_CAP_EXCEEDED"), "same cashier over-cap, got: {err}");
+        record_sale(
+            &mut db,
+            &rapide_header("k3", "KK-3", 20000, "C-2"),
+            &rapide_items(20000),
+        )
+        .expect("other cashier unaffected");
+    }
+
+    #[test]
+    fn adr051_z_close_and_daily_z_carry_rapide_memo() {
+        let mut db = memdb();
+        record_sale(
+            &mut db,
+            &rapide_header("m1", "MK-1", 30000, "C-1"),
+            &rapide_items(30000),
+        )
+        .unwrap();
+        let z = z_close(&mut db, "2026-11-01", "08:00", "20:00").unwrap();
+        let row: (i64, i64) = db
+            .query_row(
+                "SELECT rapide_count, rapide_total_ttc_ct FROM z_reports WHERE report_number = ?1",
+                [z["report_number"].as_str().unwrap()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (1, 30000), "DAY row must store the memo");
+        let dz = daily_z(&db, "2026-11-01").unwrap();
+        assert_eq!(dz["rapide_count"], 1);
+        assert_eq!(dz["rapide_total_ttc_ct"], 30000);
     }
 
     #[test]

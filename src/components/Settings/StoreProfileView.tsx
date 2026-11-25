@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { auditSessionEvent } from '../../core/session-authority';
+import { readMetaKv, writeMetaKv } from '../../core/machine-authority';
+import { RAPIDE_CAP_DAY_KEY, RAPIDE_CAP_CASHIER_KEY } from '../../db/sqlite';
 import { StoreProfile } from '../../types';
 import {
   Settings,
@@ -44,6 +46,29 @@ export const StoreProfileView: React.FC = () => {
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [nifError, setNifError] = useState<string | null>(null);
 
+  // ADR-051 P2: rapide caps (meta KV, centimes). DZD strings in the form;
+  // 0/empty = unlimited (same convention as the credit plafond).
+  const [capDay, setCapDay] = useState('');
+  const [capCashier, setCapCashier] = useState('');
+  const [capsLoaded, setCapsLoaded] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const [d, c] = await Promise.all([readMetaKv(RAPIDE_CAP_DAY_KEY), readMetaKv(RAPIDE_CAP_CASHIER_KEY)]);
+        if (!alive) return;
+        const toDzd = (v: string | null) => {
+          const n = Math.floor(Number(v ?? 0));
+          return Number.isFinite(n) && n > 0 ? String(n / 100) : '';
+        };
+        setCapDay(toDzd(d));
+        setCapCashier(toDzd(c));
+      } catch { /* lane down: leave empty (= unlimited shown), never fake */ }
+      if (alive) setCapsLoaded(true);
+    })();
+    return () => { alive = false; };
+  }, []);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -79,6 +104,19 @@ export const StoreProfileView: React.FC = () => {
       }
     }
     updateStoreProfile(form);
+    // ADR-051 P2: rapide caps persist to meta KV (centimes, owner-only,
+    // audited). Empty/0 = unlimited. Both lanes enforce at COMMIT.
+    if (isOwner && capsLoaded && session) {
+      const toCt = (dzd: string) => {
+        const n = Math.floor(Number(dzd) * 100);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+      };
+      const dayCt = toCt(capDay), cashierCt = toCt(capCashier);
+      writeMetaKv(RAPIDE_CAP_DAY_KEY, String(dayCt));
+      writeMetaKv(RAPIDE_CAP_CASHIER_KEY, String(cashierCt));
+      void auditSessionEvent(session.username, 'profile.change',
+        `plafonds rapide jour=${dayCt === 0 ? 'illimité' : dayCt + 'ct'} caissier=${cashierCt === 0 ? 'illimité' : cashierCt + 'ct'}`);
+    }
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3000);
   };
@@ -356,6 +394,56 @@ export const StoreProfileView: React.FC = () => {
               />
             </div>
           </div>
+
+          {/* ADR-051 P2: rapide (codeless) caps — owner only, meta KV.
+              0/empty = unlimited. Enforced AT COMMIT by both lanes. */}
+          {isOwner && (
+            <div className="bg-[#111722] border border-[#1e293b] rounded-2xl p-5 shadow-xl space-y-4">
+              <h3 className="text-sm font-bold text-sky-400 flex items-center gap-2 border-b border-[#1e293b] pb-2">
+                <Percent className="w-4 h-4" />
+                <span>{isAr ? '4. سقوف البيع السريع بلا كود (Produit Rapide)' : '4. Plafonds Produit Rapide (sans code)'}</span>
+              </h3>
+              <div className="text-[10px] text-slate-500">
+                {isAr
+                  ? 'فارغ أو 0 = غير محدود. يُفرض عند الترسيم في الممرّين معاً، ويُرفض التجاوز بخطأ RAPIDE_CAP_EXCEEDED. يُسجَّل أي تغيير في التدقيق.'
+                  : 'Vide ou 0 = illimité. Appliqué AU COMMIT par les deux voies, dépassement refusé (RAPIDE_CAP_EXCEEDED). Tout changement est audité.'}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    {isAr ? 'سقف اليوم الكامل (DZD):' : 'Plafond jour (DZD) :'}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    dir="ltr"
+                    value={capDay}
+                    disabled={!capsLoaded}
+                    onChange={e => setCapDay(e.target.value)}
+                    placeholder={isAr ? 'غير محدود' : 'Illimité'}
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white font-mono tabular-nums outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-300 block mb-1">
+                    {isAr ? 'سقف الكاشير الواحد / اليوم (DZD):' : 'Plafond par caissier / jour (DZD) :'}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    dir="ltr"
+                    value={capCashier}
+                    disabled={!capsLoaded}
+                    onChange={e => setCapCashier(e.target.value)}
+                    placeholder={isAr ? 'غير محدود' : 'Illimité'}
+                    className="w-full bg-[#162030] border border-[#2b3a4f] rounded-xl px-3 py-2 text-xs text-white font-mono tabular-nums outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Submit Button */}
           <div className="flex justify-end pt-2">

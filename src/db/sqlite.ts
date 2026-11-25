@@ -194,7 +194,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 15;
+export const LATEST_SCHEMA_VERSION = 16;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -574,6 +574,19 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 15');
     v = 15;
   }
+  // v15 → v16 (ADR-051 P2): rapide memo on z_reports — count + TTC of
+  // codeless lines. Informational only; the hash chain is untouched.
+  if (v < 16) {
+    const zcols = db.prepare('PRAGMA table_info(z_reports)').all() as { name: string }[];
+    if (!zcols.some(c => c.name === 'rapide_count')) {
+      db.exec('ALTER TABLE z_reports ADD COLUMN rapide_count INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!zcols.some(c => c.name === 'rapide_total_ttc_ct')) {
+      db.exec('ALTER TABLE z_reports ADD COLUMN rapide_total_ttc_ct INTEGER NOT NULL DEFAULT 0');
+    }
+    db.exec('PRAGMA user_version = 16');
+    v = 16;
+  }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -701,6 +714,7 @@ export interface BarakaDb {
       firstInvoice: string; lastInvoice: string;
       returnsCount: number; returnsTotalTtcCt: number;
       lossesCount: number; lossesTotalCt: number;
+      rapideCount: number; rapideTotalTtcCt: number;
     };
   }): { report_number: string; hash: string; prev_hash: string };
   getLatestZHash(): string;
@@ -774,6 +788,9 @@ export interface DayAggregatesCt {
    *  this day (waste ledger window). Shown on the Z as its own line; it never
    *  touches sales, it is a management/profit signal, not fiscal turnover. */
   lossesCount: number; lossesTotalCt: number;
+  /** ADR-051 P2: codeless rapide memo — count + TTC of *PRIX-LIBRE* lines
+   *  (product_id NULL) posted this day. Informational; never netted. */
+  rapideCount: number; rapideTotalTtcCt: number;
 }
 
 export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregatesCt {
@@ -834,6 +851,14 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
     `SELECT COUNT(*) AS n, COALESCE(SUM(total_loss_ct), 0) AS t FROM inventory_losses
      WHERE created_at >= ? AND created_at < ?`,
   ).get(start, end) as { n: number; t: number };
+  // ADR-051 P2: codeless rapide memo — *PRIX-LIBRE* lines (product_id NULL)
+  // on COMPLETED sales in the same window. Count + TTC, informational.
+  const rap = db.prepare(
+    `SELECT COUNT(*) AS n, COALESCE(SUM(si.line_ttc_ct), 0) AS t
+     FROM sale_items si JOIN sales s ON s.id = si.sale_id
+     WHERE s.status = 'COMPLETED' AND s.created_at >= ? AND s.created_at < ?
+       AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'`,
+  ).get(start, end) as { n: number; t: number };
   return {
     salesCount: agg.n, totalHtCt: agg.ht - ret.ht, tva0BaseCt: agg.b0 - ret.b0, tva9BaseCt: agg.b9 - ret.b9,
     tva9AmtCt: agg.a9 - ret.a9, tva19BaseCt: agg.b19 - ret.b19, tva19AmtCt: agg.a19 - ret.a19, totalTvaCt: agg.tva - ret.tva,
@@ -842,7 +867,38 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
     creditCollectedCt: settled.t, firstInvoice: agg.first ?? '', lastInvoice: agg.last ?? '',
     returnsCount: ret.n, returnsTotalTtcCt: ret.ttc,
     lossesCount: los.n, lossesTotalCt: los.t,
+    rapideCount: rap.n, rapideTotalTtcCt: rap.t,
   };
+}
+
+/** ADR-051 P2: rapide caps live in meta KV (centimes). 0/absent = unlimited
+ *  (same convention as the credit plafond). Owner sets them in Store settings. */
+export const RAPIDE_CAP_DAY_KEY = 'rapide_cap_day_ct';
+export const RAPIDE_CAP_CASHIER_KEY = 'rapide_cap_cashier_ct';
+export const RAPIDE_BARCODE = '*PRIX-LIBRE*';
+
+function readCapCt(db: DatabaseSync, key: string): number {
+  try {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined;
+    const n = Math.floor(Number(row?.value ?? 0));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch { return 0; }
+}
+
+/** Sum of rapide TTC posted in [start, end) — optionally one cashier. */
+export function rapideWindowTotalCt(db: DatabaseSync, startIso: string, endIso: string, cashierId?: string): number {
+  const row = (cashierId
+    ? db.prepare(
+      `SELECT COALESCE(SUM(si.line_ttc_ct), 0) AS t FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE s.status = 'COMPLETED' AND s.created_at >= ? AND s.created_at < ? AND s.cashier_id = ?
+         AND si.product_id IS NULL AND si.barcode = ?`,
+    ).get(startIso, endIso, cashierId, RAPIDE_BARCODE)
+    : db.prepare(
+      `SELECT COALESCE(SUM(si.line_ttc_ct), 0) AS t FROM sale_items si JOIN sales s ON s.id = si.sale_id
+       WHERE s.status = 'COMPLETED' AND s.created_at >= ? AND s.created_at < ?
+         AND si.product_id IS NULL AND si.barcode = ?`,
+    ).get(startIso, endIso, RAPIDE_BARCODE)) as { t: number };
+  return row.t;
 }
 
 /** ADR-050 P2: SYNC Ed25519 genuineness (node:crypto, lane-side).
@@ -1681,6 +1737,13 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         const netTtc = agg.ttc - ret.ttc;
         const day = fiscalDayISO(new Date(periodEnd));
         const year = parseInt(day.slice(0, 4), 10);
+        // ADR-051 P2: rapide memo over the SHIFT window (same session bounds).
+        const rap = db.prepare(
+          `SELECT COUNT(*) AS n, COALESCE(SUM(si.line_ttc_ct), 0) AS t
+           FROM sale_items si JOIN sales s ON s.id = si.sale_id
+           WHERE s.status = 'COMPLETED' AND s.created_at >= ? AND s.created_at <= ?
+             AND si.product_id IS NULL AND si.barcode = '*PRIX-LIBRE*'`,
+        ).get(s.opened_at, periodEnd) as { n: number; t: number };
         const prevRow = db.prepare('SELECT hash FROM z_reports ORDER BY rowid DESC LIMIT 1').get() as
           | { hash: string }
           | undefined;
@@ -1694,14 +1757,16 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
             credit_collected_ct, returns_count, returns_total_ttc_ct,
             losses_count, losses_total_ct,
+            rapide_count, rapide_total_ttc_ct,
             first_invoice_number, last_invoice_number,
             prev_hash, hash, finalized, close_kind)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'SHIFT')`,
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'SHIFT')`,
         ).run(
           zNumber, day, s.opened_at, periodEnd,
           agg.n, agg.ht - ret.ht, agg.b9 - ret.b9, agg.a9 - ret.a9, agg.b19 - ret.b19, agg.a19 - ret.a19, (agg.a9 + agg.a19) - ret.tva,
           agg.timbre, netTtc, agg.cash - ret.cash, agg.cib - ret.cib, agg.dah - ret.dah, agg.cred - ret.cred, settled.t,
           ret.n, ret.ttc, los.n, los.t,
+          rap.n, rap.t,
           agg.first ?? '', agg.last ?? '', prev, hash,
         );
         db.prepare(
@@ -1719,6 +1784,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           openingFloatCt: s.opening_float_ct, theoreticalCashCt: theoretical,
           closingCountedCt: countedCashCt, cashDiffCt: diff, hash, prevHash: prev,
           returnsCount: ret.n, returnsTotalTtcCt: ret.ttc, lossesCount: los.n, lossesTotalCt: los.t,
+          rapideCount: rap.n, rapideTotalTtcCt: rap.t,
         };
       } catch (e) {
         try { db.exec('ROLLBACK'); } catch { /* already rolled back */ }
@@ -2186,6 +2252,24 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           throw new Error(
             `[db] CREDIT_LIMIT_EXCEEDED client ${clientFk}: balance ${ledger?.credit_balance_ct ?? 0}ct + sale ${t.total_ttc_ct}ct exceeds plafond ${ledger?.max_credit_limit_ct ?? 0}ct`,
           );
+        }
+      }
+      // ADR-051 P2: rapide caps enforced AT COMMIT (meta KV, 0 = unlimited).
+      // A rapide line = product_id null/0 + *PRIX-LIBRE* (same marker the Z
+      // memo counts). Day cap spans the fiscal day; cashier cap scopes it.
+      const newRapideTtc = items
+        .filter(it => (it.product_id == null || it.product_id === 0) && it.barcode === RAPIDE_BARCODE)
+        .reduce((a, it) => a + it.line_ttc_ct, 0);
+      if (newRapideTtc > 0) {
+        const { start, end } = fiscalDayBoundsUTC(saleDay);
+        const dayCap = readCapCt(db, RAPIDE_CAP_DAY_KEY);
+        if (dayCap > 0 && rapideWindowTotalCt(db, start, end) + newRapideTtc > dayCap) {
+          throw new Error(`[db] RAPIDE_CAP_EXCEEDED day ${saleDay}: rapide ${newRapideTtc}ct exceeds cap ${dayCap}ct`);
+        }
+        const cashierCap = readCapCt(db, RAPIDE_CAP_CASHIER_KEY);
+        const cashierId = header.cashier_id.trim();
+        if (cashierCap > 0 && cashierId && rapideWindowTotalCt(db, start, end, cashierId) + newRapideTtc > cashierCap) {
+          throw new Error(`[db] RAPIDE_CAP_EXCEEDED cashier ${cashierId} day ${saleDay}: rapide ${newRapideTtc}ct exceeds cap ${cashierCap}ct`);
         }
       }
 
@@ -3060,6 +3144,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         firstInvoice: string; lastInvoice: string;
         returnsCount: number; returnsTotalTtcCt: number;
         lossesCount: number; lossesTotalCt: number;
+        rapideCount: number; rapideTotalTtcCt: number;
       };
     }) {
       const t = input.totals;
@@ -3099,6 +3184,8 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       num('returnsTotalTtcCt', t.returnsTotalTtcCt, ledger.returnsTotalTtcCt);
       num('lossesCount', t.lossesCount, ledger.lossesCount);
       num('lossesTotalCt', t.lossesTotalCt, ledger.lossesTotalCt);
+      num('rapideCount', t.rapideCount, ledger.rapideCount);
+      num('rapideTotalTtcCt', t.rapideTotalTtcCt, ledger.rapideTotalTtcCt);
       if (t.firstInvoice !== ledger.firstInvoice) bad.push(`firstInvoice: caller=${t.firstInvoice} ledger=${ledger.firstInvoice}`);
       if (t.lastInvoice !== ledger.lastInvoice) bad.push(`lastInvoice: caller=${t.lastInvoice} ledger=${ledger.lastInvoice}`);
       if (bad.length > 0) {
@@ -3117,9 +3204,10 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           especes_gross_ct, cib_total_ct, dahabiya_total_ct, credit_granted_ct,
           credit_collected_ct, returns_count, returns_total_ttc_ct,
           losses_count, losses_total_ct,
+          rapide_count, rapide_total_ttc_ct,
           first_invoice_number, last_invoice_number,
           prev_hash, hash, finalized, close_kind)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'DAY')`,
       ).run(
         number, input.day, input.openingTime, input.closingTime,
         t.salesCount, t.totalHtCt, t.tva0BaseCt, t.tva9BaseCt, t.tva9AmtCt,
@@ -3127,6 +3215,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         t.especesGrossCt, t.cibTotalCt, t.dahabiyaTotalCt, t.creditGrantedCt,
         t.creditCollectedCt, t.returnsCount, t.returnsTotalTtcCt,
         t.lossesCount, t.lossesTotalCt,
+        t.rapideCount, t.rapideTotalTtcCt,
         t.firstInvoice, t.lastInvoice, prev, hash,
       );
       return { report_number: number, hash, prev_hash: prev };
