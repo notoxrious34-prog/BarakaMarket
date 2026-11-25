@@ -182,4 +182,4 @@ export function renderReceipt(store: string, hwid: string, key: string, seq: num
   ].join('\n');
 }
 
-export const DESK_VERSION = '4.0.0';
+export const DESK_VERSION = '5.0.0';
