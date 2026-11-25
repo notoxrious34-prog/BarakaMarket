@@ -16,6 +16,7 @@ F8 is intentionally unbound (reserved for the second-cash-register lane).
 | F5 | Restore first held cart | held carts exist |
 | F6 | Toggle scale modal (weighing) | always |
 | F7 | Catalog quick-search (↑/↓ + Enter) | always |
+| F11 | Produit Rapide — codeless item modal (ADR-051) | always |
 | F9 / Space / F12 | Checkout (F12 = settlement cockpit) | cart non-empty |
 | F10 | Lock / unlock session | always; when locked every other key is ignored |
 

@@ -84,6 +84,32 @@ test('db ADR-050: owner override unlocks an exhausted trial', () => {
   b.close();
 });
 
+test('db ADR-051: rapide line (pid 0) commits with FK NULL and zero stock effect', () => {
+  const b = openBarakaDb(':memory:');
+  b.upsertProduct({
+    id: 9, barcode: '613000000001', name_fr: 'Pain', name_ar: 'خبز',
+    category_id: 'boulangerie', buy_price_ct: 2000, sell_price_ct: 3000,
+    tva_rate: 9 as const, stock_milli: 100000, min_stock_milli: 5000,
+    unit: 'PIECE' as const, is_scale: 0, scale_item_code: null,
+    has_expiry: 0, expiry_date: null,
+  });
+  const line = calculateLineTotalsCt(3000, 2, 9);
+  const t = calculateSaleTotalsCt([{ tva_rate: 9 as const, ...line }], 'ESPECES');
+  const stockBefore = (b.db.prepare('SELECT stock_milli AS s FROM products WHERE id = 9').get() as { s: number }).s;
+  b.recordSale({
+    id: 'p0-rapide', cashier_id: 'C-1', cashier_name: 'Amine', payment_method: 'ESPECES' as const,
+    amount_paid_ct: t.total_ttc_ct, amount_returned_ct: 0, totals: t,
+    created_at: '2026-11-25T10:00:00.000Z',
+  }, [
+    { product_id: 0, barcode: '*PRIX-LIBRE*', name_fr: '⚡ Produit Rapide [خبز الشعير]', name_ar: '⚡ منتج سريع [خبز الشعير]', unit_price_ct: 3000, qty_milli: 2000, unit: 'PIECE' as const, tva_rate: 9 as const, discount_bp: 0, line_ht_ct: line.total_line_ht_ct, line_tva_ct: line.total_line_tva_ct, line_ttc_ct: line.total_line_ttc_ct },
+  ]);
+  const row = b.db.prepare('SELECT product_id, was_negative FROM sale_items JOIN sales ON sales.id = sale_items.sale_id WHERE sales.id = ?').get('p0-rapide') as { product_id: number | null; was_negative: number };
+  assert.equal(row.product_id, null);
+  assert.equal(row.was_negative, 1);
+  const stockAfter = (b.db.prepare('SELECT stock_milli AS s FROM products WHERE id = 9').get() as { s: number }).s;
+  assert.equal(stockAfter, stockBefore);
+  b.close();
+});
 test('db ADR-050: sync signature verifies a genuine key, rejects tampering', () => {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const pubRaw = Buffer.from(publicKey.export({ type: 'spki', format: 'der' }).subarray(-32)).toString('hex');

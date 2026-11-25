@@ -14,6 +14,7 @@ const LABELS: Record<ShortcutAction, { ar: string; fr: string }> = {
   'pos.recall': { ar: 'استرجاع', fr: 'Rappeler' },
   'pos.scale': { ar: 'الميزان', fr: 'Balance' },
   'pos.filter': { ar: 'فلترة', fr: 'Filtre' },
+  'pos.rapide': { ar: '⚡ منتج سريع', fr: '⚡ Rapide' },
   'pos.credit': { ar: 'كريدي', fr: 'Crédit' },
   'pos.settle': { ar: 'التسوية', fr: 'Encaisser' },
   'pos.checkout': { ar: 'الدفع السريع', fr: 'Checkout' },

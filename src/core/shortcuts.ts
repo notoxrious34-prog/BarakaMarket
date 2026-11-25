@@ -16,7 +16,7 @@ export const SHORTCUTS_KEY = 'baraka_shortcuts_v1';
 
 export type ShortcutAction =
   | 'pos.search' | 'pos.qty' | 'pos.discount' | 'pos.hold' | 'pos.recall'
-  | 'pos.scale' | 'pos.filter' | 'pos.credit' | 'pos.settle' | 'pos.checkout' | 'pos.lock'
+  | 'pos.scale' | 'pos.filter' | 'pos.rapide' | 'pos.credit' | 'pos.settle' | 'pos.checkout' | 'pos.lock'
   | 'pay.exact' | 'pay.1000' | 'pay.2000' | 'pay.5000';
 
 /** Canonical defaults — keep in sync with docs/KEYBOARD-MAP.md. */
@@ -28,6 +28,7 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, string[]> = {
   'pos.recall': ['F5'],
   'pos.scale': ['F6'],
   'pos.filter': ['F7'],
+  'pos.rapide': ['F11'],
   'pos.credit': ['F9'],
   'pos.settle': ['F12'],
   'pos.checkout': [' '],

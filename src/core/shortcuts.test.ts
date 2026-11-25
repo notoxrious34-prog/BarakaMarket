@@ -20,9 +20,10 @@ function memStore(): { getItem(k: string): string | null; setItem(k: string, v: 
 test('C5: defaults mirror KEYBOARD-MAP (spot-check)', () => {
   assert.deepEqual(DEFAULT_SHORTCUTS['pos.search'], ['F1']);
   assert.deepEqual(DEFAULT_SHORTCUTS['pos.hold'], ['F4']);
+  assert.deepEqual(DEFAULT_SHORTCUTS['pos.rapide'], ['F11']); // ADR-051 P0
   assert.deepEqual(DEFAULT_SHORTCUTS['pos.checkout'], [' ']);
   assert.deepEqual(DEFAULT_SHORTCUTS['pay.exact'], ['F1', 'Alt+1']);
-  assert.equal(SHORTCUT_ACTIONS.length, 15);
+  assert.equal(SHORTCUT_ACTIONS.length, 16);
 });
 
 test('C5: resolve is mode-scoped (F1 = search in POS, exact in pay)', () => {

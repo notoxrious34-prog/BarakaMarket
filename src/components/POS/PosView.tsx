@@ -20,8 +20,10 @@ import {
   ArrowRight,
   Maximize2,
   AlertCircle,
+  Zap,
 } from 'lucide-react';
 import { PaymentModal } from './PaymentModal';
+import { QuickProductModal } from './QuickProductModal';
 import { ScaleSimulationModal } from './ScaleSimulationModal';
 import { QuantityModal } from './QuantityModal';
 import { DiscountModal } from './DiscountModal';
@@ -79,6 +81,8 @@ export const PosView: React.FC = () => {
   const [qtyModalIndex, setQtyModalIndex] = useState<number | null>(null);
   const [discountModalIndex, setDiscountModalIndex] = useState<number | null>(null);
   const [showCatalogModal, setShowCatalogModal] = useState(false);
+  // ADR-051 P0: Produit Rapide (codeless items) — same modal contract.
+  const [showRapideModal, setShowRapideModal] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
@@ -96,7 +100,7 @@ export const PosView: React.FC = () => {
   const searchInputRef = useRef<HTMLInputElement>(null);
   // TASK 6: focus trap — re-arm barcode whenever modals toggle.
   const { rearm: rearmBarcode } = useAutoFocusBarcode(barcodeInputRef, [
-    showPaymentModal, showScaleModal, qtyModalIndex, discountModalIndex, showCatalogModal,
+    showPaymentModal, showScaleModal, qtyModalIndex, discountModalIndex, showCatalogModal, showRapideModal,
   ]);
 
   // Calculate live cart totals (defaulting to Cash/Espèces preview for Timbre preview)
@@ -168,6 +172,10 @@ export const PosView: React.FC = () => {
         // Instant obsidian catalog search (ArrowUp/Down + Enter)
         e.preventDefault();
         setShowCatalogModal(prev => !prev);
+      } else if (action === 'pos.rapide') {
+        // ADR-051 P0: Produit Rapide — codeless items, same focus contract.
+        e.preventDefault();
+        setShowRapideModal(prev => !prev);
       } else if (action === 'pos.credit' || action === 'pos.settle') {
         e.preventDefault();
         if (currentCart.length === 0) return;
@@ -226,6 +234,20 @@ export const PosView: React.FC = () => {
             : '⚠ NON-FISCAL TEST ENVIRONMENT — provisional numbers (SQLite monotonic seq is authoritative)'}
         </div>
       )}
+      {/* ADR-050 P4: 3-day grace banner — full-width, ABOVE the columns (D1). */}
+      {inGrace && !showLicenseLock && (
+        <div className="mx-3 mt-2 flex items-center justify-between gap-2 rounded-xl border border-amber-500/50 bg-amber-950/50 px-3 py-2">
+          <p className="text-xs font-bold text-amber-300">
+            {isAr ? '● انتهت التجربة — 3 أيام سماح متبقية، فعّل البرنامج لمواصلة البيع' : '● Essai terminé — 3 jours de grâce, activez la licence'}
+          </p>
+          <button
+            onClick={() => setActiveView('license')}
+            className="shrink-0 rounded-lg bg-amber-500 px-3 py-1 text-xs font-black text-black cursor-pointer"
+          >
+            {isAr ? 'تفعيل' : 'Activer'}
+          </button>
+        </div>
+      )}
       <div className="flex flex-col lg:flex-row flex-1 overflow-hidden">
       {/* LEFT COLUMN: Catalog, Search, Categories, Quick Tap */}
       <div className="flex-1 flex flex-col min-h-0 border-e border-[#1e293b] p-3 overflow-hidden">
@@ -271,6 +293,18 @@ export const PosView: React.FC = () => {
               className="w-full bg-[#111722] border border-[#233145] focus:border-emerald-500 rounded-xl ps-9 pe-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
             />
           </div>
+
+          {/* ADR-051 P0: Produit Rapide — codeless items (F11). */}
+          <button
+            type="button"
+            onClick={() => setShowRapideModal(true)}
+            title={isAr ? 'منتج سريع بلا كود بار (F11)' : 'Produit rapide sans code-barres (F11)'}
+            className="sm:w-auto w-full shrink-0 flex items-center justify-center gap-1.5 px-3 py-2 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-700/50 hover:border-emerald-500 rounded-xl text-xs font-bold text-emerald-300 transition-all cursor-pointer"
+          >
+            <Zap className="w-4 h-4" />
+            <span>{isAr ? '⚡ منتج سريع' : '⚡ Rapide'}</span>
+            <kbd className="hidden md:inline-block text-[10px] px-1 py-0.5 rounded bg-black/40 border border-emerald-800 font-mono">F11</kbd>
+          </button>
 
         </div>
 
@@ -424,20 +458,6 @@ export const PosView: React.FC = () => {
         />
       )}
 
-      {/* ADR-050 P4: 3-day grace banner — sales stay open, activation urged. */}
-      {inGrace && !showLicenseLock && (
-        <div className="mx-3 mt-2 flex items-center justify-between gap-2 rounded-xl border border-amber-500/50 bg-amber-950/50 px-3 py-2">
-          <p className="text-xs font-bold text-amber-300">
-            {isAr ? '● انتهت التجربة — 3 أيام سماح متبقية، فعّل البرنامج لمواصلة البيع' : '● Essai terminé — 3 jours de grâce, activez la licence'}
-          </p>
-          <button
-            onClick={() => setActiveView('license')}
-            className="shrink-0 rounded-lg bg-amber-500 px-3 py-1 text-xs font-black text-black cursor-pointer"
-          >
-            {isAr ? 'تفعيل' : 'Activer'}
-          </button>
-        </div>
-      )}
       {/* ADR-002-MKT: trial-expiry lockout — reports/stock stay open, sales stop. */}
       {showLicenseLock && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" role="alertdialog" aria-modal="true">
@@ -495,6 +515,13 @@ export const PosView: React.FC = () => {
       {showCatalogModal && (
         <CatalogSearchModal
           onClose={() => { setShowCatalogModal(false); rearmBarcode(); }}
+        />
+      )}
+
+      {/* ADR-051 P0: Produit Rapide — codeless items, same focus contract. */}
+      {showRapideModal && (
+        <QuickProductModal
+          onClose={() => { setShowRapideModal(false); rearmBarcode(); }}
         />
       )}
 
