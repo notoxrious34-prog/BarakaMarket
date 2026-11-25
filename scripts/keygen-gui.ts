@@ -16,6 +16,7 @@ import {
   computeHwid, collectNodeFingerprint, buildLicensePayload,
   formatActivationKey, validateLicense, canonicalStoreName,
 } from '../src/core/licensing.js';
+import { resolveLedgerFile, recordLedgerEntry } from './ledger-cli.js';
 
 const HWID_RE = /^BM-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/;
 
@@ -54,6 +55,8 @@ async function main() {
   console.log(`HWID : ${hwid}`);
   console.log(`KEY  : ${license}`);
   console.log('CHECK: VALID');
+  // Same ledger duty as keygen.ts --ledger (F4: no silent minting).
+  recordLedgerEntry(resolveLedgerFile(process.argv), { store, hwid, key: license, note: 'gui-issue' });
   console.log('--- WhatsApp / SMS (copy below) ---');
   console.log(`سلام، مفتاح تفعيل Baraka Market لمحل "${store}": ${license} — الصقه في الإعدادات ← الترخيص ← تفعيل.`);
 }

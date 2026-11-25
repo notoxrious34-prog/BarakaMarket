@@ -18,9 +18,7 @@ import {
 import {
   envelopeFromInput, buildEnvelopePayload, formatEnvelopeKey, validateEnvelopeKey,
 } from '../src/core/license-envelope.js';
-import {
-  ledgerAppend, ledgerVerify, ledgerParse, type LedgerEntry,
-} from '../src/core/activation-desk.js';
+import { resolveLedgerFile, recordLedgerEntry } from './ledger-cli.js';
 
 function flag(name: string): string | undefined {
   const i = process.argv.findIndex(a => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -41,67 +39,11 @@ function loadPrivateKey() {
 
 const [, , storeName, hwidArg] = process.argv;
 
-const LEDGER_IDX = process.argv.findIndex(a => a === '--ledger' || a.startsWith('--ledger='));
-const LEDGER_FILE = (() => {
-  if (LEDGER_IDX < 0) return null;
-  const a = process.argv[LEDGER_IDX];
-  const v = a.includes('=') ? a.slice('--ledger='.length) : process.argv[LEDGER_IDX + 1];
-  const p = v && !v.startsWith('-') ? v : 'keygen-ledger.jsonl';
-  return path.resolve(process.cwd(), p);
-})();
-
-/**
- * Cross-process file lock so a CLI issuance never interleaves with the
- * running desk station (which holds its own in-process mutex). Stale locks
- * (>60s) are stolen; a live holder fails fast after 10s with guidance.
- */
-function withLedgerFileLock<T>(ledgerFile: string, fn: () => T): T {
-  const lock = `${ledgerFile}.lock`;
-  const deadline = Date.now() + 10000;
-  for (;;) {
-    try {
-      try {
-        if (Date.now() - fs.statSync(lock).mtimeMs > 60000) fs.rmSync(lock, { force: true });
-      } catch { /* missing lock — take it below */ }
-      fs.writeFileSync(lock, `${process.pid}`, { flag: 'wx' });
-      break;
-    } catch {
-      if (Date.now() > deadline) {
-        console.error('Ledger is locked (the desk station may be issuing) — retry, or issue from the desk.');
-        process.exit(2);
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
-    }
-  }
-  try {
-    return fn();
-  } finally {
-    try { fs.rmSync(lock, { force: true }); } catch { /* lock already gone */ }
-  }
-}
+const LEDGER_FILE = resolveLedgerFile(process.argv);
 
 /** Append a self-checked issuance to the shared ledger (F4: no silent minting). */
 function recordLedger(entry: { store: string; hwid: string; key: string }): void {
-  if (!LEDGER_FILE) return;
-  withLedgerFileLock(LEDGER_FILE, () => {
-    let prev: LedgerEntry[] = [];
-    try {
-      const t = fs.readFileSync(LEDGER_FILE, 'utf8');
-      if (t.trim()) prev = ledgerParse(t);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-    }
-    if (ledgerVerify(prev).brokenAt !== null) {
-      console.error(`LEDGER: TAMPERED — refusing to append. Restore from ${LEDGER_FILE.replace(/\.jsonl$/, '.backup.jsonl')} first.`);
-      process.exit(2);
-    }
-    const row = ledgerAppend(prev, {
-      ts: new Date().toISOString(), kind: 'issue',
-      store: entry.store, hwid: entry.hwid, key: entry.key, note: 'cli-issue',
-    });
-    fs.appendFileSync(LEDGER_FILE, `${JSON.stringify(row)}\n`);
-    console.log(`LEDGER: appended #${row.seq} → ${LEDGER_FILE}`);
-  });
+  recordLedgerEntry(LEDGER_FILE, entry);
 }
 
 if (!storeName) {

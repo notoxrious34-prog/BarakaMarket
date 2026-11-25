@@ -12,7 +12,7 @@
 | سطر أوامر خام (+v2) | `npx tsx scripts/keygen.ts "Epicerie Nour" "BM-…" [--format v2] [--tier SUPPORT12] [--expires 2027-01-01] [--hwid2 BM-…] [--ledger[=path]]` — `--ledger` يسجل في الدفتر المشترك (قفل ملف، يرفض المكسور) |
 | سكربت/SSH | `npm run keygen -- generate … --yes --json` (مخرجات JSON، رموز خروج 0/2/3) |
 
-### المحطة الويب — Baraka Activation Desk v5 (موصى به · ADR-051)
+### المحطة الويب — Baraka Activation Desk v5 (موصى به · ADR-052)
 
 واجهة عربية RTL داكنة أنيقة (ذهبي/زمردي، Cairo + JetBrains Mono) بسبعة أقسام:
 **اللوحة** (منحنى شهري + أحدث الإصدارات)، **توليد مفتاح** (v1 كلاسيك أو **مظروف v2**:

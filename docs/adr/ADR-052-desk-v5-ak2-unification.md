@@ -1,4 +1,4 @@
-# ADR-051 — Activation Desk v5: توحيد الإصدار حول AK2
+# ADR-052 — Activation Desk v5: توحيد الإصدار حول AK2
 
 **الحالة**: `DECIDED + EXECUTED` — نُفذ في v1.10.0 (P0).
 **السلف**: ADR-002-MKT (التشفير) · ADR-050 (BarakaLock v2) · مكتب التفعيل v4.

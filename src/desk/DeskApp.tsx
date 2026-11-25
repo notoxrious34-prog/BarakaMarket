@@ -1736,6 +1736,14 @@ export function DeskApp() {
           <span>القاعدة الذهبية: <strong className="text-slate-400">المفتاح الخاص لا يغادر جهاز المالك أبداً.</strong></span>
           <span className="text-slate-700">·</span>
           <span>Baraka Activation Desk v{health?.version ?? '…'} — STAFF ONLY</span>
+          {health && (
+            <>
+              <span className="text-slate-700">·</span>
+              <span title={health.lastIssueTs ? `آخر إصدار: ${new Date(health.lastIssueTs).toLocaleString('fr-FR')}` : 'لا إصدارات بعد'}>
+                {health.auditCount} حدث تدقيق
+              </span>
+            </>
+          )}
         </footer>
       </div>
     </div>
