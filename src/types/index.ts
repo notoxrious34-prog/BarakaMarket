@@ -339,6 +339,16 @@ export interface Product {
   scale_item_code?: string; // 5 digits matching scale barcode e.g. "00040"
   has_expiry_date: boolean;
   expiry_date?: string;     // YYYY-MM-DD
+  // ADR-053 P3: pinned lite catalog (all optional — catalog rows predate v17).
+  kind?: 'PIECE' | 'POIDS' | 'LIBRE';
+  /** Owner-set price per kg in DZD (mandatory for POIDS at creation, Q4). */
+  price_per_kg?: number;
+  tare_g?: number;
+  pin_order?: number | null;
+  pin_color?: string | null;
+  pin_icon?: string | null;
+  track_stock?: boolean;
+  pinned_until?: string | null;
 }
 
 export interface Category {

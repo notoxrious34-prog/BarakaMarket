@@ -143,6 +143,22 @@ fn product_delete(id: i64) -> Result<serde_json::Value, String> {
     product::product_delete(&conn, id)
 }
 
+/// ADR-053 P3: pinned tiles read lane (ordered, expiry-aware).
+#[tauri::command]
+fn product_pinned(today: String) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    product::product_pinned(&conn, &today)
+}
+
+/// ADR-053 P3: pin/unpin lane (owner-only enforced by callers + audit).
+#[tauri::command]
+fn product_set_pin(id: i64, pin: serde_json::Value) -> Result<serde_json::Value, String> {
+    let db = provision_db()?;
+    let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+    product::product_set_pin(&conn, id, &pin)
+}
+
 /// T8 (ADR-031): native user verification (salted SHA-256, lockout, audit).
 #[tauri::command]
 fn user_verify(username: String, pin: String) -> Result<serde_json::Value, String> {
@@ -681,6 +697,8 @@ fn main() {
             product_list,
             product_search,
             product_delete,
+            product_pinned,
+            product_set_pin,
             client_upsert,
             machine_hwid,
             meta_get,

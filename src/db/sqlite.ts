@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertIntegerCentimes } from '../core/money.js';
+import { normalizeBarcodeForDb } from '../core/pinned.js';
 import { calculateTimbreFiscalCt, type SaleTotalsCt } from '../core/fiscal.centimes.js';
 import { GENESIS_PREV_HASH as GENESIS_Z_HASH, computeZHash as computeZHashDb } from '../core/zreport.js';
 import { fiscalDayISO, fiscalDayBoundsUTC } from '../core/fiscal-day.js';
@@ -50,7 +51,8 @@ export type Unit = 'PIECE' | 'KG' | 'LITRE';
 
 export interface ProductRow {
   id: number;
-  barcode: string;
+  /** ADR-053 P3: NULL = legitimate codeless article. Control #1: "" never persists. */
+  barcode: string | null;
   name_fr: string;
   name_ar: string;
   category_id: string;
@@ -64,6 +66,16 @@ export interface ProductRow {
   scale_item_code: string | null;
   has_expiry: number;
   expiry_date: string | null;
+  /** ADR-053 P3: pinned lite catalog (optional at the type level — the lane
+   * applies schema.sql v17 defaults; only kind/price POIDS rules are enforced). */
+  kind?: 'PIECE' | 'POIDS' | 'LIBRE';
+  price_per_kg_ct?: number | null;
+  tare_g?: number;
+  pin_order?: number | null;
+  pin_color?: string | null;
+  pin_icon?: string | null;
+  track_stock?: number;
+  pinned_until?: string | null;
 }
 
 export interface SaleHeaderInput {
@@ -194,7 +206,7 @@ export function splitSchemaIndexes(sql: string): { core: string; indexes: string
  * Each step is idempotent (column/index existence checks) so a half-opened
  * DB can safely re-enter. NEVER delete/rename user rows in a migration.
  */
-export const LATEST_SCHEMA_VERSION = 16;
+export const LATEST_SCHEMA_VERSION = 17;
 
 /** Backup-Pro: retention — newest N snapshots kept, older pruned on create. */
 export const BACKUP_RETENTION_KEEP = 30;
@@ -587,6 +599,64 @@ export function migrateSchemaVersion(db: DatabaseSync): void {
     db.exec('PRAGMA user_version = 16');
     v = 16;
   }
+  // v16 → v17 (ADR-053 P3): pinned lite catalog — products.barcode becomes
+  // NULLABLE + CHECK (control #1), plus kind/price_per_kg/tare/pin columns.
+  // SQLite cannot ALTER COLUMN nullability → FK-safe rebuild (FKs OFF, copy,
+  // drop, rename — same procedure as the seq rebuild above). Legacy '' is
+  // normalized to NULL INSIDE the copy SELECT: the old table is NOT NULL
+  // (blocks NULL) and the new one has the CHECK (blocks ''), so neither
+  // a pre-UPDATE nor a raw copy can satisfy both — CASE does it atomically.
+  if (v < 17) {
+    const pcols = db.prepare('PRAGMA table_info(products)').all() as { name: string }[];
+    if (!pcols.some(c => c.name === 'kind')) {
+      db.exec('PRAGMA foreign_keys=OFF');
+      try {
+        db.exec(`CREATE TABLE products_new (
+          id               INTEGER PRIMARY KEY,
+          barcode          TEXT    NULL UNIQUE CHECK (barcode IS NULL OR length(trim(barcode)) > 0),
+          name_fr          TEXT    NOT NULL,
+          name_ar          TEXT    NOT NULL DEFAULT '',
+          category_id      TEXT    NOT NULL DEFAULT '',
+          buy_price_ct     INTEGER NOT NULL CHECK (buy_price_ct >= 0),
+          sell_price_ct    INTEGER NOT NULL CHECK (sell_price_ct >= 0),
+          tva_rate         INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
+          stock_milli      INTEGER NOT NULL DEFAULT 0,
+          min_stock_milli  INTEGER NOT NULL DEFAULT 0,
+          unit             TEXT    NOT NULL CHECK (unit IN ('PIECE', 'KG', 'LITRE')),
+          is_scale         INTEGER NOT NULL DEFAULT 0,
+          scale_item_code  TEXT,
+          has_expiry       INTEGER NOT NULL DEFAULT 0,
+          expiry_date      TEXT,
+          kind             TEXT    NOT NULL DEFAULT 'PIECE' CHECK (kind IN ('PIECE', 'POIDS', 'LIBRE')),
+          price_per_kg_ct  INTEGER NULL CHECK (price_per_kg_ct IS NULL OR price_per_kg_ct > 0),
+          tare_g           INTEGER NOT NULL DEFAULT 0 CHECK (tare_g >= 0),
+          pin_order        INTEGER NULL CHECK (pin_order IS NULL OR (pin_order >= 1 AND pin_order <= 12)),
+          pin_color        TEXT    NULL,
+          pin_icon         TEXT    NULL,
+          track_stock      INTEGER NOT NULL DEFAULT 0 CHECK (track_stock IN (0, 1)),
+          pinned_until     TEXT    NULL
+        )`);
+        db.exec(`INSERT INTO products_new
+          (id, barcode, name_fr, name_ar, category_id, buy_price_ct, sell_price_ct,
+           tva_rate, stock_milli, min_stock_milli, unit, is_scale, scale_item_code,
+           has_expiry, expiry_date)
+          SELECT id, CASE WHEN trim(barcode) = '' THEN NULL ELSE barcode END,
+           name_fr, name_ar, category_id, buy_price_ct, sell_price_ct,
+           tva_rate, stock_milli, min_stock_milli, unit, is_scale, scale_item_code,
+           has_expiry, expiry_date FROM products`);
+        db.exec('DROP TABLE products');
+        db.exec('ALTER TABLE products_new RENAME TO products');
+        // ADR-053 P3: legacy rows HAD stock truth (stock_milli) → keep them
+        // tracked so ADR-047 negative flagging survives the upgrade. Only
+        // NEW articles default to track_stock = 0 (owner decision Q3).
+        db.exec('UPDATE products SET track_stock = 1');
+      } finally {
+        db.exec('PRAGMA foreign_keys=ON');
+      }
+    }
+    db.exec('PRAGMA user_version = 17');
+    v = 17;
+  }
   // Always-ensured: partial unique indexes live here (not schema.sql) so
   // old files that predate the column never hit "no such column" at open.
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_client_sale_id ON sales(client_sale_id) WHERE client_sale_id IS NOT NULL');
@@ -600,6 +670,14 @@ export interface BarakaDb {
   pragmas(): { journal_mode: string; foreign_keys: number };
   upsertProduct(p: ProductRow): void;
   getProduct(id: number): ProductRow;
+  /** ADR-053 P3: pinned tiles read path — ordered, expiry-aware (O3). */
+  getPinnedProducts(nowIso?: string): ProductRow[];
+  /** ADR-053 P3: pin/unpin one article (owner-only enforced by callers + audit). */
+  setProductPin(id: number, pin: {
+    pin_order: number | null; pin_color?: string | null; pin_icon?: string | null;
+    kind?: 'PIECE' | 'POIDS' | 'LIBRE'; price_per_kg_ct?: number | null;
+    track_stock?: number; pinned_until?: string | null;
+  }): void;
   /** ADR-004-MKT: alternate barcodes + multipack/colisage labels. */
   addProductBarcode(input: { product_id: number; barcode: string; multiplier?: number; pack_name?: string | null; price_override_ct?: number | null }): number;
   getProductBarcodes(productId: number): ProductBarcodeRecord[];
@@ -872,9 +950,11 @@ export function computeDayAggregates(db: DatabaseSync, day: string): DayAggregat
 }
 
 /** ADR-051 P2: rapide caps live in meta KV (centimes). 0/absent = unlimited
- *  (same convention as the credit plafond). Owner sets them in Store settings. */
-export const RAPIDE_CAP_DAY_KEY = 'rapide_cap_day_ct';
-export const RAPIDE_CAP_CASHIER_KEY = 'rapide_cap_cashier_ct';
+ *  (same convention as the credit plafond). Owner sets them in Store settings.
+ *  Keys are canonical in `core/rapide-limits.ts` (browser-safe); re-exported
+ *  here so the native lane and tests keep a single source of truth. */
+export { RAPIDE_CAP_DAY_KEY, RAPIDE_CAP_CASHIER_KEY } from '../core/rapide-limits.js';
+import { RAPIDE_CAP_DAY_KEY, RAPIDE_CAP_CASHIER_KEY } from '../core/rapide-limits.js';
 export const RAPIDE_BARCODE = '*PRIX-LIBRE*';
 
 function readCapCt(db: DatabaseSync, key: string): number {
@@ -1094,19 +1174,37 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       assertIntegerCentimes(p.sell_price_ct, 'sell_price_ct');
       assertIntegerCentimes(p.stock_milli, 'stock_milli');
       assertIntegerCentimes(p.min_stock_milli, 'min_stock_milli');
+      // ADR-053 P3 control #1: "" NEVER persists — normalize to NULL first.
+      const barcode = normalizeBarcodeForDb(p.barcode);
+      // ADR-053 P3: POIDS creation requires an explicit owner-set price/kg (Q4).
+      const kind = p.kind ?? 'PIECE';
+      if (kind !== 'PIECE' && kind !== 'POIDS' && kind !== 'LIBRE') {
+        throw new Error(`[db] kind must be PIECE|POIDS|LIBRE (got ${JSON.stringify(kind)})`);
+      }
+      const pricePerKg = p.price_per_kg_ct ?? null;
+      if (kind === 'POIDS' && (pricePerKg === null || !Number.isInteger(pricePerKg) || pricePerKg <= 0)) {
+        throw new Error('[db] POIDS product requires price_per_kg_ct > 0 (owner-set, Q4)');
+      }
+      if (pricePerKg !== null) assertIntegerCentimes(pricePerKg, 'price_per_kg_ct');
       db.prepare(
         `INSERT INTO products (id, barcode, name_fr, name_ar, category_id, buy_price_ct, sell_price_ct,
-          tva_rate, stock_milli, min_stock_milli, unit, is_scale, scale_item_code, has_expiry, expiry_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          tva_rate, stock_milli, min_stock_milli, unit, is_scale, scale_item_code, has_expiry, expiry_date,
+          kind, price_per_kg_ct, tare_g, pin_order, pin_color, pin_icon, track_stock, pinned_until)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (id) DO UPDATE SET barcode=excluded.barcode, name_fr=excluded.name_fr,
            name_ar=excluded.name_ar, category_id=excluded.category_id, buy_price_ct=excluded.buy_price_ct,
            sell_price_ct=excluded.sell_price_ct, tva_rate=excluded.tva_rate, stock_milli=excluded.stock_milli,
            min_stock_milli=excluded.min_stock_milli, unit=excluded.unit, is_scale=excluded.is_scale,
-           scale_item_code=excluded.scale_item_code, has_expiry=excluded.has_expiry, expiry_date=excluded.expiry_date`,
+           scale_item_code=excluded.scale_item_code, has_expiry=excluded.has_expiry, expiry_date=excluded.expiry_date,
+           kind=excluded.kind, price_per_kg_ct=excluded.price_per_kg_ct, tare_g=excluded.tare_g,
+           pin_order=excluded.pin_order, pin_color=excluded.pin_color, pin_icon=excluded.pin_icon,
+           track_stock=excluded.track_stock, pinned_until=excluded.pinned_until`,
       ).run(
-        p.id, p.barcode, p.name_fr, p.name_ar, p.category_id, p.buy_price_ct, p.sell_price_ct,
+        p.id, barcode, p.name_fr, p.name_ar, p.category_id, p.buy_price_ct, p.sell_price_ct,
         p.tva_rate, p.stock_milli, p.min_stock_milli, p.unit, p.is_scale, p.scale_item_code,
         p.has_expiry, p.expiry_date,
+        kind, pricePerKg, p.tare_g ?? 0, p.pin_order ?? null, p.pin_color ?? null,
+        p.pin_icon ?? null, p.track_stock ?? 0, p.pinned_until ?? null,
       );
     },
 
@@ -1114,6 +1212,57 @@ export function openBarakaDb(dbPath: string): BarakaDb {
       const row = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as ProductRow | undefined;
       if (!row) throw new Error(`[db] product not found: ${id}`);
       return row;
+    },
+
+    /** ADR-053 P3: pinned tiles read path — ordered, expiry-aware (O3). */
+    getPinnedProducts(nowIso?: string): ProductRow[] {
+      const now = nowIso ?? new Date().toISOString().slice(0, 10);
+      return db.prepare(
+        `SELECT * FROM products WHERE pin_order IS NOT NULL
+         AND (pinned_until IS NULL OR pinned_until = '' OR pinned_until >= ?)
+         ORDER BY pin_order ASC`,
+      ).all(now) as unknown as ProductRow[];
+    },
+
+    /** ADR-053 P3: pin/unpin one article (owner-only enforced by callers + audit). */
+    setProductPin(id: number, pin: {
+      pin_order: number | null; pin_color?: string | null; pin_icon?: string | null;
+      kind?: 'PIECE' | 'POIDS' | 'LIBRE'; price_per_kg_ct?: number | null;
+      track_stock?: number; pinned_until?: string | null;
+    }): void {
+      if (pin.pin_order !== null && (!Number.isInteger(pin.pin_order) || pin.pin_order < 1 || pin.pin_order > 12)) {
+        throw new Error(`[db] pin_order must be 1..12 or NULL (got ${JSON.stringify(pin.pin_order)})`);
+      }
+      const cur = db.prepare('SELECT kind FROM products WHERE id = ?').get(id) as
+        { kind: string } | undefined;
+      if (!cur) throw new Error(`[db] product not found: ${id}`);
+      const kind = pin.kind ?? cur.kind;
+      if (kind === 'POIDS' && pin.price_per_kg_ct !== undefined) {
+        const v = pin.price_per_kg_ct;
+        if (v === null || !Number.isInteger(v) || v <= 0) {
+          throw new Error('[db] POIDS product requires price_per_kg_ct > 0 (owner-set, Q4)');
+        }
+      }
+      // One slot = one tile: evict any other article holding this order.
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        if (pin.pin_order !== null) {
+          db.prepare('UPDATE products SET pin_order = NULL WHERE pin_order = ? AND id != ?')
+            .run(pin.pin_order, id);
+        }
+        const sets: string[] = ['pin_order = ?'];
+        const args: unknown[] = [pin.pin_order];
+        if (pin.pin_color !== undefined) { sets.push('pin_color = ?'); args.push(pin.pin_color); }
+        if (pin.pin_icon !== undefined) { sets.push('pin_icon = ?'); args.push(pin.pin_icon); }
+        if (pin.kind !== undefined) { sets.push('kind = ?'); args.push(pin.kind); }
+        if (pin.price_per_kg_ct !== undefined) { sets.push('price_per_kg_ct = ?'); args.push(pin.price_per_kg_ct); }
+        if (pin.track_stock !== undefined) { sets.push('track_stock = ?'); args.push(pin.track_stock ? 1 : 0); }
+        if (pin.pinned_until !== undefined) { sets.push('pinned_until = ?'); args.push(pin.pinned_until); }
+        args.push(id);
+        db.prepare(`UPDATE products SET ${sets.join(', ')} WHERE id = ?`)
+          .run(...(args as (string | number | null)[]));
+        db.exec('COMMIT');
+      } catch (e) { try { db.exec('ROLLBACK'); } catch { /* already rolled back */ } throw e; }
     },
 
     addProductBarcode(input: { product_id: number; barcode: string; multiplier?: number; pack_name?: string | null; price_override_ct?: number | null }): number {
@@ -2286,17 +2435,21 @@ export function openBarakaDb(dbPath: string): BarakaDb {
             return flag?.value !== '0';
           } catch { return true; }
         })();
-        const stockOf = db.prepare('SELECT stock_milli FROM products WHERE id = ?');
+        const stockOf = db.prepare('SELECT stock_milli, track_stock FROM products WHERE id = ?');
         let shortDesc: string | null = null;
         const knownPids = new Set<number>();
+        const untrackedPids = new Set<number>();
         for (const it of items) {
           if (it.product_id == null) continue;
-          const row = stockOf.get(it.product_id) as { stock_milli: number } | undefined;
+          const row = stockOf.get(it.product_id) as { stock_milli: number; track_stock: number } | undefined;
           if (row) knownPids.add(it.product_id);
+          // ADR-053 P3 (Q3): track_stock=0 → no stock truth → skip decrement
+          // AND skip the below-available check (never blocks the sale).
+          if (row && (row.track_stock ?? 0) === 0) untrackedPids.add(it.product_id);
           // v1.8.3: unknown-to-lane product = below-available (available 0),
           // flagged + journalled — never aborts the sale (parity with Rust).
           const avail = row ? row.stock_milli : 0;
-          if (it.qty_milli > avail) {
+          if (it.qty_milli > avail && !(row && untrackedPids.has(it.product_id))) {
             if (!allowNeg) {
               throw new Error(
                 `[db] STOCK_INSUFFICIENT product ${it.product_id} (${it.name_fr}): requested ${it.qty_milli} milli, available ${avail} milli`,
@@ -2340,7 +2493,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           const pid = it.product_id != null && knownPids.has(it.product_id) ? it.product_id : null;
           insItem.run(id, pid, it.barcode, it.name_fr, it.name_ar, it.unit_price_ct,
             it.qty_milli, it.unit, it.tva_rate, it.discount_bp, it.line_ht_ct, it.line_tva_ct, it.line_ttc_ct);
-          if (pid !== null) decStock.run(it.qty_milli, pid);
+          if (pid !== null && !untrackedPids.has(pid)) decStock.run(it.qty_milli, pid);
         }
         // B-credit (supermarket): a CREDIT sale posts the debt the moment it
         // commits — stored balance and derived statement stay symmetric, and
@@ -2695,6 +2848,7 @@ export function openBarakaDb(dbPath: string): BarakaDb {
         };
         const setDisp = db.prepare('UPDATE return_items SET disposition = ? WHERE id = ?');
         const restock = db.prepare('UPDATE products SET stock_milli = stock_milli + ? WHERE id = ?');
+        const trackedOf = db.prepare('SELECT track_stock FROM products WHERE id = ?');
         const loss = db.prepare(
           `INSERT INTO inventory_losses (product_id, qty_milli, reason, unit_cost_ct, total_loss_ct, notes, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -2706,7 +2860,11 @@ export function openBarakaDb(dbPath: string): BarakaDb {
           dispCount[disp] += 1;
           if (disp === 'RESTOCK') {
             // Null product = ad-hoc line, nothing to restock.
-            if (it.product_id !== null) restock.run(it.qty_milli, it.product_id);
+            // ADR-053 P3: untracked products never move stock (no phantom).
+            if (it.product_id !== null) {
+              const t = trackedOf.get(it.product_id) as { track_stock: number } | undefined;
+              if ((t?.track_stock ?? 0) !== 0) restock.run(it.qty_milli, it.product_id);
+            }
           } else if (disp === 'DESTROY' && it.product_id !== null) {
             // Scrapped customer goods never touch the shelf — they land in
             // the waste ledger at current buy cost for the casse report.

@@ -19,6 +19,10 @@ F8 is intentionally unbound (reserved for the second-cash-register lane).
 | F11 | Produit Rapide — codeless item modal (ADR-051) | always |
 | F9 / Space / F12 | Checkout (F12 = settlement cockpit) | cart non-empty |
 | F10 | Lock / unlock session | always; when locked every other key is ignored |
+| Alt+1..9 (even from scan field, never inside a modal) | Fire pinned tile #1..#9 (ADR-053) — #10..#12 via #N | pos scope only |
+| #N + Enter (in scan field) | Add pinned tile #N instantly (Aldi-style, no EAN collision) | always |
+| M*#N (in scan field) | Add M units of pinned tile #N (extends B3 N*CODE) | always |
+| F2 / F3 / F4 | NOT tile keys — bound to qty/discount/hold (ADR-053 §5 verified collision) | — |
 
 ## Checkout (`PaymentModal`, capture phase — pre-empts the POS layer)
 

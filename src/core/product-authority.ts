@@ -11,18 +11,20 @@ import type { Product } from '../types/index.js';
 import { isTauriRuntime } from './fiscal-authority.js';
 
 export interface NativeProductPayload {
-  id: number; barcode: string; name_fr: string; name_ar: string;
+  id: number; barcode: string | null; name_fr: string; name_ar: string;
   category_id: string; buy_price_ct: number; sell_price_ct: number;
   tva_rate: number; stock_milli: number; min_stock_milli: number;
   unit: string; is_scale: number; scale_item_code: string;
   has_expiry: number; expiry_date: string;
+  /** ADR-053 P3: pinned catalog mirror (kind/price-kg/tare/tracking). */
+  kind: string; price_per_kg_ct: number | null; tare_g: number; track_stock: number;
 }
 
 /** Pure mapping UI Product -> native row (centimes/milli, rounded). */
 export function toNativeProduct(p: Product): NativeProductPayload {
   return {
     id: p.id,
-    barcode: p.barcode,
+    barcode: (p.barcode ?? '').trim() === '' ? null : p.barcode.trim(),
     name_fr: p.name_fr,
     name_ar: p.name_ar ?? '',
     category_id: p.category_id ?? '',
@@ -36,6 +38,11 @@ export function toNativeProduct(p: Product): NativeProductPayload {
     scale_item_code: p.scale_item_code ?? '',
     has_expiry: p.has_expiry_date ? 1 : 0,
     expiry_date: p.expiry_date ?? '',
+    kind: p.kind ?? 'PIECE',
+    price_per_kg_ct: p.price_per_kg === undefined || p.price_per_kg === null
+      ? null : Math.round(p.price_per_kg * 100),
+    tare_g: Math.round(p.tare_g ?? 0),
+    track_stock: p.track_stock ? 1 : 0,
   };
 }
 

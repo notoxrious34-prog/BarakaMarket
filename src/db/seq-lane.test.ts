@@ -40,7 +40,7 @@ describe('#003 single lane + parity', () => {
         id: 1, barcode: 'a', name_fr: 'LAIT', name_ar: '', category_id: 'epicerie',
         buy_price_ct: 15000, sell_price_ct: 18000, tva_rate: 9, stock_milli: 48000,
         min_stock_milli: 0, unit: 'PIECE', is_scale: 0, scale_item_code: null,
-        has_expiry: 0, expiry_date: null,
+        has_expiry: 0, expiry_date: null, track_stock: 1,
       });
       const totals = calculateSaleTotalsCt(
         CANON_ITEMS.map(it => ({

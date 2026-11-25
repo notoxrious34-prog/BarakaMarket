@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::auth::sha256_hex;
 
-pub const LATEST_SCHEMA_VERSION: i64 = 16;
+pub const LATEST_SCHEMA_VERSION: i64 = 17;
 const EXEMPT_BELOW_CT: i64 = 5000; // Art.136: ESPECES < 50 DZD exempt
 
 fn ct(v: &Value, name: &str) -> Result<i64, String> {
@@ -417,6 +417,73 @@ pub fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         }
         conn.execute_batch("PRAGMA user_version = 16;")
+            .map_err(|e| e.to_string())?;
+    }
+    // v16 → v17 (ADR-053 P3): pinned lite catalog — products.barcode becomes
+    // NULLABLE + CHECK (control #1), plus kind/price_per_kg/tare/pin columns.
+    // Same FK-safe rebuild as the TS lane. Legacy '' → NULL before the copy.
+    if v < 17 {
+        if !has_col("products", "kind")? {
+            // TS-lane parity: legacy '' → NULL inside the copy (old NOT NULL
+            // blocks NULL, new CHECK blocks '' — CASE satisfies both).
+            conn.execute_batch("PRAGMA foreign_keys=OFF;")
+                .map_err(|e| e.to_string())?;
+            let rebuilt = (|| -> Result<(), String> {
+                conn.execute_batch(
+                    "CREATE TABLE products_new (
+                      id               INTEGER PRIMARY KEY,
+                      barcode          TEXT    NULL UNIQUE CHECK (barcode IS NULL OR length(trim(barcode)) > 0),
+                      name_fr          TEXT    NOT NULL,
+                      name_ar          TEXT    NOT NULL DEFAULT '',
+                      category_id      TEXT    NOT NULL DEFAULT '',
+                      buy_price_ct     INTEGER NOT NULL CHECK (buy_price_ct >= 0),
+                      sell_price_ct    INTEGER NOT NULL CHECK (sell_price_ct >= 0),
+                      tva_rate         INTEGER NOT NULL CHECK (tva_rate IN (0, 9, 19)),
+                      stock_milli      INTEGER NOT NULL DEFAULT 0,
+                      min_stock_milli  INTEGER NOT NULL DEFAULT 0,
+                      unit             TEXT    NOT NULL CHECK (unit IN ('PIECE', 'KG', 'LITRE')),
+                      is_scale         INTEGER NOT NULL DEFAULT 0,
+                      scale_item_code  TEXT,
+                      has_expiry       INTEGER NOT NULL DEFAULT 0,
+                      expiry_date      TEXT,
+                      kind             TEXT    NOT NULL DEFAULT 'PIECE' CHECK (kind IN ('PIECE', 'POIDS', 'LIBRE')),
+                      price_per_kg_ct  INTEGER NULL CHECK (price_per_kg_ct IS NULL OR price_per_kg_ct > 0),
+                      tare_g           INTEGER NOT NULL DEFAULT 0 CHECK (tare_g >= 0),
+                      pin_order        INTEGER NULL CHECK (pin_order IS NULL OR (pin_order >= 1 AND pin_order <= 12)),
+                      pin_color        TEXT    NULL,
+                      pin_icon         TEXT    NULL,
+                      track_stock      INTEGER NOT NULL DEFAULT 0 CHECK (track_stock IN (0, 1)),
+                      pinned_until     TEXT    NULL
+                    );",
+                )
+                .map_err(|e| e.to_string())?;
+                conn.execute_batch(
+                    "INSERT INTO products_new
+                      (id, barcode, name_fr, name_ar, category_id, buy_price_ct, sell_price_ct,
+                       tva_rate, stock_milli, min_stock_milli, unit, is_scale, scale_item_code,
+                       has_expiry, expiry_date)
+                     SELECT id, CASE WHEN trim(barcode) = '' THEN NULL ELSE barcode END,
+                       name_fr, name_ar, category_id, buy_price_ct, sell_price_ct,
+                       tva_rate, stock_milli, min_stock_milli, unit, is_scale, scale_item_code,
+                       has_expiry, expiry_date FROM products;",
+                )
+                .map_err(|e| e.to_string())?;
+                conn.execute_batch("DROP TABLE products;")
+                    .map_err(|e| e.to_string())?;
+                conn.execute_batch("ALTER TABLE products_new RENAME TO products;")
+                    .map_err(|e| e.to_string())?;
+                // ADR-053 P3: legacy rows HAD stock truth (stock_milli) → keep
+                // them tracked so ADR-047 negative flagging survives the upgrade.
+                // Only NEW articles default to track_stock = 0 (owner Q3).
+                conn.execute_batch("UPDATE products SET track_stock = 1;")
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            conn.execute_batch("PRAGMA foreign_keys=ON;")
+                .map_err(|e| e.to_string())?;
+            rebuilt?;
+        }
+        conn.execute_batch("PRAGMA user_version = 17;")
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -891,13 +958,23 @@ pub fn record_sale(
             // v1.8.3: unknown-to-lane product = below-available (available 0),
             // flagged + journalled — never aborts the sale (parity with TS).
             // (Fixes Échec ×13 "Query returned no rows" on replay.)
-            let stock: i64 = tx
-                .query_row("SELECT stock_milli FROM products WHERE id = ?1", [p], |r| {
-                    r.get(0)
-                })
-                .ok()
-                .unwrap_or(0);
-            if qty > stock {
+            // ADR-053 P3 (Q3): track_stock=0 → no stock truth → skip the
+            // below-available check entirely (never blocks the sale).
+            let row: Option<(i64, i64)> = tx
+                .query_row(
+                    "SELECT stock_milli, COALESCE(track_stock,0) FROM products WHERE id = ?1",
+                    [p],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            // Unknown (None): any positive qty flags, exactly as before (v1.8.3).
+            // Known + tracked: below-available flags. Known + untracked: skip.
+            let flag_short = match row {
+                None => qty > 0,
+                Some((s, t)) => t != 0 && qty > s,
+            };
+            let stock: i64 = row.map(|(s, _)| s).unwrap_or(0);
+            if flag_short {
                 if !allow_neg {
                     let nm = it["name_fr"].as_str().unwrap_or("");
                     return Err(format!(
@@ -998,8 +1075,9 @@ pub fn record_sale(
         )
         .map_err(|e| e.to_string())?;
         if let Some(p) = pid {
+            // ADR-053 P3 (Q3): untracked articles never move stock (no phantom).
             tx.execute(
-                "UPDATE products SET stock_milli = stock_milli - ?1 WHERE id = ?2",
+                "UPDATE products SET stock_milli = stock_milli - ?1 WHERE id = ?2 AND COALESCE(track_stock,0) != 0",
                 rusqlite::params![qty, p],
             )
             .map_err(|e| e.to_string())?;
@@ -1742,9 +1820,11 @@ pub fn return_approve(
             "RESTOCK" => {
                 n_restock += 1;
                 // Null product = ad-hoc line, nothing to restock.
+                // ADR-053 P3 (Q3): untracked article = no stock truth → no
+                // phantom restock (parity with the TS lane).
                 if let Some(pid) = product_id {
                     tx.execute(
-                        "UPDATE products SET stock_milli = stock_milli + ?1 WHERE id = ?2",
+                        "UPDATE products SET stock_milli = stock_milli + ?1 WHERE id = ?2 AND COALESCE(track_stock,0) != 0",
                         rusqlite::params![qty, pid],
                     )
                     .map_err(|e| e.to_string())?;
@@ -3755,8 +3835,8 @@ mod tests {
         conn.execute_batch(SCHEMA).unwrap();
         migrate(&conn).unwrap();
         conn.execute(
-            "INSERT INTO products (id, barcode, name_fr, buy_price_ct, stock_milli, sell_price_ct, tva_rate, unit)
-             VALUES (1, 'a', 'LAIT', 12000, 48000, 18000, 9, 'PIECE')",
+            "INSERT INTO products (id, barcode, name_fr, buy_price_ct, stock_milli, sell_price_ct, tva_rate, unit, track_stock)
+             VALUES (1, 'a', 'LAIT', 12000, 48000, 18000, 9, 'PIECE', 1)",
             [],
         )
         .unwrap();
@@ -4936,7 +5016,7 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(v, LATEST_SCHEMA_VERSION);
-        assert_eq!(v, 16);
+        assert_eq!(v, 17);
         for col in ["rapide_count", "rapide_total_ttc_ct"] {
             let n: i64 = db
                 .query_row(
@@ -5576,5 +5656,50 @@ mod tests {
         assert_eq!(reg["rows"].as_array().unwrap().len(), 0);
         assert_eq!(reg["prev_hash"], "GENESIS");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ADR-053 P3 (Q3): untracked article sells with no stock move and no
+    // negative flag; tracked article keeps ADR-047 flagging. Parity: TS lane.
+    #[test]
+    fn adr053_untracked_sale_is_stock_neutral() {
+        let mut db = memdb();
+        db.execute(
+            "INSERT INTO products (id, barcode, name_fr, buy_price_ct, stock_milli, sell_price_ct, tva_rate, unit, track_stock)
+             VALUES (21, NULL, 'OEUF', 0, 0, 30000, 0, 'PIECE', 0)",
+            [],
+        )
+        .unwrap();
+        let items = vec![
+            serde_json::json!({"product_id": 21, "barcode": "", "name_fr": "OEUF", "name_ar": "", "unit_price_ct": 30000, "qty_milli": 1000, "unit": "PIECE", "tva_rate": 0, "discount_bp": 0, "line_ht_ct": 30000, "line_tva_ct": 0, "line_ttc_ct": 30000}),
+        ];
+        let mut h = sale_header(Some("P3U1"));
+        h["id"] = serde_json::json!("p3u1");
+        h["fiscal_regime"] = serde_json::json!({"tva_enabled": true, "timbre_enabled": false});
+        h["totals"] = serde_json::json!({"total_ht_ct": 30000, "total_tva_ct": 0, "timbre_ct": 0, "total_ttc_ct": 30000, "tva_breakdown": {"0": {"base_ht_ct": 30000, "tva_amount_ct": 0, "total_ttc_ct": 30000}, "9": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}, "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}});
+        h["amount_paid_ct"] = serde_json::json!(30000);
+        h["amount_returned_ct"] = serde_json::json!(0);
+        let out = record_sale(&mut db, &h, &items).expect("untracked sale commits");
+        let flag: i64 = db
+            .query_row("SELECT was_negative FROM sales WHERE id = ?1", [out["id"].as_str().unwrap()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(flag, 0, "untracked basket must not flag");
+        let stock: i64 = db
+            .query_row("SELECT stock_milli FROM products WHERE id = 21", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stock, 0, "untracked stock never moves");
+        // Tracked product 1 still flags + decrements (ADR-047 intact).
+        let over = vec![
+            serde_json::json!({"product_id": 1, "barcode": "a", "name_fr": "LAIT", "name_ar": "", "unit_price_ct": 18000, "qty_milli": 50000, "unit": "PIECE", "tva_rate": 9, "discount_bp": 0, "line_ht_ct": 82645, "line_tva_ct": 7438, "line_ttc_ct": 90083}),
+        ];
+        let mut h2 = sale_header(Some("P3U2"));
+        h2["id"] = serde_json::json!("p3u2");
+        h2["fiscal_regime"] = serde_json::json!({"tva_enabled": true, "timbre_enabled": false});
+        h2["totals"] = serde_json::json!({"total_ht_ct": 82645, "total_tva_ct": 7438, "timbre_ct": 0, "total_ttc_ct": 90083, "tva_breakdown": {"0": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}, "9": {"base_ht_ct": 82645, "tva_amount_ct": 7438, "total_ttc_ct": 90083}, "19": {"base_ht_ct": 0, "tva_amount_ct": 0, "total_ttc_ct": 0}}});
+        h2["amount_paid_ct"] = serde_json::json!(90083);
+        let out2 = record_sale(&mut db, &h2, &over).expect("tracked oversell commits (allow-negative)");
+        let flag2: i64 = db
+            .query_row("SELECT was_negative FROM sales WHERE id = ?1", [out2["id"].as_str().unwrap()], |r| r.get(0))
+            .unwrap();
+        assert_eq!(flag2, 1, "tracked oversell still flags");
     }
 }

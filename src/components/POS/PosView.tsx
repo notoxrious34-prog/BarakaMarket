@@ -35,6 +35,7 @@ import { PosFiscalTotals } from './PosFiscalTotals';
 import { PosCartLine } from './PosCartLine';
 import { PosProductCard } from './PosProductCard';
 import { PosRapideTiles } from './PosRapideTiles';
+import { PosPinnedTiles } from './PosPinnedTiles';
 import { usePinnedRapides } from './usePinnedRapides';
 import { useAutoFocusBarcode } from './useAutoFocusBarcode';
 import { attachScannerTrap } from '../../hardware/scanner';
@@ -343,6 +344,17 @@ export const PosView: React.FC = () => {
 
         {/* Product Cards Grid — TASK-MKT-004: memoized cards. */}
         <div className="flex-1 min-h-0 overflow-y-auto pe-1 pb-1">
+          {/* ADR-053 P3: pinned catalog lane (#1..#12), then rapide memory. */}
+          <PosPinnedTiles
+            visible={searchQuery.trim() === ''}
+            suspended={isLocked || showPaymentModal || showScaleModal || qtyModalIndex !== null || discountModalIndex !== null || showCatalogModal || showRapideModal}
+            onFeedback={(message, ok) => {
+              if (ok) scanBeep(); else errorBuzz();
+              setScanFeedback({ message, isError: !ok });
+              setTimeout(() => setScanFeedback(null), 3000);
+            }}
+            rearm={rearmBarcode}
+          />
           {/* ADR-051 P1: pinned rapide tiles island (MKT-004). */}
           <PosRapideTiles tiles={pinnedTiles} visible={searchQuery.trim() === ''} onPick={addPinned} />
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-2.5 pos-product-grid">

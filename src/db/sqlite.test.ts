@@ -30,7 +30,7 @@ const PROD = {
   category_id: 'laiterie', buy_price_ct: 14500, sell_price_ct: 18000,
   tva_rate: 9 as const, stock_milli: 48000, min_stock_milli: 10000,
   unit: 'PIECE' as const, is_scale: 0, scale_item_code: null,
-  has_expiry: 1, expiry_date: '2026-12-15',
+  has_expiry: 1, expiry_date: '2026-12-15', track_stock: 1,
 };
 
 function goldenSale() {

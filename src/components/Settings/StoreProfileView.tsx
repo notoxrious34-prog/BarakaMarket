@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { auditSessionEvent } from '../../core/session-authority';
 import { readMetaKv, writeMetaKv } from '../../core/machine-authority';
-import { RAPIDE_CAP_DAY_KEY, RAPIDE_CAP_CASHIER_KEY } from '../../db/sqlite';
+import { RAPIDE_CAP_DAY_KEY, RAPIDE_CAP_CASHIER_KEY } from '../../core/rapide-limits';
 import { StoreProfile } from '../../types';
 import {
   Settings,

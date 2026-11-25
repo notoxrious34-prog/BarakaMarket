@@ -101,7 +101,8 @@ export type AuditAction =
   | 'claim.create' | 'claim.settle'
   | 'expense.add' | 'advance.add' | 'salary.settle' | 'factory_reset'
   | 'supplier.pay' | 'profile.change' | 'stock.import' | 'stock.export' | 'backup.create' | 'backup.restore'
-  | 'license.activate' | 'license.override' | 'license.unlock';
+  | 'license.activate' | 'license.override' | 'license.unlock'
+  | 'pin.assign' | 'pin.unpin' | 'pin.create';
 
 export interface AuditEvent {
   actor: string;

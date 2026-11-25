@@ -37,10 +37,10 @@ function sell(b: ReturnType<typeof openBarakaDb>, id: string, items: SaleItemInp
   }, items);
 }
 
-test('db ADR-051 P2: fresh file migrates to v16 with rapide columns', () => {
+test('db ADR-051 P2: fresh file migrates to v17 with rapide columns', () => {
   const b = openBarakaDb(':memory:');
   const v = (b.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
-  assert.equal(v, 16);
+  assert.equal(v, 17);
   const cols = b.db.prepare('PRAGMA table_info(z_reports)').all() as { name: string }[];
   assert.ok(cols.some(c => c.name === 'rapide_count'), 'rapide_count column');
   assert.ok(cols.some(c => c.name === 'rapide_total_ttc_ct'), 'rapide_total_ttc_ct column');

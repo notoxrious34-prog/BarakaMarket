@@ -50,6 +50,7 @@ import { mintSaleKey, enqueueOutbox, replayOutbox, loadOutbox, pendingOutboxCoun
 import { parseQtyPrefix } from '../core/barcode-qty';
 import { formatGrams } from '../core/display';
 import { checkStockAvailability } from '../core/stock-guard';
+import { fetchPinnedProducts, mergePinsInto } from '../core/pin-authority.js';
 import { reverseReceiptLines, editReceiptLines, applyReceiptLines } from '../core/purchase-lane';
 import { nextBRNumber, validateReceptionPayment, validateSupplierPayment, isValidNIF } from '../core/supplier-finance';
 import { validateSettlementAmount, reverseCreditOnVoid, validateCreditLimit } from '../core/client-debt';
@@ -118,6 +119,13 @@ interface AppContextType {
   restoreHeldCart: (heldId: string) => void;
   deleteHeldCart: (heldId: string) => void;
   scanBarcode: (barcode: string) => { success: boolean; message: string };
+  /** ADR-053 P3: POIDS via #N arms this — PosView renders the weight strip. */
+  pendingWeight: { product: Product; mult: number } | null;
+  setPendingWeight: (w: { product: Product; mult: number } | null) => void;
+  /** ADR-053 P3: Alt+1..9 + tile taps share the scan path. */
+  triggerPinnedSlot: (slot: number, qty?: number) => { success: boolean; message: string };
+  /** ADR-053 P3: overlay DB pins onto the UI catalog; -1 when lanes are down. */
+  refreshPins: () => Promise<number>;
   /** ADR-004-MKT colisage: browser-lane alias/pack labels (persisted). */
   productBarcodes: ProductBarcodeAlias[];
   addProductBarcode: (alias: ProductBarcodeAlias) => void;
@@ -332,6 +340,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   });
 
+  // ADR-053 P3: pinned-tiles weight request — POIDS via #N arms this;
+  // PosView renders the weight strip and clears it on confirm/cancel.
+  const [pendingWeight, setPendingWeight] = useState<{ product: Product; mult: number } | null>(null);
+
+  /** ADR-053 P3: overlay DB pins onto the UI catalog (lanes → cache → disk). */
+  const refreshPins = async (): Promise<number> => {
+    const pins = await fetchPinnedProducts();
+    if (!pins) return -1; // both lanes down: tiles stay on the UI cache
+    let n = 0;
+    setProducts((prev) => {
+      const merged = mergePinsInto(prev, pins);
+      n = merged === prev ? 0 : pins.length;
+      return merged;
+    });
+    return n;
+  };
+
+  /** ADR-053 P3: Alt+1..9 + tile taps share the scan path (`#N` / `Q*#N`). */
+  const triggerPinnedSlot = (slot: number, qty = 1): { success: boolean; message: string } => {
+    if (!Number.isInteger(slot) || slot < 1 || slot > 12) return { success: false, message: 'Emplacement invalide' };
+    return scanBarcode(qty > 1 ? `${qty}*#${slot}` : `#${slot}`);
+  };
   // ADR-004-MKT: browser-lane alias/pack registry (SQLite product_barcodes mirror).
   const [productBarcodes, setProductBarcodes] = useState<ProductBarcodeAlias[]>(() => {
     try {
@@ -909,6 +939,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const scanBarcode = (rawInput: string): { success: boolean; message: string } => {
     const code = rawInput.trim();
     if (!code) return { success: false, message: 'Code vide' };
+
+    // ADR-053 P3: pinned tiles — `#N` adds slot N, `Q*#N` adds Q× slot N.
+    // Intercepted before every other parser (a slot ref is never a barcode).
+    // PIECE/LIBRE join the cart directly; POIDS arms the weight strip
+    // (pendingWeight) so the cashier picks net grams — never a blind 1 kg.
+    const pinMatch = code.match(/^(?:(\d+)\s*\*\s*)?#(\d{1,2})$/);
+    if (pinMatch) {
+      const slot = parseInt(pinMatch[2], 10);
+      const qty = pinMatch[1] ? parseInt(pinMatch[1], 10) : 1;
+      if (slot >= 1 && slot <= 12 && qty >= 1 && qty <= 999) {
+        const today = new Date().toISOString().slice(0, 10);
+        const pinned = products.find(
+          (p) => p.pin_order === slot && (!p.pinned_until || p.pinned_until >= today),
+        );
+        if (pinned) {
+          if (pinned.kind === 'POIDS') {
+            setPendingWeight({ product: pinned, mult: qty });
+            return { success: true, message: `Poids requis: ${pinned.name_fr} — choisissez les grammes` };
+          }
+          const shortP = stockShortMsg(pinned, qty);
+          addToCart(pinned, qty);
+          return { success: true, message: shortP ?? `Ajouté: ${pinned.name_fr} ×${qty}` };
+        }
+        return { success: false, message: `Emplacement #${slot} vide` };
+      }
+    }
 
     // B3: `N*CODE` — one scan carries the quantity (12 bottles, 3 keys).
     // Scale labels define their own qty, so the prefix only applies to
@@ -2419,6 +2475,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         restoreHeldCart,
         deleteHeldCart,
         scanBarcode,
+        pendingWeight,
+        setPendingWeight,
+        triggerPinnedSlot,
+        refreshPins,
         productBarcodes,
         addProductBarcode,
         deleteProductBarcode,

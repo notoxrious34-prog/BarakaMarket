@@ -314,10 +314,29 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     res.json(rows);
   });
 
+  // ADR-053 P3: pinned tiles lanes (dual-lane parity with product_pinned/set_pin).
+  // NOTE: registered BEFORE /:barcode — Express matches in order.
+  app.get('/api/products/pinned', (_req, res) => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      res.json(baraka.getPinnedProducts(today));
+    } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  });
+
   app.get('/api/products/:barcode', (req, res) => {
     const row = baraka.db.prepare('SELECT * FROM products WHERE barcode = ?').get(req.params.barcode);
     if (!row) { res.status(404).json({ error: 'product not found' }); return; }
     res.json(row);
+  });
+
+  app.post('/api/products/pin', (req, res) => {
+    try {
+      const { id, pin } = req.body as { id?: number; pin?: never };
+      if (typeof id !== 'number' || !pin || typeof pin !== 'object') {
+        res.status(400).json({ error: 'body must be {id, pin}' }); return;
+      }
+      res.status(201).json(baraka.setProductPin(id, pin));
+    } catch (e) { res.status(400).json({ error: (e as Error).message }); }
   });
 
   app.post('/api/sales', (req, res) => {
@@ -466,6 +485,8 @@ export function createApp(dbPath: string): { app: express.Express; baraka: Barak
     return ids.map(id => {
       const p = get.get(id) as ProductRow | undefined;
       if (!p) throw new Error(`[labels] product not found: ${id}`);
+      // ADR-053 P3: codeless (NULL barcode) articles cannot print a barcode SVG.
+      if (!p.barcode) throw new Error(`[labels] product ${id} has no barcode — shelf labels need a printed code`);
       if (p.tva_rate !== 0 && p.tva_rate !== 9 && p.tva_rate !== 19) {
         throw new Error(`[labels] illegal TVA rate on product ${id}: ${p.tva_rate}`);
       }

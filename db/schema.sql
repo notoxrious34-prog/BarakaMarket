@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS store_profile (
 
 CREATE TABLE IF NOT EXISTS products (
   id               INTEGER PRIMARY KEY,
-  barcode          TEXT    NOT NULL UNIQUE,
+  -- ADR-053 P3: codeless articles live here with barcode NULL (legitimate,
+  -- repeatable). Control #1: "" never persists (UNIQUE rejects repeats).
+  barcode          TEXT    NULL UNIQUE CHECK (barcode IS NULL OR length(trim(barcode)) > 0),
   name_fr          TEXT    NOT NULL,
   name_ar          TEXT    NOT NULL DEFAULT '',
   category_id      TEXT    NOT NULL DEFAULT '',
@@ -50,7 +52,16 @@ CREATE TABLE IF NOT EXISTS products (
   is_scale         INTEGER NOT NULL DEFAULT 0,
   scale_item_code  TEXT,
   has_expiry       INTEGER NOT NULL DEFAULT 0,
-  expiry_date      TEXT
+  expiry_date      TEXT,
+  -- ADR-053 P3: pinned lite catalog.
+  kind             TEXT    NOT NULL DEFAULT 'PIECE' CHECK (kind IN ('PIECE', 'POIDS', 'LIBRE')),
+  price_per_kg_ct  INTEGER NULL CHECK (price_per_kg_ct IS NULL OR price_per_kg_ct > 0),
+  tare_g           INTEGER NOT NULL DEFAULT 0 CHECK (tare_g >= 0),
+  pin_order        INTEGER NULL CHECK (pin_order IS NULL OR (pin_order >= 1 AND pin_order <= 12)),
+  pin_color        TEXT    NULL,
+  pin_icon         TEXT    NULL,
+  track_stock      INTEGER NOT NULL DEFAULT 0 CHECK (track_stock IN (0, 1)),
+  pinned_until     TEXT    NULL
 );
 
 -- ADR-004-MKT: alternate barcodes + multipack/colisage labels.
@@ -380,6 +391,8 @@ CREATE TABLE IF NOT EXISTS void_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products (barcode);
+-- ADR-053 P3: pinned tiles read path (partial — unpinned rows never match).
+CREATE INDEX IF NOT EXISTS idx_products_pin ON products (pin_order) WHERE pin_order IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_products_scale ON products (scale_item_code);
 CREATE INDEX IF NOT EXISTS idx_sales_created ON sales (created_at);
 CREATE INDEX IF NOT EXISTS idx_sales_status ON sales (status);
