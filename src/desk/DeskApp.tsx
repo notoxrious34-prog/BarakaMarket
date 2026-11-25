@@ -18,12 +18,17 @@ import {
   deskApi, buildShopMessage, copyText, groupActivationKey, maskActivationKey,
   setDeskToken, clearDeskToken, getDeskToken, setUnauthorizedHandler, DeskApiError,
   type DeskHealth, type GenerateResult, type LedgerEntryDto, type DeskStats,
-  type AuditEntryDto, type GenerateMeta,
+  type AuditEntryDto, type GenerateMeta, type UnlockResult, type V2Opts, type VerifyResult,
 } from './api';
 import { canonicalizeHwid } from '../core/activation-desk';
 import { canonicalStoreName } from '../core/licensing';
 
-type Tab = 'dashboard' | 'generate' | 'verify' | 'shops' | 'ledger' | 'audit';
+type Tab = 'dashboard' | 'generate' | 'verify' | 'unlock' | 'shops' | 'ledger' | 'audit';
+
+/** Arabic labels for audit actions (v5: unlock + transfer). */
+const AUDIT_AR: Record<AuditEntryDto['action'], string> = {
+  generate: 'توليد', verify: 'تحقق', revoke: 'إلغاء', unlock: 'فكّ', transfer: 'نقل',
+};
 
 const GOLD = 'text-[#d4af37]';
 const card = 'rounded-2xl border border-[#1e293b] bg-[#111722] shadow-[0_18px_50px_-20px_rgba(0,0,0,0.7)]';
@@ -351,12 +356,28 @@ export function DeskApp() {
   const [forceDup, setForceDup] = useState(false);
   const [replaceCtx, setReplaceCtx] = useState<{ oldSeq: number; store: string } | null>(null);
 
+  // v2 envelope options (P0: AK2 issuance from the desk — tier/expiry/maxVer/spare HWID)
+  const [gFormat, setGFormat] = useState<'v1' | 'v2'>('v2');
+  const [gTier, setGTier] = useState('PERP');
+  const [gExpires, setGExpires] = useState('');
+  const [gMaxVer, setGMaxVer] = useState('');
+  const [gHwid2, setGHwid2] = useState('');
+
+  // unlock codes (ADR-050 P3: single-use offline grants)
+  const [uHwid, setUHwid] = useState('');
+  const [uScope, setUScope] = useState<'tamper' | 'drift' | 'emergency'>('drift');
+  const [uDays, setUDays] = useState('7');
+  const [uCounter, setUCounter] = useState('1');
+  const [uBusy, setUBusy] = useState(false);
+  const [uErr, setUErr] = useState<string | null>(null);
+  const [uResult, setUResult] = useState<UnlockResult | null>(null);
+
   // verify form
   const [vStore, setVStore] = useState('');
   const [vHwid, setVHwid] = useState('');
   const [vKey, setVKey] = useState('');
   const [vBusy, setVBusy] = useState(false);
-  const [vResult, setVResult] = useState<{ valid: boolean } | null>(null);
+  const [vResult, setVResult] = useState<VerifyResult | null>(null);
 
   // ledger
   const [entries, setEntries] = useState<LedgerEntryDto[]>([]);
@@ -412,9 +433,9 @@ export function DeskApp() {
     return () => setUnauthorizedHandler(null);
   }, [refreshAll]);
 
-  // Alt+1..6 tab shortcuts (keyboard-first operation)
+  // Alt+1..7 tab shortcuts (keyboard-first operation)
   useEffect(() => {
-    const order: Tab[] = ['dashboard', 'generate', 'verify', 'shops', 'ledger', 'audit'];
+    const order: Tab[] = ['dashboard', 'generate', 'verify', 'unlock', 'shops', 'ledger', 'audit'];
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const n = Number(e.key);
@@ -463,21 +484,40 @@ export function DeskApp() {
     return Object.keys(meta).length > 0 ? meta : undefined;
   }, [gPhone, gWilaya, gNote, gPaid]);
 
+  const buildV2Opts = useCallback((): V2Opts | undefined => {
+    if (gFormat !== 'v2') return undefined;
+    const v: V2Opts = { tier: gTier };
+    if (gExpires.trim()) v.expires = gExpires.trim();
+    if (gMaxVer.trim()) v.maxVer = gMaxVer.trim();
+    if (gHwid2.trim()) v.hwid2 = gHwid2.trim().toUpperCase();
+    return v;
+  }, [gFormat, gTier, gExpires, gMaxVer, gHwid2]);
+
   const runGenerate = useCallback(async (force: boolean) => {
     setGBusy(true);
     setGErr(null);
     try {
-      const r = await deskApi.generate(gStore, gHwid, buildMeta(), force || undefined);
+      // Replacement mode → ONE atomic transfer (no two-active window).
+      if (replaceCtx && gHwidState.canon) {
+        const t = await deskApi.transfer(replaceCtx.oldSeq, gHwidState.canon, {
+          force: force || undefined, format: gFormat, v2: buildV2Opts(),
+        });
+        setGResult({
+          store: t.store, hwid: t.newHwid, key: t.issue.key, seq: t.issue.seq,
+          ts: t.issue.ts, priceDzd: t.priceDzd, meta: null, format: t.format, v2: t.v2,
+        });
+        setConfirmSign(false);
+        setForceDup(false);
+        setReplaceCtx(null);
+        pushToast('ok', `تم النقل الذري: إلغاء #${t.oldSeq} + إصدار #${t.issue.seq} — تحقق ذاتي سليم.`);
+        void refreshAll();
+        return;
+      }
+      const r = await deskApi.generate(gStore, gHwid, buildMeta(), force || undefined, gFormat, buildV2Opts());
       setGResult(r);
       setConfirmSign(false);
       setForceDup(false);
-      pushToast('ok', `تم إصدار المفتاح #${r.seq} — تحقق ذاتي سليم.`);
-      // Replacement flow: the new key is issued — now retire the old one.
-      if (replaceCtx) {
-        const ctx = replaceCtx;
-        setReplaceCtx(null);
-        setRevokeTarget({ seq: ctx.oldSeq, store: ctx.store, hwid: '' });
-      }
+      pushToast('ok', `تم إصدار المفتاح #${r.seq} (${r.format === 'v2' ? 'مظروف v2' : 'كلاسيك v1'}) — تحقق ذاتي سليم.`);
       void refreshAll();
     } catch (e) {
       if (e instanceof DeskApiError && e.status === 409) {
@@ -492,20 +532,45 @@ export function DeskApp() {
     } finally {
       setGBusy(false);
     }
-  }, [gStore, gHwid, buildMeta, pushToast, refreshAll, replaceCtx]);
+  }, [gStore, gHwid, buildMeta, pushToast, refreshAll, replaceCtx, gHwidState.canon, gFormat, buildV2Opts]);
 
   const doVerify = useCallback(async () => {
     setVBusy(true);
     setVResult(null);
     try {
       const r = await deskApi.verify(vStore, vHwid, vKey);
-      setVResult({ valid: r.valid });
+      setVResult(r);
     } catch {
-      setVResult({ valid: false });
+      setVResult({ store: vStore, hwid: null, valid: false, format: null });
     } finally {
       setVBusy(false);
     }
   }, [vStore, vHwid, vKey]);
+
+  const uHwidState = useMemo(() => {
+    if (!uHwid.trim()) return { ok: null as boolean | null, canon: null as string | null };
+    const canon = canonicalizeHwid(uHwid);
+    return { ok: canon !== null, canon };
+  }, [uHwid]);
+
+  const doUnlock = useCallback(async () => {
+    if (!uHwidState.canon) return;
+    setUBusy(true);
+    setUErr(null);
+    setUResult(null);
+    try {
+      const days = Math.max(1, Math.min(30, Number(uDays) || 7));
+      const counter = Math.max(1, Math.floor(Number(uCounter) || 1));
+      const r = await deskApi.unlock(uHwidState.canon, uScope, days, counter);
+      setUResult(r);
+      pushToast('ok', `رمز فكّ ${r.scope} #${r.counter} — استعمال واحد، ينتهي خلال ${days} يوماً.`);
+      void refreshAudit();
+    } catch (e) {
+      setUErr(e instanceof Error ? e.message : 'فشل إصدار الرمز');
+    } finally {
+      setUBusy(false);
+    }
+  }, [uHwidState.canon, uScope, uDays, uCounter, pushToast, refreshAudit]);
 
   const doRevoke = useCallback(async () => {
     if (!revokeTarget) return;
@@ -598,9 +663,10 @@ export function DeskApp() {
     { id: 'dashboard', label: 'اللوحة', icon: <LayoutDashboard size={17} />, hint: 'Alt+1' },
     { id: 'generate', label: 'توليد مفتاح', icon: <KeyRound size={17} />, hint: 'Alt+2' },
     { id: 'verify', label: 'تحقق', icon: <BadgeCheck size={17} />, hint: 'Alt+3' },
-    { id: 'shops', label: `المحلات (${shops.length})`, icon: <Users size={17} />, hint: 'Alt+4' },
-    { id: 'ledger', label: `السجل (${ledgerCount})`, icon: <ScrollText size={17} />, hint: 'Alt+5' },
-    { id: 'audit', label: 'التدقيق', icon: <History size={17} />, hint: 'Alt+6' },
+    { id: 'unlock', label: 'رموز الفكّ', icon: <KeySquare size={17} />, hint: 'Alt+4' },
+    { id: 'shops', label: `المحلات (${shops.length})`, icon: <Users size={17} />, hint: 'Alt+5' },
+    { id: 'ledger', label: `السجل (${ledgerCount})`, icon: <ScrollText size={17} />, hint: 'Alt+6' },
+    { id: 'audit', label: 'التدقيق', icon: <History size={17} />, hint: 'Alt+7' },
   ];
 
   return (
@@ -749,7 +815,7 @@ export function DeskApp() {
           ))}
         </nav>
         <p className="mb-4 flex items-center justify-center gap-1.5 text-[11px] text-slate-600">
-          <Keyboard size={12} /> اختصارات: Alt+1 … Alt+6 للتنقل بين الأقسام
+          <Keyboard size={12} /> اختصارات: Alt+1 … Alt+7 للتنقل بين الأقسام
         </p>
 
         {/* ── Dashboard ──────────────────────────── */}
@@ -849,6 +915,91 @@ export function DeskApp() {
                 )}
               </div>
 
+              {/* format selector: v1 classic vs v2 envelope (ADR-050) */}
+              <div className="mt-3 grid grid-cols-2 gap-2" role="radiogroup" aria-label="صيغة المفتاح">
+                {([
+                  { id: 'v2' as const, t: 'مظروف v2 — موصى به', s: 'طبقة + انتهاء + احتياطية' },
+                  { id: 'v1' as const, t: 'كلاسيك v1', s: 'توافق قديم فقط' },
+                ]).map(o => (
+                  <button
+                    key={o.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={gFormat === o.id}
+                    onClick={() => setGFormat(o.id)}
+                    className={`rounded-xl border px-3 py-2 text-right transition ${
+                      gFormat === o.id
+                        ? 'border-[#d4af37]/70 bg-[#d4af37]/10'
+                        : 'border-[#233145] bg-[#0b0f17] hover:border-slate-500'
+                    }`}
+                  >
+                    <div className={`text-[13px] font-extrabold ${gFormat === o.id ? 'text-[#e8c85a]' : 'text-slate-300'}`}>{o.t}</div>
+                    <div className="text-[11px] text-slate-500">{o.s}</div>
+                  </button>
+                ))}
+              </div>
+
+              {gFormat === 'v2' && (
+                <div className="mt-2.5 grid gap-2.5 rounded-xl border border-[#d4af37]/30 bg-[#d4af37]/[0.04] p-3">
+                  <div className="grid gap-2.5 sm:grid-cols-2">
+                    <div>
+                      <label className={labelCls} htmlFor="g-tier">الطبقة</label>
+                      <select
+                        id="g-tier"
+                        className={`${inputCls} cursor-pointer`}
+                        value={gTier}
+                        onChange={e => setGTier(e.target.value)}
+                      >
+                        <option value="PERP">PERP — دائم</option>
+                        <option value="SUPPORT12">SUPPORT12 — دعم سنوي</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className={labelCls} htmlFor="g-exp">انتهاء الدعم (اختياري)</label>
+                      <input
+                        id="g-exp"
+                        type="date"
+                        className={`${inputCls} ${monoLtr}`}
+                        dir="ltr"
+                        value={gExpires}
+                        onChange={e => setGExpires(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div className="grid gap-2.5 sm:grid-cols-2">
+                    <div>
+                      <label className={labelCls} htmlFor="g-maxver">سقف النسخة (اختياري)</label>
+                      <input
+                        id="g-maxver"
+                        className={`${inputCls} ${monoLtr}`}
+                        dir="ltr"
+                        placeholder="1.10.0"
+                        value={gMaxVer}
+                        onChange={e => setGMaxVer(e.target.value)}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <div>
+                      <label className={labelCls} htmlFor="g-hwid2">بصمة احتياطية hwid2 (اختياري)</label>
+                      <input
+                        id="g-hwid2"
+                        className={`${inputCls} ${monoLtr}`}
+                        dir="ltr"
+                        placeholder="BM-…"
+                        value={gHwid2}
+                        onChange={e => setGHwid2(e.target.value.toUpperCase())}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[11px] leading-relaxed text-slate-500">
+                    الاحتياطية تتيح للزبون استبدال جهازه ذاتياً دون رمز فكّ — قاتلة القفل الكاذب (W2).
+                  </p>
+                </div>
+              )}
+
               {/* duplicate pre-check (server enforces with 409 regardless) */}
               {dupLocal && (
                 <div className="mt-3 flex items-start gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-[13px] text-amber-200">
@@ -935,6 +1086,13 @@ export function DeskApp() {
               <h2 className="mb-1 flex items-center gap-2 text-base font-extrabold">
                 <ShieldCheck size={17} className={GOLD} /> الإيصال
                 {gResult && <span className="rounded-full bg-[#d4af37]/15 px-2.5 py-0.5 text-[11px] font-bold text-[#e8c85a]">#{gResult.seq}</span>}
+                {gResult && (
+                  <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
+                    gResult.format === 'v2' ? 'bg-sky-500/15 text-sky-300' : 'bg-white/5 text-slate-400'
+                  }`}>
+                    {gResult.format === 'v2' ? 'مظروف v2' : 'كلاسيك v1'}
+                  </span>
+                )}
               </h2>
               {!gResult ? (
                 <div className="flex h-[calc(100%-2.5rem)] min-h-56 flex-col items-center justify-center gap-2 text-center text-slate-500">
@@ -965,6 +1123,24 @@ export function DeskApp() {
                       {gResult.meta?.phone && <span className="rounded-full border border-[#233145] px-2 py-0.5">📞 <span dir="ltr">{gResult.meta.phone}</span></span>}
                       {gResult.meta?.wilaya && <span className="rounded-full border border-[#233145] px-2 py-0.5">📍 {gResult.meta.wilaya}</span>}
                       {gResult.meta?.paidDzd !== undefined && <span className="rounded-full border border-[#233145] px-2 py-0.5">💰 {gResult.meta.paidDzd.toLocaleString('fr-FR')} دج</span>}
+                    </div>
+                  )}
+                  {gResult.format === 'v2' && gResult.v2 && (
+                    <div className="flex flex-wrap gap-1.5 text-[11px] font-bold text-slate-400">
+                      <span className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-sky-200">
+                        {gResult.v2.tier === 'PERP' ? 'دائم PERP' : 'دعم سنوي SUPPORT12'}
+                      </span>
+                      {gResult.v2.exp !== null && (
+                        <span className="rounded-full border border-[#233145] px-2 py-0.5" dir="ltr">
+                          حتى {new Date(gResult.v2.exp).toLocaleDateString('fr-FR')}
+                        </span>
+                      )}
+                      {gResult.v2.maxVer && (
+                        <span className="rounded-full border border-[#233145] px-2 py-0.5" dir="ltr">≤ v{gResult.v2.maxVer}</span>
+                      )}
+                      {gResult.v2.hwid2 && (
+                        <span className="rounded-full border border-[#233145] px-2 py-0.5 font-mono" dir="ltr" title="بصمة احتياطية">h2: …{gResult.v2.hwid2.slice(-8)}</span>
+                      )}
                     </div>
                   )}
                   <div className="rounded-xl border border-[#233145] bg-[#0b0f17] p-3">
@@ -1050,11 +1226,126 @@ export function DeskApp() {
               تحقق الآن
             </button>
             {vResult && (
-              <div className={`mt-4 flex items-center justify-center gap-2 rounded-2xl border p-5 text-lg font-extrabold ${
-                vResult.valid ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-red-500/50 bg-red-500/10 text-red-300'
+              <div className={`mt-4 rounded-2xl border p-5 ${
+                vResult.valid ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-red-500/50 bg-red-500/10'
               }`}>
-                {vResult.valid ? <ShieldCheck size={24} /> : <ShieldAlert size={24} />}
-                {vResult.valid ? 'المفتاح سليم — VALID ✅' : 'المفتاح غير صالح — INVALID ❌'}
+                <div className={`flex items-center justify-center gap-2 text-lg font-extrabold ${
+                  vResult.valid ? 'text-emerald-300' : 'text-red-300'
+                }`}>
+                  {vResult.valid ? <ShieldCheck size={24} /> : <ShieldAlert size={24} />}
+                  {vResult.valid ? 'المفتاح سليم — VALID ✅' : 'المفتاح غير صالح — INVALID ❌'}
+                </div>
+                {vResult.format && (
+                  <div className="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-[12px] font-bold">
+                    <span className={`rounded-full px-2.5 py-0.5 ${vResult.format === 'v2' ? 'bg-sky-500/15 text-sky-300' : 'bg-white/5 text-slate-400'}`}>
+                      {vResult.format === 'v2' ? 'مظروف v2' : 'كلاسيك v1'}
+                    </span>
+                    {vResult.format === 'v2' && vResult.tier && (
+                      <span className="rounded-full bg-white/5 px-2.5 py-0.5 text-slate-300">
+                        {vResult.tier === 'PERP' ? 'دائم PERP' : 'دعم سنوي SUPPORT12'}
+                      </span>
+                    )}
+                    {vResult.slot !== undefined && (
+                      <span className="rounded-full bg-white/5 px-2.5 py-0.5 text-slate-300">
+                        {vResult.slot === 1 ? 'البصمة الأساسية' : 'البصمة الاحتياطية'}
+                      </span>
+                    )}
+                    {vResult.maxVer && (
+                      <span className="rounded-full bg-white/5 px-2.5 py-0.5 text-slate-300" dir="ltr">≤ v{vResult.maxVer}</span>
+                    )}
+                    {vResult.expired && (
+                      <span className="rounded-full bg-amber-500/15 px-2.5 py-0.5 text-amber-300">انتهى عقد الدعم — النواة الدائمة لا تتأثر</span>
+                    )}
+                  </div>
+                )}
+                {!vResult.valid && !vResult.format && (
+                  <p className="mt-2 text-center text-[12px] text-slate-500">لا يطابق أي صيغة معروفة (v1 أو AK2).</p>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ── Unlock codes (ADR-050 P3, single-use offline grants) ─ */}
+        {tab === 'unlock' && (
+          <section className={`${card} mx-auto max-w-2xl p-5 sm:p-7`}>
+            <h2 className="mb-1 flex items-center gap-2 text-base font-extrabold">
+              <KeySquare size={17} className={GOLD} /> رمز فكّ لمرة واحدة
+            </h2>
+            <p className="mb-4 text-xs leading-relaxed text-slate-500">
+              للزبون المقفل (عبث ساعة / انحراف بصمة / طوارئ). اقرأ <strong className="text-slate-300">العداد الحالي</strong> من
+              شاشة الترخيص عنده ثم امنح التالي — العداد المستهلَك يُرفض تلقائياً (لا إعادة استعمال).
+              الرموز <strong className="text-slate-300">منح لا تراخيص</strong>: تُسجَّل في التدقيق فقط ولا تدخل دفتر الإيراد.
+            </p>
+            <div>
+              <label className={labelCls} htmlFor="u-hwid">بصمة جهاز الزبون HWID</label>
+              <input
+                id="u-hwid"
+                className={`${inputCls} ${monoLtr} ${uHwid && (uHwidState.ok ? 'border-emerald-500/60' : 'border-red-500/60')}`}
+                dir="ltr"
+                placeholder="BM-XXXX-XXXX-XXXX-XXXX"
+                value={uHwid}
+                onChange={e => setUHwid(e.target.value.toUpperCase())}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <div>
+                <label className={labelCls} htmlFor="u-scope">النطاق</label>
+                <select id="u-scope" className={`${inputCls} cursor-pointer`} value={uScope}
+                  onChange={e => setUScope(e.target.value as typeof uScope)}>
+                  <option value="drift">انحراف بصمة</option>
+                  <option value="tamper">عبث ساعة</option>
+                  <option value="emergency">طوارئ</option>
+                </select>
+              </div>
+              <div>
+                <label className={labelCls} htmlFor="u-days">المدة (أيام 1–30)</label>
+                <input id="u-days" className={`${inputCls} ${monoLtr}`} dir="ltr" inputMode="numeric"
+                  value={uDays} onChange={e => setUDays(e.target.value.replace(/[^0-9]/g, '').slice(0, 2))} autoComplete="off" />
+              </div>
+              <div>
+                <label className={labelCls} htmlFor="u-counter">العداد (التالي بعد عداد الزبون)</label>
+                <input id="u-counter" className={`${inputCls} ${monoLtr}`} dir="ltr" inputMode="numeric"
+                  value={uCounter} onChange={e => setUCounter(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} autoComplete="off" />
+              </div>
+            </div>
+            {uErr && (
+              <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-[13px] font-bold text-red-200">
+                <ShieldAlert size={16} className="mt-0.5 shrink-0" /> {uErr}
+              </div>
+            )}
+            <button
+              type="button"
+              disabled={uBusy || !uHwidState.ok}
+              onClick={() => void doUnlock()}
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-[#d4af37] to-[#b08d2a] px-4 py-3 text-[15px] font-extrabold text-[#0b0f17] transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {uBusy ? <Loader2 size={18} className="animate-spin" /> : <KeySquare size={18} />}
+              {uBusy ? 'جارٍ التوقيع…' : 'إصدار رمز الفكّ'}
+            </button>
+            {uResult && (
+              <div className="mt-4 space-y-2.5">
+                <div className="rounded-xl border border-[#d4af37]/40 bg-[#0b0f17] p-3">
+                  <div className="mb-1 flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-[#e8c85a]">
+                      رمز الفكّ UL — {uResult.scope === 'drift' ? 'انحراف' : uResult.scope === 'tamper' ? 'عبث' : 'طوارئ'} #{uResult.counter}
+                    </span>
+                    <CopyBtn id="u-code" text={uResult.code} title="نسخ الرمز" />
+                  </div>
+                  <div dir="ltr" className={`${monoLtr} break-all text-[13px] font-semibold leading-relaxed text-slate-100`}>
+                    {groupActivationKey(uResult.code)}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5 text-[11px] font-bold text-slate-400">
+                  <span className="rounded-full border border-[#233145] px-2 py-0.5" dir="ltr">
+                    ينتهي {new Date(uResult.exp).toLocaleDateString('fr-FR')}
+                  </span>
+                  <span className="rounded-full border border-amber-500/30 bg-amber-500/5 px-2 py-0.5 text-amber-200">
+                    استعمال واحد — أملِه هاتفياً ولا ترسله كنص دائم
+                  </span>
+                </div>
               </div>
             )}
           </section>
@@ -1193,7 +1484,7 @@ export function DeskApp() {
                           {new Date(a.ts).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })}
                         </td>
                         <td className="px-3 py-2.5 font-bold">
-                          {a.action === 'generate' ? 'توليد' : a.action === 'verify' ? 'تحقق' : 'إلغاء'}
+                          {AUDIT_AR[a.action] ?? a.action}
                         </td>
                         <td className="max-w-40 truncate px-3 py-2.5" title={a.store ?? ''}>{a.store ?? '—'}</td>
                         <td className="px-3 py-2.5 font-mono text-[#e8c85a]" dir="ltr">{a.seq ? `#${a.seq}` : '—'}</td>
@@ -1374,8 +1665,20 @@ export function DeskApp() {
                 <div className="font-extrabold">{canonicalStoreName(gStore)}</div>
               </div>
               <div className="rounded-xl border border-[#233145] bg-[#0b0f17] p-3">
-                <div className="text-[11px] font-bold text-slate-500">HWID</div>
+                <div className="text-[11px] font-bold text-slate-500">HWID {replaceCtx ? 'الجديدة' : ''}</div>
                 <div dir="ltr" className={`${monoLtr} text-sm font-bold`}>{gHwidState.canon}</div>
+              </div>
+              <div className="rounded-xl border border-[#233145] bg-[#0b0f17] p-3">
+                <div className="text-[11px] font-bold text-slate-500">الصيغة</div>
+                <div className="text-[13px] font-extrabold">
+                  {gFormat === 'v2' ? (
+                    <>مظروف v2 — {gTier === 'PERP' ? 'دائم' : 'دعم سنوي'}
+                      {gExpires.trim() && <> · حتى <span dir="ltr">{gExpires.trim()}</span></>}
+                      {gMaxVer.trim() && <> · <span dir="ltr">≤ v{gMaxVer.trim()}</span></>}
+                      {gHwid2.trim() && <> · باحتياطية</>}
+                    </>
+                  ) : 'كلاسيك v1 — توافق قديم'}
+                </div>
               </div>
               {(gPhone.trim() || gWilaya.trim() || gPaid.trim()) && (
                 <div className="rounded-xl border border-[#233145] bg-[#0b0f17] p-3 text-[13px]">
@@ -1390,7 +1693,7 @@ export function DeskApp() {
               )}
               {replaceCtx && (
                 <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-3 text-[13px] font-bold text-sky-200">
-                  استبدال: بعد الإصدار سيُطلب إلغاء #{replaceCtx.oldSeq} مباشرة.
+                  نقل ذري: إلغاء #{replaceCtx.oldSeq} + إصدار البصمة الجديدة في خطوة واحدة — بلا نافذة بصمتين.
                 </div>
               )}
               <p className="text-[12px] text-slate-500">التوقيع نهائي — يُسجَّل في الدفتر المتسلسل مع نسخة احتياطية تلقائية.</p>

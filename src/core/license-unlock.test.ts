@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { buildUnlockPayload, verifyUnlock } from './license-unlock';
+import { buildUnlockPayload, formatUnlockToken, verifyUnlock } from './license-unlock';
 
 const H = 'BM-AAAA-BBBB-CCCC-DDDD';
 
@@ -38,5 +38,14 @@ describe('license-unlock ADR-050: offline codes', () => {
     const parts = bad.split('.');
     const tampered = `${parts[0].slice(0, -4)}AAAA.${parts[1]}`;
     assert.equal((await verifyUnlock(tampered, H, 0, NOW, pubRaw)).ok, false);
+  });
+  it('formatUnlockToken round-trips through verifyUnlock', async () => {
+    const t = { hwid: H, counter: 5, exp: NOW + 86400000, scope: 'emergency' as const };
+    const sig = b64url(crypto.sign(null, Buffer.from(buildUnlockPayload(t)), privateKey));
+    const code = formatUnlockToken(t, sig);
+    assert.match(code, /^UL-[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$/);
+    const v = await verifyUnlock(code, H, 4, NOW, pubRaw);
+    assert.equal(v.ok, true);
+    assert.equal(v.token?.counter, 5);
   });
 });

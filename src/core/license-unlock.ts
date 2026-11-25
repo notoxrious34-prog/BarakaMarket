@@ -38,6 +38,18 @@ function b64urlDecode(s: string): Uint8Array | null {
   }
 }
 
+function b64urlEncode(bytes: Uint8Array): string {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Mint the transport code from token JSON (staff/desk side, signs outside). */
+export function formatUnlockToken(t: UnlockToken, sigB64url: string): string {
+  const json = new TextEncoder().encode(JSON.stringify(t));
+  return `UL-${b64urlEncode(json)}.${sigB64url}`;
+}
+
 function isToken(o: unknown): o is UnlockToken {
   if (typeof o !== 'object' || o === null) return false;
   const t = o as Record<string, unknown>;

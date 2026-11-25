@@ -29,6 +29,20 @@ export interface GenerateMeta {
   note?: string;
 }
 
+export interface V2Info {
+  tier: 'PERP' | 'SUPPORT12';
+  exp: number | null;
+  maxVer: string | null;
+  hwid2: string | null;
+}
+
+export interface V2Opts {
+  tier?: string;
+  expires?: string;
+  maxVer?: string;
+  hwid2?: string;
+}
+
 export interface GenerateResult {
   store: string;
   hwid: string;
@@ -37,12 +51,19 @@ export interface GenerateResult {
   ts: string;
   priceDzd: number;
   meta: GenerateMeta | null;
+  format: 'v1' | 'v2';
+  v2: V2Info | null;
 }
 
 export interface VerifyResult {
   store: string;
   hwid: string | null;
   valid: boolean;
+  format: 'v1' | 'v2' | null;
+  tier?: 'PERP' | 'SUPPORT12';
+  slot?: 1 | 2;
+  expired?: boolean;
+  maxVer?: string | null;
 }
 
 export interface LedgerEntryDto {
@@ -77,7 +98,7 @@ export interface DeskStats {
 
 export interface AuditEntryDto {
   ts: string;
-  action: 'generate' | 'verify' | 'revoke';
+  action: 'generate' | 'verify' | 'revoke' | 'unlock' | 'transfer';
   store?: string;
   hwid?: string;
   seq?: number;
@@ -157,13 +178,42 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+export interface TransferResult {
+  store: string;
+  oldSeq: number;
+  newHwid: string;
+  revokeSeq: number;
+  issue: { key: string; seq: number; ts: string };
+  priceDzd: number;
+  format: 'v1' | 'v2';
+  v2: V2Info | null;
+}
+
+export interface UnlockResult {
+  code: string;
+  hwid: string;
+  scope: 'tamper' | 'drift' | 'emergency';
+  counter: number;
+  exp: number;
+}
+
 export const deskApi = {
   health: () => call<DeskHealth>('/api/desk/health'),
   hwid: () => call<DeskHwid>('/api/desk/hwid'),
-  generate: (store: string, hwid: string, meta?: GenerateMeta, force?: boolean) =>
+  generate: (store: string, hwid: string, meta?: GenerateMeta, force?: boolean, format?: 'v1' | 'v2', v2?: V2Opts) =>
     call<GenerateResult>('/api/desk/generate', {
       method: 'POST',
-      body: JSON.stringify({ store, hwid, meta, force }),
+      body: JSON.stringify({ store, hwid, meta, force, format, v2 }),
+    }),
+  transfer: (oldSeq: number, newHwid: string, opts?: { force?: boolean; format?: 'v1' | 'v2'; v2?: V2Opts }) =>
+    call<TransferResult>('/api/desk/transfer', {
+      method: 'POST',
+      body: JSON.stringify({ oldSeq, newHwid, force: opts?.force, format: opts?.format, v2: opts?.v2 }),
+    }),
+  unlock: (hwid: string, scope: 'tamper' | 'drift' | 'emergency', days: number, counter: number) =>
+    call<UnlockResult>('/api/desk/unlock/issue', {
+      method: 'POST',
+      body: JSON.stringify({ hwid, scope, days, counter }),
     }),
   verify: (store: string, hwid: string, key: string) =>
     call<VerifyResult>('/api/desk/verify', {
@@ -185,19 +235,32 @@ export const deskApi = {
   stats: () => call<DeskStats>('/api/desk/stats'),
 };
 
-/** Segmented, dictation-friendly key form: `AK-XXXX XXXX …` (groups of 4). */
+/** Segmented, dictation-friendly key form. v1: `AK-XXXX XXXX …`; v2: `AK2-<json groups>.<sig groups>`. */
 export function groupActivationKey(key: string): string {
-  const m = /^AK-(.+)$/.exec(key.trim());
-  if (!m) return key;
-  const chunks: string[] = [];
-  for (let i = 0; i < m[1].length; i += 4) chunks.push(m[1].slice(i, i + 4));
-  return `AK-${chunks.join(' ')}`;
+  const m1 = /^AK-(.+)$/.exec(key.trim());
+  if (m1) {
+    const chunks: string[] = [];
+    for (let i = 0; i < m1[1].length; i += 4) chunks.push(m1[1].slice(i, i + 4));
+    return `AK-${chunks.join(' ')}`;
+  }
+  const m2 = /^AK2-(.+)\.(.+)$/.exec(key.trim());
+  if (m2) return `AK2-${chunk4(m2[1])} . ${chunk4(m2[2])}`;
+  const m3 = /^UL-(.+)\.(.+)$/.exec(key.trim());
+  if (m3) return `UL-${chunk4(m3[1])} . ${chunk4(m3[2])}`;
+  return key;
 }
 
-/** Masked key for tables (shoulder-surfing protection): `AK-••••…last8`. */
+function chunk4(s: string): string {
+  const chunks: string[] = [];
+  for (let i = 0; i < s.length; i += 4) chunks.push(s.slice(i, i + 4));
+  return chunks.join(' ');
+}
+
+/** Masked key for tables (shoulder-surfing protection): keeps the scheme prefix + last 8. */
 export function maskActivationKey(key: string): string {
-  const tail = key.replace(/\s/g, '').slice(-8);
-  return `AK-••••…${tail}`;
+  const t = key.replace(/\s/g, '');
+  const prefix = t.startsWith('AK2-') ? 'AK2-' : t.startsWith('UL-') ? 'UL-' : 'AK-';
+  return `${prefix}••••…${t.slice(-8)}`;
 }
 
 /** WhatsApp/SMS message the operator forwards to the shopkeeper. */

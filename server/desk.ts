@@ -33,9 +33,16 @@ import {
   formatActivationKey, validateLicense, canonicalStoreName, LICENSE_PRICE_DZD,
 } from '../src/core/licensing.js';
 import {
-  canonicalizeHwid, ledgerAppend, ledgerVerify, ledgerParse,
+  canonicalizeHwid, ledgerAppend, ledgerVerify, ledgerParse, ledgerTransfer,
   DESK_VERSION, type LedgerEntry, type LedgerMeta,
 } from '../src/core/activation-desk.js';
+import {
+  envelopeFromInput, buildEnvelopePayload, formatEnvelopeKey, validateEnvelopeKey,
+  parseEnvelopeKey, type LicenseTier,
+} from '../src/core/license-envelope.js';
+import {
+  buildUnlockPayload, formatUnlockToken, verifyUnlock, type UnlockScope,
+} from '../src/core/license-unlock.js';
 
 export const DESK_PORT = Number(process.env.DESK_PORT ?? 3200);
 export const DESK_TOKEN_HEADER = 'x-baraka-desk';
@@ -153,7 +160,7 @@ function writeEntry(e: LedgerEntry): void {
 
 export interface AuditRow {
   ts: string;
-  action: 'generate' | 'verify' | 'revoke';
+  action: 'generate' | 'verify' | 'revoke' | 'unlock' | 'transfer';
   store?: string;
   hwid?: string;
   seq?: number;
@@ -235,6 +242,64 @@ function sanitizeMeta(raw: unknown): LedgerMeta | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+class DeskHttpError extends Error {
+  constructor(public status: number, msg: string) { super(msg); }
+}
+
+export interface V2MintInfo {
+  tier: LicenseTier;
+  exp: number | null;
+  maxVer: string | null;
+  hwid2: string | null;
+}
+
+type MintFormat = 'v1' | 'v2';
+
+/**
+ * Shared minter for /generate and /transfer: v1 classic (`STORE||HWID`)
+ * or v2 envelope (tier/expiry/maxVer/spare HWID, ADR-050). Throws
+ * DeskHttpError(400) on bad policy input.
+ */
+async function mintLicenseKey(opts: {
+  store: string; hwid1: string; format: MintFormat;
+  tier?: unknown; expires?: unknown; maxVer?: unknown; hwid2?: unknown;
+  key: NonNullable<ReturnType<typeof keySource>['key']>; nowMs: number;
+}): Promise<{ key: string; v2: V2MintInfo | null }> {
+  if (opts.format === 'v1') {
+    return {
+      key: formatActivationKey(sign(null, buildLicensePayload(opts.store, opts.hwid1), opts.key).toString('base64url')),
+      v2: null,
+    };
+  }
+  const tierRaw = typeof opts.tier === 'string' ? opts.tier.toUpperCase() : 'PERP';
+  if (tierRaw !== 'PERP' && tierRaw !== 'SUPPORT12') throw new DeskHttpError(400, 'الطبقة: PERP أو SUPPORT12.');
+  let exp: number | null = null;
+  if (opts.expires !== undefined && opts.expires !== null && opts.expires !== '') {
+    const raw = typeof opts.expires === 'number' ? opts.expires : Date.parse(`${String(opts.expires).slice(0, 10)}T23:59:59Z`);
+    if (!Number.isInteger(raw) || raw <= opts.nowMs) throw new DeskHttpError(400, 'تاريخ الانتهاء يجب أن يكون في المستقبل (YYYY-MM-DD).');
+    exp = raw;
+  }
+  const maxVer = typeof opts.maxVer === 'string' && opts.maxVer.trim() ? opts.maxVer.trim() : null;
+  if (maxVer !== null && !/^\d+\.\d+\.\d+$/.test(maxVer)) throw new DeskHttpError(400, 'سقف النسخة بصيغة X.Y.Z (مثال: 1.10.0).');
+  let hwid2: string | null = null;
+  if (typeof opts.hwid2 === 'string' && opts.hwid2.trim()) {
+    hwid2 = canonicalizeHwid(opts.hwid2);
+    if (!hwid2) throw new DeskHttpError(400, 'البصمة الاحتياطية (hwid2) غير صالحة.');
+    if (hwid2 === opts.hwid1) throw new DeskHttpError(400, 'البصمة الاحتياطية يجب أن تختلف عن الأساسية.');
+  }
+  const env = envelopeFromInput(opts.store, {
+    tier: tierRaw, issuedMs: opts.nowMs, expiresMs: exp, maxVer, hwid1: opts.hwid1, hwid2,
+  });
+  if (!env) throw new DeskHttpError(400, 'مدخلات المظروف v2 غير صالحة — راجع الطبقة والتواريخ والبصمات.');
+  const sig = sign(null, Buffer.from(buildEnvelopePayload(env)), opts.key).toString('base64url');
+  return { key: formatEnvelopeKey(env, sig), v2: { tier: env.tier, exp: env.exp, maxVer: env.maxVer, hwid2: env.h2 } };
+}
+
+async function selfCheckOk(store: string, hwid: string, key: string, format: MintFormat, nowMs: number): Promise<boolean> {
+  if (format === 'v1') return validateLicense(store, hwid, key);
+  return (await validateEnvelopeKey(store, hwid, key, nowMs)).ok;
+}
+
 export function createDeskApp(): express.Express {
   const app = express();
   app.use(express.json({ limit: '256kb' }));
@@ -270,8 +335,8 @@ export function createDeskApp(): express.Express {
   });
 
   app.post('/api/desk/generate', needToken, async (req, res) => {
-    const { store: rawStore, hwid: rawHwid, meta: rawMeta, force } = (req.body ?? {}) as {
-      store?: unknown; hwid?: unknown; meta?: unknown; force?: unknown;
+    const { store: rawStore, hwid: rawHwid, meta: rawMeta, force, format: rawFormat, v2: rawV2 } = (req.body ?? {}) as {
+      store?: unknown; hwid?: unknown; meta?: unknown; force?: unknown; format?: unknown; v2?: unknown;
     };
     if (typeof rawStore !== 'string' || !rawStore.trim()) {
       res.status(400).json({ error: 'اسم المحل مطلوب.' });
@@ -282,11 +347,16 @@ export function createDeskApp(): express.Express {
       res.status(400).json({ error: 'HWID غير صالح — الصيغة BM-XXXX-XXXX-XXXX-XXXX (الشرطات اختيارية).' });
       return;
     }
+    const format: MintFormat = rawFormat === 'v2' ? 'v2' : 'v1';
+    const v2raw = (typeof rawV2 === 'object' && rawV2 !== null ? rawV2 : {}) as {
+      tier?: unknown; expires?: unknown; maxVer?: unknown; hwid2?: unknown;
+    };
     const store = canonicalStoreName(rawStore);
     const meta = sanitizeMeta(rawMeta);
     try {
       const out = await withLedgerLock(async () => {
-        const dup = findActiveIssue(readLedger(), store, hwid);
+        const entries = readLedger();
+        const dup = findActiveIssue(entries, store, hwid);
         if (dup && force !== true) {
           audit({ action: 'generate', store, hwid, ok: false, detail: `duplicate refused (active #${dup.seq})` });
           res.status(409).json({ error: `إصدار نشط موجود مسبقاً (#${dup.seq} — ${dup.ts.slice(0, 10)}). أكّد التجاوز للإصدار المكرر.`, existingSeq: dup.seq });
@@ -298,29 +368,43 @@ export function createDeskApp(): express.Express {
           res.status(503).json({ error: `المفتاح الخاص غير متوفر (${source}).` });
           return null;
         }
-        const license = formatActivationKey(sign(null, buildLicensePayload(store, hwid), key).toString('base64url'));
-        if (!(await validateLicense(store, hwid, license))) {
+        const nowMs = Date.now();
+        let minted: { key: string; v2: V2MintInfo | null };
+        try {
+          minted = await mintLicenseKey({ store, hwid1: hwid, format, ...v2raw, key, nowMs });
+        } catch (e) {
+          if (e instanceof DeskHttpError) {
+            audit({ action: 'generate', store, hwid, ok: false, detail: `bad v2 input: ${e.message}` });
+            res.status(e.status).json({ error: e.message });
+            return null;
+          }
+          throw e;
+        }
+        if (!(await selfCheckOk(store, hwid, minted.key, format, nowMs))) {
           audit({ action: 'generate', store, hwid, ok: false, detail: 'SELF-CHECK FAILED' });
           res.status(500).json({ error: 'SELF-CHECK FAILED — المفتاح لا يتحقق ذاتياً. توقف فوري، لا توزع.' });
           return null;
         }
         try {
-          const entry = ledgerAppend(readLedger(), {
-            ts: new Date().toISOString(), kind: 'issue', store, hwid, key: license, meta,
+          const entry = ledgerAppend(entries, {
+            ts: new Date(nowMs).toISOString(), kind: 'issue', store, hwid, key: minted.key, meta,
           });
           writeEntry(entry);
           audit({
             action: 'generate', store, hwid, seq: entry.seq, ok: true,
-            detail: dup ? `duplicate override of #${dup.seq}` : undefined,
+            detail: dup ? `duplicate override of #${dup.seq}` : format === 'v2' ? `v2 ${minted.v2!.tier}` : undefined,
           });
-          return entry;
+          return { entry, v2: minted.v2 };
         } catch (e) {
           audit({ action: 'generate', store, hwid, ok: false, detail: `ledger write failed: ${(e as Error).message}` });
           res.status(500).json({ error: `تم التوقيع لكن تعذر الكتابة في السجل: ${(e as Error).message}` });
           return null;
         }
       });
-      if (out) res.json({ store, hwid, key: out.key, seq: out.seq, ts: out.ts, priceDzd: LICENSE_PRICE_DZD, meta: out.meta ?? null });
+      if (out) res.json({
+        store, hwid, key: out.entry.key, seq: out.entry.seq, ts: out.entry.ts,
+        priceDzd: LICENSE_PRICE_DZD, meta: out.entry.meta ?? null, format, v2: out.v2,
+      });
     } catch (e) {
       res.status(500).json({ error: `فشل داخلي: ${(e as Error).message}` });
     }
@@ -331,9 +415,29 @@ export function createDeskApp(): express.Express {
     const store = typeof rawStore === 'string' ? rawStore : '';
     const hwid = typeof rawHwid === 'string' ? canonicalizeHwid(rawHwid) : null;
     const key = typeof rawKey === 'string' ? rawKey.trim() : '';
-    const valid = !!hwid && !!key && (await validateLicense(store, hwid, key));
+    const nowMs = Date.now();
+    let valid = false;
+    let format: 'v1' | 'v2' | null = null;
+    let tier: LicenseTier | undefined;
+    let slot: 1 | 2 | undefined;
+    let expired = false;
+    let maxVer: string | null = null;
+    if (hwid && key) {
+      if (await validateLicense(store, hwid, key)) {
+        valid = true;
+        format = 'v1';
+      } else if (parseEnvelopeKey(key) !== null) {
+        format = 'v2';
+        const v = await validateEnvelopeKey(store, hwid, key, nowMs);
+        valid = v.ok;
+        tier = v.tier;
+        slot = v.slot;
+        expired = v.expired === true;
+        maxVer = v.maxVer ?? null;
+      }
+    }
     audit({ action: 'verify', store: canonicalStoreName(store), hwid: hwid ?? undefined, ok: valid });
-    res.json({ store: canonicalStoreName(store), hwid, valid });
+    res.json({ store: canonicalStoreName(store), hwid, valid, format, tier, slot, expired, maxVer });
   });
 
   app.get('/api/desk/ledger', (req, res) => {
@@ -388,6 +492,149 @@ export function createDeskApp(): express.Express {
         return mark;
       });
       if (marker) res.json({ marker });
+    } catch (e) {
+      res.status(500).json({ error: `فشل داخلي: ${(e as Error).message}` });
+    }
+  });
+
+  /**
+   * Mint a single-use offline unlock code (ADR-050 P3): `UL-<json>.<sig>`
+   * over (hwid||counter||exp||scope). Audit-only by design: codes are
+   * grants, not licenses, so they stay out of the revenue ledger.
+   * The operator reads the client's CURRENT counter off its licence screen
+   * and mints counter+1 (replay of a consumed counter is refused).
+   */
+  app.post('/api/desk/unlock/issue', needToken, async (req, res) => {
+    const { hwid: rawHwid, scope: rawScope, days: rawDays, counter: rawCounter } = (req.body ?? {}) as {
+      hwid?: unknown; scope?: unknown; days?: unknown; counter?: unknown;
+    };
+    const hwid = typeof rawHwid === 'string' ? canonicalizeHwid(rawHwid) : null;
+    if (!hwid) {
+      res.status(400).json({ error: 'HWID غير صالح — الصيغة BM-XXXX-XXXX-XXXX-XXXX.' });
+      return;
+    }
+    if (rawScope !== 'tamper' && rawScope !== 'drift' && rawScope !== 'emergency') {
+      res.status(400).json({ error: 'النطاق: tamper (عبث ساعة) أو drift (انحراف بصمة) أو emergency (طوارئ).' });
+      return;
+    }
+    const scope = rawScope as UnlockScope;
+    const days = rawDays === undefined ? 7 : Number(rawDays);
+    if (!Number.isInteger(days) || days < 1 || days > 30) {
+      res.status(400).json({ error: 'المدة 1–30 يوماً (الافتراضي 7).' });
+      return;
+    }
+    const counter = rawCounter === undefined ? 1 : Number(rawCounter);
+    if (!Number.isInteger(counter) || counter < 1) {
+      res.status(400).json({ error: 'العداد عدد صحيح ≥ 1 (خذ التالي بعد عداد الزبون).' });
+      return;
+    }
+    const { key, source } = keySource();
+    if (!key) {
+      audit({ action: 'unlock', hwid, ok: false, detail: 'private key missing' });
+      res.status(503).json({ error: `المفتاح الخاص غير متوفر (${source}).` });
+      return;
+    }
+    const nowMs = Date.now();
+    const token = { hwid, counter, exp: nowMs + days * 86400000, scope };
+    const sig = sign(null, Buffer.from(buildUnlockPayload(token)), key).toString('base64url');
+    const code = formatUnlockToken(token, sig);
+    if (!((await verifyUnlock(code, hwid, counter - 1, nowMs)).ok)) {
+      audit({ action: 'unlock', hwid, ok: false, detail: 'SELF-CHECK FAILED' });
+      res.status(500).json({ error: 'SELF-CHECK FAILED — الرمز لا يتحقق ذاتياً. توقف فوري.' });
+      return;
+    }
+    audit({ action: 'unlock', hwid, ok: true, detail: `${scope} #${counter} (${days}d)` });
+    res.json({ code, hwid, scope, counter, exp: token.exp });
+  });
+
+  /**
+   * Atomic replacement (ADR-050 transfer): retire #oldSeq AND issue the new
+   * HWID as one adjacent pair — no window with two active fingerprints.
+   * The UI replacement flow calls this instead of issue-then-revoke.
+   */
+  app.post('/api/desk/transfer', needToken, async (req, res) => {
+    const { oldSeq: rawOld, newHwid: rawNew, force, format: rawFormat, v2: rawV2 } = (req.body ?? {}) as {
+      oldSeq?: unknown; newHwid?: unknown; force?: unknown; format?: unknown; v2?: unknown;
+    };
+    const oldSeq = Number(rawOld);
+    if (!Number.isInteger(oldSeq) || oldSeq < 1) {
+      res.status(400).json({ error: 'رقم الإصدار القديم (oldSeq) مطلوب.' });
+      return;
+    }
+    const newHwid = typeof rawNew === 'string' ? canonicalizeHwid(rawNew) : null;
+    if (!newHwid) {
+      res.status(400).json({ error: 'البصمة الجديدة غير صالحة — الصيغة BM-XXXX-XXXX-XXXX-XXXX.' });
+      return;
+    }
+    const format: MintFormat = rawFormat === 'v2' ? 'v2' : 'v1';
+    const v2raw = (typeof rawV2 === 'object' && rawV2 !== null ? rawV2 : {}) as {
+      tier?: unknown; expires?: unknown; maxVer?: unknown; hwid2?: unknown;
+    };
+    try {
+      const out = await withLedgerLock(async () => {
+        const entries = readLedger();
+        const target = entries.find(e => e.seq === oldSeq && e.kind === 'issue');
+        if (!target) {
+          res.status(404).json({ error: `لا يوجد إصدار بالرقم #${oldSeq}.` });
+          return null;
+        }
+        if (findActiveIssue(entries, target.store, target.hwid)?.seq !== oldSeq) {
+          res.status(409).json({ error: `الإصدار #${oldSeq} ملغي مسبقاً أو مستبدَل.` });
+          return null;
+        }
+        if (newHwid === target.hwid) {
+          res.status(400).json({ error: 'البصمة الجديدة مطابقة للقديمة — للنقل يجب أن تختلف (وللتجديد استخدم توليد + تجاوز).' });
+          return null;
+        }
+        const dup = findActiveIssue(entries, target.store, newHwid);
+        if (dup && force !== true) {
+          res.status(409).json({ error: `البصمة الجديدة مفعّلة مسبقاً (#${dup.seq}). أكّد التجاوز.`, existingSeq: dup.seq });
+          return null;
+        }
+        const { key, source } = keySource();
+        if (!key) {
+          audit({ action: 'transfer', store: target.store, hwid: newHwid, ok: false, detail: 'private key missing' });
+          res.status(503).json({ error: `المفتاح الخاص غير متوفر (${source}).` });
+          return null;
+        }
+        const nowMs = Date.now();
+        let minted: { key: string; v2: V2MintInfo | null };
+        try {
+          minted = await mintLicenseKey({ store: target.store, hwid1: newHwid, format, ...v2raw, key, nowMs });
+        } catch (e) {
+          if (e instanceof DeskHttpError) {
+            res.status(e.status).json({ error: e.message });
+            return null;
+          }
+          throw e;
+        }
+        if (!(await selfCheckOk(target.store, newHwid, minted.key, format, nowMs))) {
+          audit({ action: 'transfer', store: target.store, hwid: newHwid, ok: false, detail: 'SELF-CHECK FAILED' });
+          res.status(500).json({ error: 'SELF-CHECK FAILED — المفتاح لا يتحقق ذاتياً. توقف فوري، لا توزع.' });
+          return null;
+        }
+        try {
+          const { revoke, issue } = ledgerTransfer(entries, {
+            ts: new Date(nowMs).toISOString(), store: target.store, oldSeq,
+            newHwid, newKey: minted.key, note: `transfer #${oldSeq} → new HWID (operator)`,
+          });
+          writeEntry(revoke);
+          writeEntry(issue);
+          audit({ action: 'transfer', store: target.store, hwid: newHwid, seq: issue.seq, ok: true, detail: `retired #${oldSeq}` });
+          return { revoke, issue, v2: minted.v2 };
+        } catch (e) {
+          audit({ action: 'transfer', store: target.store, hwid: newHwid, ok: false, detail: `ledger write failed: ${(e as Error).message}` });
+          res.status(500).json({ error: `تعذر الكتابة في السجل: ${(e as Error).message}` });
+          return null;
+        }
+      });
+      if (out) res.json({
+        store: out.issue.store, oldSeq, newHwid,
+        revokeSeq: out.revoke.seq, issue: {
+          key: out.issue.key, seq: out.issue.seq, ts: out.issue.ts,
+        },
+        priceDzd: LICENSE_PRICE_DZD, format, v2: out.v2,
+      });
     } catch (e) {
       res.status(500).json({ error: `فشل داخلي: ${(e as Error).message}` });
     }
